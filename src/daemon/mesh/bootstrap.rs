@@ -40,6 +40,16 @@ const BLOB_GC_INTERVAL: Duration = Duration::from_secs(600);
 pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) -> Result<()> {
     let overrides = Overrides::default();
 
+    // Claim the process-wide IPC endpoint before constructing anything that
+    // changes host state. In particular, a second daemon must fail before it
+    // creates a TUN, installs routes, or rewrites DNS. The Unix binder probes a
+    // live socket instead of unlinking it; Windows' first pipe instance is the
+    // equivalent exclusive claim.
+    #[cfg(unix)]
+    let ipc = bind_ipc_socket(&ipc::socket_path()).await?;
+    #[cfg(windows)]
+    let ipc = claim_daemon_pipe()?;
+
     // Repair a leftover `/etc/resolv.conf` before anything reads it. A hard kill
     // or reboot leaves ours in place (nameserver = our own Magic DNS), and the
     // endpoint's DNS resolver snapshots the file once at construction, so
@@ -93,7 +103,7 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
         spawn_auto_update(daemon.shutdown_token.clone());
     }
 
-    let result = serve_ipc(&daemon, token).await;
+    let result = serve_ipc(&daemon, token, ipc).await;
 
     // Close connections while protocol handlers flush their persistent state.
     daemon.shutdown_and_close().await;
@@ -841,13 +851,17 @@ async fn spawn_metrics_server(
     }
 }
 
-/// Bind the IPC Unix socket and serve client requests until the daemon-wide
-/// `token` is cancelled. On shutdown, put the VPN on standby (revert DNS, drop
-/// connections, bring the TUN down) and remove the socket file. Each request is
-/// handled on its own task so a slow client can't block the accept loop.
+/// Serve client requests on the IPC socket claimed at the start of
+/// [`run_daemon`] until the daemon-wide `token` is cancelled. On shutdown, put
+/// the VPN on standby (revert DNS, drop connections, bring the TUN down) and
+/// remove the socket file. Each request is handled on its own task so a slow
+/// client can't block the accept loop.
 #[cfg(unix)]
-async fn serve_ipc(daemon: &Arc<Daemon>, token: CancellationToken) -> Result<()> {
-    let socket = bind_ipc_socket(&ipc::socket_path()).await?;
+async fn serve_ipc(
+    daemon: &Arc<Daemon>,
+    token: CancellationToken,
+    socket: IpcSocket,
+) -> Result<()> {
     let result = accept_ipc(socket, daemon, token, IpcHost::Daemon).await;
     daemon.deactivate().await;
     result
@@ -1263,12 +1277,11 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
 }
 
 #[cfg(windows)]
-async fn serve_ipc(daemon: &Arc<Daemon>, token: CancellationToken) -> Result<()> {
-    let pipe_name = ipc::socket_path();
-    let pipe_name = pipe_name.to_string_lossy().into_owned();
+async fn serve_ipc(daemon: &Arc<Daemon>, token: CancellationToken, ipc: DaemonPipe) -> Result<()> {
+    let pipe_name = ipc.name;
     let staging_dir = prepare_ipc_upload_dir()?;
     sweep_ipc_upload_orphans(&staging_dir);
-    let mut server = create_named_pipe(&pipe_name, true)?;
+    let mut server = ipc.server;
     let mut standby = create_named_pipe(&pipe_name, false)?;
     tracing::info!(pipe = %pipe_name, "IPC named pipe listening");
     loop {
@@ -1333,6 +1346,23 @@ async fn serve_ipc(daemon: &Arc<Daemon>, token: CancellationToken) -> Result<()>
             }
         }
     }
+}
+
+#[cfg(windows)]
+struct DaemonPipe {
+    name: String,
+    server: NamedPipeServer,
+}
+
+/// Claim the named pipe before the daemon constructs its Wintun adapter. The
+/// first-instance flag makes this the Windows equivalent of the exclusive Unix
+/// socket claim above.
+#[cfg(windows)]
+fn claim_daemon_pipe() -> Result<DaemonPipe> {
+    let name = ipc::socket_path().to_string_lossy().into_owned();
+    let server = create_named_pipe(&name, true)
+        .context("could not claim the Rayfish IPC pipe; another instance may already be running")?;
+    Ok(DaemonPipe { name, server })
 }
 
 #[cfg(windows)]
