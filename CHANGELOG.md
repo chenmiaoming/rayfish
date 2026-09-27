@@ -43,6 +43,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Starting a second daemon now fails before it creates another TUN interface or
+  changes routes and DNS, leaving the running VPN and its IPC socket intact.
+
 - The macOS direct tunnel starts correctly when connecting from the app.
 
 - Mesh SSH honors a peer's grants across all verified shared networks, even when
