@@ -49,6 +49,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Managed machines can join another network while already connected to its
+  coordinator through a different network.
+
 - mDNS discovery can be turned on or off without interrupting the VPN or existing peer connections.
 
 - The macOS app serves mesh SSH through a separate helper so macOS no longer
@@ -83,6 +86,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Commands that target network members accept their hostnames consistently.**
   Admin grants now accept names, and network-scoped commands do not resolve a
   duplicate name from another network.
+
+### Security
+
+- Network invite secrets are no longer written to debug logs during joins.
 
 ### Performance
 
