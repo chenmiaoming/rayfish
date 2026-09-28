@@ -572,7 +572,8 @@ pub(crate) async fn ipc_apply(
         let resolve = |identity: &str| -> Vec<String> {
             resolve_identity_hosts(&status_networks, net_name, &self_id, identity)
         };
-        let (efw, empty_aliases) = apply::expand_firewall(fw, &net_aliases, &spec.groups, &resolve);
+        let (efw, empty_aliases) =
+            apply::expand_firewall(fw, &net_aliases, &spec.groups, &resolve)?;
         for a in empty_aliases {
             eprintln!(
                 "{}  {net_name}: alias '{a}' has no joined devices yet; its rules are skipped",

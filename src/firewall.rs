@@ -103,9 +103,9 @@ pub enum PeerFilter {
     },
 }
 
-/// Parse `*-host-a,host-b` as a wildcard with excluded peer hostnames.
-/// Ordinary peer selectors return `None`.
-pub fn parse_excluded_peers(selector: &str) -> Result<Option<Vec<MachineHostname>>> {
+/// Parse the terms of a wildcard exclusion. `ray apply` expands group and alias
+/// names before validating the resulting hostnames.
+pub fn parse_excluded_peer_terms(selector: &str) -> Result<Option<Vec<&str>>> {
     if !selector.starts_with("*-") {
         return Ok(None);
     }
@@ -113,14 +113,21 @@ pub fn parse_excluded_peers(selector: &str) -> Result<Option<Vec<MachineHostname
         tag("*-"),
         separated_list1(
             char::<&str, NomError<&str>>(','),
-            take_while1(|character: char| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            }),
+            take_while1(|character: char| character != ','),
         ),
     ))
     .parse(selector)
     .map_err(|_| anyhow::anyhow!("invalid excluded-peer selector '{selector}'"))?;
-    let mut hosts = exclusions
+    Ok(Some(exclusions))
+}
+
+/// Parse `*-host-a,host-b` as a wildcard with excluded peer hostnames.
+/// Ordinary peer selectors return `None`.
+pub fn parse_excluded_peers(selector: &str) -> Result<Option<Vec<MachineHostname>>> {
+    let Some(terms) = parse_excluded_peer_terms(selector)? else {
+        return Ok(None);
+    };
+    let mut hosts = terms
         .into_iter()
         .map(|host| {
             host.parse::<MachineHostname>()
