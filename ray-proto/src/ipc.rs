@@ -1240,6 +1240,12 @@ impl ManagedMachineSelector {
     }
 }
 
+impl From<EndpointId> for ManagedMachineSelector {
+    fn from(identity: EndpointId) -> Self {
+        Self(identity.to_string())
+    }
+}
+
 impl AsRef<str> for ManagedMachineSelector {
     fn as_ref(&self) -> &str {
         &self.0

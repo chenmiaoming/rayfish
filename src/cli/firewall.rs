@@ -714,8 +714,7 @@ pub(crate) async fn ipc_apply(
             if let Some(managed_machine) =
                 managed_machine_for_hostname(status_network, &host, &managed_machines)
             {
-                let machine =
-                    ipc::ManagedMachineSelector::new(managed_machine.identity.to_string());
+                let machine = managed_machine.identity.into();
                 let network = ipc::NetworkName::new(net_name.clone());
                 match ipc_delegated_leave_request(&machine, &network).await {
                     Ok(message) => println!("{}  {message}", style::faint("managed:")),
@@ -761,7 +760,7 @@ pub(crate) async fn ipc_apply(
             };
             let has_grants = !grants.is_empty();
             let request = ipc::IpcMessage::DelegatedSshApply {
-                machine: ipc::ManagedMachineSelector::new(machine.identity.to_string()),
+                machine: machine.identity.into(),
                 network: ipc::NetworkName::new(net_name.clone()),
                 grants,
             };
