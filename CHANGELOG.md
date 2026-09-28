@@ -12,6 +12,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   machines enables mesh SSH and permits the named peers to log in as the listed
   local accounts. Removing a grant from the spec removes that managed grant.
 
+- Pending-join queue evictions are now exposed through the
+  `pending_joins_evicted` metric, making approval-queue saturation observable.
+
+- Firewall suggestions accept `*-host-a,host-b` in `allows` to allow every
+  network peer except the named hosts, including peers that join later. Paired
+  devices sharing a user identity are excluded together. `ray apply` also accepts
+  groups and aliases in exclusions and expands them to joined hostnames.
+
+- `ray dns partial` resolves explicit `.ray` names without adding search domains
+  for bare peer names. `ray config set dns partial` selects the same mode.
+
 - `ray up --enable-ssh` enables and saves mesh SSH while bringing the node up.
   Peer and Unix-user access still follows the existing SSH allow rules.
 
@@ -41,6 +52,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `ray status` shows managed machines only with `--machines`.
+
 - **The project README is now a short overview and install guide.** It links
   directly to the macOS DMG, Windows installer, and full Rayfish documentation.
 
@@ -52,6 +65,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inventory recovery require both endpoints to support v2.
 
 ### Fixed
+
+- Managed machines can join another network while already connected to its
+  coordinator through a different network.
 
 - mDNS discovery can be turned on or off without interrupting the VPN or existing peer connections.
 
@@ -87,6 +103,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Commands that target network members accept their hostnames consistently.**
   Admin grants now accept names, and network-scoped commands do not resolve a
   duplicate name from another network.
+
+### Security
+
+- Network invite secrets are no longer written to debug logs during joins.
 
 ### Performance
 

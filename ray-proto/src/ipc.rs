@@ -361,7 +361,7 @@ pub enum IpcMessage {
     },
     /// Replace the apply-managed mesh SSH grants on an enrolled machine.
     DelegatedSshApply {
-        machine: ManagedMachineSelector,
+        machine: EndpointId,
         network: NetworkName,
         grants: BTreeMap<String, Vec<String>>,
     },

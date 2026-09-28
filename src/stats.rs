@@ -112,6 +112,8 @@ pub struct ForwardMetrics {
     pub lazy_dials_failed: Counter,
     /// Peer connections closed by the on-demand idle reaper
     pub idle_teardowns: Counter,
+    /// Pending join requests evicted from the bounded approval queue
+    pub pending_joins_evicted: Counter,
 }
 
 impl ForwardMetrics {
@@ -145,6 +147,11 @@ impl ForwardMetrics {
     /// Record a connection closed by the idle reaper.
     pub fn record_idle_teardown(&self) {
         self.idle_teardowns.inc();
+    }
+
+    /// Record a pending join request evicted due to queue capacity.
+    pub fn record_pending_join_eviction(&self) {
+        self.pending_joins_evicted.inc();
     }
 
     fn drop_count(&self, reason: DropReason) -> u64 {
@@ -387,5 +394,14 @@ mod tests {
             }
         });
         assert_eq!(counted, DropReason::ALL.len());
+    }
+
+    #[test]
+    fn test_record_pending_join_eviction() {
+        let stats = ForwardMetrics::default();
+        assert_eq!(stats.pending_joins_evicted.get(), 0);
+        stats.record_pending_join_eviction();
+        stats.record_pending_join_eviction();
+        assert_eq!(stats.pending_joins_evicted.get(), 2);
     }
 }

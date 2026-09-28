@@ -483,10 +483,15 @@ pub(crate) async fn ipc_firewall_suggest(
     let entry = suggestions.entry(subject.to_string()).or_default();
     for a in &allow {
         let (peer, ports) = parse_suggest_token(a, "--allow")?;
+        firewall::parse_excluded_peers(&peer)?;
         entry.allows.insert(peer, ports);
     }
     for d in &deny {
         let (peer, ports) = parse_suggest_token(d, "--deny")?;
+        anyhow::ensure!(
+            firewall::parse_excluded_peers(&peer)?.is_none(),
+            "excluded-peer selector '{peer}' is only valid in allows"
+        );
         entry.denies.insert(peer, ports);
     }
     // Drop a now-empty subject so removing all of a host's rules clears it.
@@ -567,7 +572,8 @@ pub(crate) async fn ipc_apply(
         let resolve = |identity: &str| -> Vec<String> {
             resolve_identity_hosts(&status_networks, net_name, &self_id, identity)
         };
-        let (efw, empty_aliases) = apply::expand_firewall(fw, &net_aliases, &spec.groups, &resolve);
+        let (efw, empty_aliases) =
+            apply::expand_firewall(fw, &net_aliases, &spec.groups, &resolve)?;
         for a in empty_aliases {
             eprintln!(
                 "{}  {net_name}: alias '{a}' has no joined devices yet; its rules are skipped",
@@ -736,13 +742,7 @@ pub(crate) async fn ipc_apply(
         }
 
         for host in active_hosts {
-            let mut grants = net_firewall
-                .get("*")
-                .map(|rules| rules.ssh.clone())
-                .unwrap_or_default();
-            if let Some(rules) = net_firewall.get(host.as_ref()) {
-                grants.extend(rules.ssh.clone());
-            }
+            let grants = apply::ssh_grants_for_host(net_firewall, host.as_ref());
             let status_network = status_networks
                 .iter()
                 .find(|network| network.name == *net_name);
@@ -760,7 +760,7 @@ pub(crate) async fn ipc_apply(
             };
             let has_grants = !grants.is_empty();
             let request = ipc::IpcMessage::DelegatedSshApply {
-                machine: machine.identity.into(),
+                machine: machine.identity,
                 network: ipc::NetworkName::new(net_name.clone()),
                 grants,
             };
@@ -846,19 +846,23 @@ fn managed_machine_for_hostname<'a>(
     hostname: &ipc::MachineHostname,
     managed_machines: &'a [ipc::ManagedMachineInfo],
 ) -> Option<&'a ipc::ManagedMachineInfo> {
+    if let Some(network) = network {
+        if network.my_hostname.as_deref() == Some(hostname.as_ref()) {
+            return None;
+        }
+        if let Some(peer) = network
+            .peers
+            .iter()
+            .find(|peer| peer.hostname.as_deref() == Some(hostname.as_ref()))
+        {
+            return managed_machines
+                .iter()
+                .find(|machine| machine.identity == peer.endpoint_id);
+        }
+    }
     managed_machines
         .iter()
         .find(|machine| machine.hostname == *hostname)
-        .or_else(|| {
-            let endpoint_id = network?
-                .peers
-                .iter()
-                .find(|peer| peer.hostname.as_deref() == Some(hostname.as_ref()))?
-                .endpoint_id;
-            managed_machines
-                .iter()
-                .find(|machine| machine.identity == endpoint_id)
-        })
 }
 
 async fn ipc_managed_machines_for_apply() -> Result<Vec<ipc::ManagedMachineInfo>> {
@@ -1268,22 +1272,34 @@ mod tests {
     #[test]
     fn managed_machine_matches_network_hostname_by_endpoint_identity() {
         let identity = iroh::SecretKey::generate().public();
+        let unrelated_identity = iroh::SecretKey::generate().public();
         let mut roster_peer = peer("web", None);
         roster_peer.endpoint_id = identity;
         let network = net(Some("controller"), vec![roster_peer]);
-        let machines = vec![ipc::ManagedMachineInfo {
-            identity,
-            hostname: "build-box".parse().unwrap(),
-            enrolled_at: ipc::UnixTimestampSecs::from_secs(100),
-            last_seen: None,
-            state: ipc::ManagedMachineState::Unknown,
-            networks: Vec::new(),
-        }];
+        let machines = vec![
+            ipc::ManagedMachineInfo {
+                identity: unrelated_identity,
+                hostname: "web".parse().unwrap(),
+                enrolled_at: ipc::UnixTimestampSecs::from_secs(100),
+                last_seen: None,
+                state: ipc::ManagedMachineState::Unknown,
+                networks: Vec::new(),
+            },
+            ipc::ManagedMachineInfo {
+                identity,
+                hostname: "build-box".parse().unwrap(),
+                enrolled_at: ipc::UnixTimestampSecs::from_secs(100),
+                last_seen: None,
+                state: ipc::ManagedMachineState::Unknown,
+                networks: Vec::new(),
+            },
+        ];
         let hostname = "web".parse().unwrap();
 
         let machine = managed_machine_for_hostname(Some(&network), &hostname, &machines).unwrap();
 
         assert_eq!(machine.identity, identity);
         assert_eq!(machine.hostname.as_ref(), "build-box");
+        assert!(managed_machine_for_hostname(Some(&network), &hostname, &machines[..1]).is_none());
     }
 }

@@ -567,6 +567,7 @@ async fn perform_join_handshake(
         let msg = tokio::time::timeout(Duration::from_secs(30), control::recv_msg(&mut recv))
             .await
             .context("timeout awaiting join response")??;
+        drop(recv);
         match msg {
             ControlMsg::Welcome {
                 members,
@@ -623,6 +624,7 @@ async fn perform_join_handshake(
         let response = tokio::time::timeout(Duration::from_secs(30), control::recv_msg(&mut recv))
             .await
             .context("timeout awaiting reconnect response")??;
+        drop(recv);
         let (welcome_members, welcome_approved, direct_key, direct_record) = match response {
             ControlMsg::Welcome {
                 members,

@@ -765,20 +765,25 @@ impl ManagementService {
 
     pub(crate) async fn delegated_ssh_apply(
         &self,
-        machine: &ManagedMachineSelector,
+        machine: EndpointId,
         network: &NetworkName,
         grants: BTreeMap<String, Vec<String>>,
     ) -> IpcMessage {
-        let target = match self.resolve_machine(machine) {
-            Ok(target) => target,
-            Err(error) => return ipc_err(error),
-        };
+        match config::load() {
+            Ok(settings)
+                if settings
+                    .managed_machines
+                    .iter()
+                    .any(|m| m.identity == machine) => {}
+            Ok(_) => return ipc_err("managed machine not found"),
+            Err(error) => return ipc_err(format!("failed to load managed machines: {error}")),
+        }
         let Some(name) = self.registry.active_network_name(network.as_ref()) else {
             return ipc_err(format!("network '{network}' not active"));
         };
         match self
             .send_request(
-                target.identity,
+                machine,
                 ManagementAction::ApplySsh {
                     network_name: NetworkName::new(name),
                     grants,
@@ -1053,6 +1058,73 @@ impl ManagementService {
         .map_err(|error| error.to_string())
     }
 
+    #[cfg(feature = "desktop")]
+    fn apply_ssh_grants(
+        &self,
+        controller: EndpointId,
+        network_name: NetworkName,
+        grants: BTreeMap<String, Vec<String>>,
+    ) -> std::result::Result<String, String> {
+        let owner = self
+            .owner
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| "daemon is not ready".to_string())?;
+        let is_coordinator = {
+            let handle = self
+                .registry
+                .networks
+                .get(network_name.as_ref())
+                .ok_or_else(|| format!("network '{network_name}' not active"))?;
+            handle
+                .state
+                .read()
+                .unwrap()
+                .members
+                .get(&controller)
+                .is_some_and(|member| member.is_coordinator)
+        };
+        if !is_coordinator {
+            return Err("controller is not a coordinator of this network".to_string());
+        }
+        for (peer, users) in &grants {
+            if peer != "*" && peer.parse::<MachineHostname>().is_err() {
+                return Err(format!("invalid SSH peer hostname '{peer}'"));
+            }
+            if users.iter().any(String::is_empty) {
+                return Err("SSH login users cannot be empty strings".to_string());
+            }
+        }
+        let enable_note = if grants.is_empty() {
+            None
+        } else {
+            match owner.ssh_config_set("on") {
+                IpcMessage::Ok { message } => message
+                    .split_once("\n\n")
+                    .map(|(_, warning)| warning.to_string()),
+                IpcMessage::Error { message } => return Err(message),
+                other => return Err(format!("unexpected SSH enable response: {other:?}")),
+            }
+        };
+        let count = grants.len();
+        config::update_network(network_name.as_ref(), |network| {
+            network.managed_ssh_allow = grants
+                .into_iter()
+                .map(|(peer, users)| config::SshRule { peer, users })
+                .collect();
+            Ok(())
+        })
+        .map_err(|error| format!("failed to save SSH grants: {error}"))?
+        .ok_or_else(|| format!("network '{network_name}' not found"))?;
+        owner.rebuild_ssh_authz();
+        let mut message = format!("mesh SSH: {count} grant(s) applied on '{network_name}'");
+        if let Some(warning) = enable_note {
+            message.push_str("\n\n");
+            message.push_str(&warning);
+        }
+        Ok(message)
+    }
+
     async fn apply_action(
         &self,
         controller: EndpointId,
@@ -1170,82 +1242,9 @@ impl ManagementService {
                 }
                 #[cfg(feature = "desktop")]
                 {
-                    let Some(owner) = self.owner.get().and_then(Weak::upgrade) else {
-                        return ManagementResult::Error {
-                            message: "daemon is not ready".to_string(),
-                        };
-                    };
-                    let Some(handle) = self.registry.networks.get(network_name.as_ref()) else {
-                        return ManagementResult::Error {
-                            message: format!("network '{network_name}' not active"),
-                        };
-                    };
-                    let is_coordinator = handle
-                        .state
-                        .read()
-                        .unwrap()
-                        .members
-                        .get(&controller)
-                        .is_some_and(|member| member.is_coordinator);
-                    if !is_coordinator {
-                        return ManagementResult::Error {
-                            message: "controller is not a coordinator of this network".to_string(),
-                        };
-                    }
-                    drop(handle);
-                    for (peer, users) in &grants {
-                        if peer != "*" && peer.parse::<MachineHostname>().is_err() {
-                            return ManagementResult::Error {
-                                message: format!("invalid SSH peer hostname '{peer}'"),
-                            };
-                        }
-                        if users.iter().any(String::is_empty) {
-                            return ManagementResult::Error {
-                                message: "SSH login users cannot be empty strings".to_string(),
-                            };
-                        }
-                    }
-                    let enable_note = if grants.is_empty() {
-                        None
-                    } else {
-                        match owner.ssh_config_set("on") {
-                            IpcMessage::Ok { message } => message
-                                .split_once("\n\n")
-                                .map(|(_, warning)| warning.to_string()),
-                            IpcMessage::Error { message } => {
-                                return ManagementResult::Error { message };
-                            }
-                            other => {
-                                return ManagementResult::Error {
-                                    message: format!("unexpected SSH enable response: {other:?}"),
-                                };
-                            }
-                        }
-                    };
-                    let count = grants.len();
-                    match config::update_network(network_name.as_ref(), |network| {
-                        network.managed_ssh_allow = grants
-                            .into_iter()
-                            .map(|(peer, users)| config::SshRule { peer, users })
-                            .collect();
-                        Ok(())
-                    }) {
-                        Ok(Some(_)) => {
-                            owner.rebuild_ssh_authz();
-                            let mut message =
-                                format!("mesh SSH: {count} grant(s) applied on '{network_name}'");
-                            if let Some(warning) = enable_note {
-                                message.push_str("\n\n");
-                                message.push_str(&warning);
-                            }
-                            ManagementResult::Applied { message }
-                        }
-                        Ok(None) => ManagementResult::Error {
-                            message: format!("network '{network_name}' not found"),
-                        },
-                        Err(error) => ManagementResult::Error {
-                            message: format!("failed to save SSH grants: {error}"),
-                        },
+                    match self.apply_ssh_grants(controller, network_name, grants) {
+                        Ok(message) => ManagementResult::Applied { message },
+                        Err(message) => ManagementResult::Error { message },
                     }
                 }
             }
