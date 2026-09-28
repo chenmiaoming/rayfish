@@ -259,6 +259,9 @@ pub(crate) enum Command {
         /// when create/join don't specify one; doesn't rename existing networks
         #[arg(long)]
         hostname: Option<String>,
+        /// Enable and persist mesh SSH when bringing the node up
+        #[arg(long)]
+        enable_ssh: bool,
         /// Enroll this machine with a controller after bringing the daemon up.
         #[arg(long)]
         controller: Option<ipc::EnrollmentTicket>,
@@ -1619,8 +1622,9 @@ async fn run() -> Result<()> {
         Command::AppSshHelper => rayfish::ssh::app_helper::run().await,
         Command::Up {
             hostname,
+            enable_ssh,
             controller,
-        } => cmd_up(hostname, controller).await,
+        } => cmd_up(hostname, controller, enable_ssh).await,
         Command::Down => ipc_down().await,
         Command::Stop => cmd_stop().await,
         Command::Start => cmd_start().await,
@@ -2011,6 +2015,27 @@ mod tests {
                 controller: Some(ticket),
                 ..
             } if ticket == expected
+        ));
+    }
+
+    #[test]
+    fn up_enable_ssh_is_opt_in() {
+        let cli = Cli::try_parse_from(["ray", "up"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Up {
+                enable_ssh: false,
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["ray", "up", "--enable-ssh"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Up {
+                enable_ssh: true,
+                ..
+            }
         ));
     }
 

@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray up --enable-ssh` enables and saves mesh SSH while bringing the node up.
+  Peer and Unix-user access still follows the existing SSH allow rules.
+
 - macOS Settings and the Windows dashboard can view and edit Rayfish firewall
   rules, including peer and network selection and the inbound default action.
 
