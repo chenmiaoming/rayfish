@@ -909,9 +909,9 @@ pub(crate) enum ConfigAction {
 
 #[derive(Subcommand)]
 pub(crate) enum MdnsAction {
-    /// Enable mDNS local peer discovery (takes effect on daemon restart)
+    /// Enable mDNS local peer discovery
     On,
-    /// Disable mDNS local peer discovery (takes effect on daemon restart)
+    /// Disable mDNS local peer discovery
     Off,
     /// List rayfish nodes seen on this LAN
     ///
