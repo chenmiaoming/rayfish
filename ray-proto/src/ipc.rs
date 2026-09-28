@@ -359,6 +359,12 @@ pub enum IpcMessage {
         machine: ManagedMachineSelector,
         network: NetworkName,
     },
+    /// Replace the apply-managed mesh SSH grants on an enrolled machine.
+    DelegatedSshApply {
+        machine: EndpointId,
+        network: NetworkName,
+        grants: BTreeMap<String, Vec<String>>,
+    },
     /// Authorize a local user (by UID) to control the daemon without root, the
     /// way `tailscale up --operator` does. Root-only.
     SetOperator {
@@ -1231,6 +1237,12 @@ impl ManagedMachineSelector {
     /// Wraps a managed-machine selector.
     pub fn new(value: String) -> Self {
         Self(value)
+    }
+}
+
+impl From<EndpointId> for ManagedMachineSelector {
+    fn from(identity: EndpointId) -> Self {
+        Self(identity.to_string())
     }
 }
 

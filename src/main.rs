@@ -481,9 +481,9 @@ pub(crate) enum Command {
     /// Reconcile trusted networks against a deploy spec file
     ///
     /// Creates missing trusted networks, publishes idempotent firewall
-    /// suggestions, and reconciles enrolled machines by hostname.
+    /// suggestions, SSH grants, and enrolled machines by hostname.
     Apply {
-        /// Path to a TOML spec file (see `ray apply --example`).
+        /// Path to a YAML spec file (see `ray apply --example`).
         #[arg(value_hint = clap::ValueHint::FilePath)]
         spec: Option<String>,
         /// Drop suggested-firewall subjects that are no longer in the spec.

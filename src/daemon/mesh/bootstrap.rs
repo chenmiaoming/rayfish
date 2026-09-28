@@ -132,6 +132,7 @@ fn initial_alpns() -> Vec<Vec<u8>> {
         PAIR_ALPN.to_vec(),
         transport::CONNECT_ALPN.to_vec(),
         crate::management::ALPN.to_vec(),
+        crate::management::V2_ALPN.to_vec(),
         crate::management::LEGACY_ALPN.to_vec(),
     ]);
     alpns
@@ -689,7 +690,7 @@ async fn build_daemon_inner(
     // drop, so the Daemon owns it for the process lifetime and shuts it down on exit.
     let router = protocol_router.build_router(transport.endpoint.clone());
     // The router sorts its ALPN map. Restore our preference order so peers that
-    // offer both management versions negotiate v2 and receive recovery receipts.
+    // offer multiple management versions negotiate the newest one.
     transport.endpoint.set_alpns(initial_alpns());
     management.start_announcements(token.clone());
 
@@ -743,6 +744,7 @@ async fn build_daemon_inner(
         #[cfg(feature = "desktop")]
         v4_bridge_token: Mutex::new(None),
     });
+    daemon.management.bind_daemon(&daemon);
 
     // File auto-accept is evaluated inline by `FileService::accept_file_offer`
     // (no worker channel), so nothing to spawn here.

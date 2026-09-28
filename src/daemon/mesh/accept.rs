@@ -1977,6 +1977,10 @@ impl ProtocolRouter {
                 ManagementProtocol(Arc::clone(&self.management)),
             )
             .accept(
+                crate::management::V2_ALPN,
+                ManagementProtocol(Arc::clone(&self.management)),
+            )
+            .accept(
                 crate::management::LEGACY_ALPN,
                 ManagementProtocol(Arc::clone(&self.management)),
             );

@@ -215,7 +215,7 @@ pub(crate) async fn ipc_delegated_leave_request(
     result_message(response)
 }
 
-async fn ipc_request(request: ipc::IpcMessage) -> Result<ipc::IpcMessage> {
+pub(crate) async fn ipc_request(request: ipc::IpcMessage) -> Result<ipc::IpcMessage> {
     let mut stream = ipc::connect().await?;
     ipc::send(&mut stream, request).await?;
     ipc::recv(&mut stream).await

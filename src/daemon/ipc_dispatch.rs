@@ -621,6 +621,15 @@ impl Daemon {
             IpcMessage::DelegatedLeave { machine, network } => {
                 self.management.delegated_leave(&machine, &network).await
             }
+            IpcMessage::DelegatedSshApply {
+                machine,
+                network,
+                grants,
+            } => {
+                self.management
+                    .delegated_ssh_apply(machine, &network, grants)
+                    .await
+            }
             IpcMessage::SetOperator { uid } => self.set_operator(uid),
             IpcMessage::ListLanPeers => self.list_lan_peers(),
             IpcMessage::ConfigSet {

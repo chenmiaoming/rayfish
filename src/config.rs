@@ -223,6 +223,10 @@ pub struct NetworkConfig {
     /// `ssh_enabled` toggle is on. Empty = no peer may SSH in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ssh_allow: Vec<SshRule>,
+    /// SSH grants installed by a controller's deploy spec. Local grants remain
+    /// separate so a later apply cannot remove them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_ssh_allow: Vec<SshRule>,
     /// Node-local, per-network aliases (`alias name -> identity string`), set via
     /// `ray alias`. Display-only convenience: shown inline in `ray status` and
     /// used to seed `ray apply`'s `aliases:` map. Never published in the
@@ -425,6 +429,7 @@ pub(crate) fn empty_network_config(name: &str) -> NetworkConfig {
         direct: false,
         direct_peer: None,
         ssh_allow: vec![],
+        managed_ssh_allow: vec![],
         aliases: BTreeMap::new(),
         ephemeral_ttl_secs: None,
         exit_allow: vec![],
@@ -559,7 +564,7 @@ pub struct AppConfig {
     pub endpoint_hints: Vec<iroh::EndpointAddr>,
     /// Global toggle for the embedded mesh SSH server (`ray firewall ssh on`).
     /// When on, the daemon listens on each mesh IP's port 22 and admits peers
-    /// authorized in a network's [`NetworkConfig::ssh_allow`] list. Off by default.
+    /// authorized in a network's local or managed SSH allow list. Off by default.
     #[serde(default)]
     pub ssh_enabled: bool,
     /// Global toggle for bridging this host's IPv4-only listeners onto the mesh
@@ -1820,6 +1825,7 @@ mod tests {
                     direct: false,
                     direct_peer: None,
                     ssh_allow: vec![],
+                    managed_ssh_allow: vec![],
                     aliases: BTreeMap::new(),
                     ephemeral_ttl_secs: None,
                     exit_allow: vec![],
@@ -1843,6 +1849,7 @@ mod tests {
                     direct: false,
                     direct_peer: None,
                     ssh_allow: vec![],
+                    managed_ssh_allow: vec![],
                     aliases: BTreeMap::new(),
                     ephemeral_ttl_secs: None,
                     exit_allow: vec![],
@@ -1887,6 +1894,7 @@ mod tests {
             direct: false,
             direct_peer: None,
             ssh_allow: vec![],
+            managed_ssh_allow: vec![],
             aliases: BTreeMap::new(),
             ephemeral_ttl_secs: None,
             exit_allow: vec![],
@@ -1919,6 +1927,7 @@ mod tests {
                 direct: false,
                 direct_peer: None,
                 ssh_allow: vec![],
+                managed_ssh_allow: vec![],
                 aliases: BTreeMap::new(),
                 ephemeral_ttl_secs: None,
                 exit_allow: vec![],
@@ -1944,6 +1953,7 @@ mod tests {
             direct: false,
             direct_peer: None,
             ssh_allow: vec![],
+            managed_ssh_allow: vec![],
             aliases: BTreeMap::new(),
             ephemeral_ttl_secs: None,
             exit_allow: vec![],
@@ -1976,6 +1986,7 @@ mod tests {
                     direct: false,
                     direct_peer: None,
                     ssh_allow: vec![],
+                    managed_ssh_allow: vec![],
                     aliases: BTreeMap::new(),
                     ephemeral_ttl_secs: None,
                     exit_allow: vec![],
@@ -1999,6 +2010,7 @@ mod tests {
                     direct: false,
                     direct_peer: None,
                     ssh_allow: vec![],
+                    managed_ssh_allow: vec![],
                     aliases: BTreeMap::new(),
                     ephemeral_ttl_secs: None,
                     exit_allow: vec![],
@@ -2048,6 +2060,7 @@ mod tests {
                 direct: false,
                 direct_peer: None,
                 ssh_allow: vec![],
+                managed_ssh_allow: vec![],
                 aliases: BTreeMap::new(),
                 ephemeral_ttl_secs: None,
                 exit_allow: vec![],
@@ -2084,6 +2097,7 @@ mod tests {
                 direct: false,
                 direct_peer: None,
                 ssh_allow: vec![],
+                managed_ssh_allow: vec![],
                 aliases: BTreeMap::new(),
                 ephemeral_ttl_secs: None,
                 exit_allow: vec![],
@@ -2190,6 +2204,7 @@ name = "test"
             direct: false,
             direct_peer: None,
             ssh_allow: vec![],
+            managed_ssh_allow: vec![],
             aliases: BTreeMap::new(),
             ephemeral_ttl_secs: None,
             exit_allow: vec![],

@@ -485,7 +485,10 @@ impl Daemon {
         }
         // Nudge: enabling the server does nothing until a peer is authorized. If
         // no network has any `ssh_allow` entry yet, tell the user the next step.
-        let has_allow = app_config.networks.iter().any(|n| !n.ssh_allow.is_empty());
+        let has_allow = app_config
+            .networks
+            .iter()
+            .any(|n| !n.ssh_allow.is_empty() || !n.managed_ssh_allow.is_empty());
         // Only the desktop build appends the host-firewall warning below.
         #[cfg_attr(not(feature = "desktop"), allow(unused_mut))]
         let mut message = if enabled && !has_allow {
@@ -709,11 +712,12 @@ impl Daemon {
                 c.ssh_enabled,
                 c.networks
                     .into_iter()
-                    .filter(|n| !n.ssh_allow.is_empty())
+                    .filter(|n| !n.ssh_allow.is_empty() || !n.managed_ssh_allow.is_empty())
                     .map(|n| {
                         let allow = n
                             .ssh_allow
                             .into_iter()
+                            .chain(n.managed_ssh_allow)
                             .map(|r| ray_proto::ipc::SshAllowView {
                                 peer: r.peer,
                                 users: r.users,

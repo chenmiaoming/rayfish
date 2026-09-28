@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray apply` accepts per-host `ssh` grants. Applying them to controlled
+  machines enables mesh SSH and permits the named peers to log in as the listed
+  local accounts. Removing a grant from the spec removes that managed grant.
+
 - Pending-join queue evictions are now exposed through the
   `pending_joins_evicted` metric, making approval-queue saturation observable.
 

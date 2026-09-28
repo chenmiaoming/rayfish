@@ -12,6 +12,7 @@ use ray_proto::ipc::{
     ControllerSelector, EnrollmentCredentialSelector, MachineHostname, ManagedMachineSelector,
     NetworkName, UnixTimestampSecs,
 };
+use std::sync::{OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -49,14 +50,16 @@ fn enrollment_expiration(created_at: UnixTimestampSecs, expires_in: Duration) ->
     created_at.saturating_add(expires_in)
 }
 
-/// Negotiate once, offering v1 for peers that have not upgraded. Recovery-only
-/// messages check the selected ALPN before sending any application data.
+/// Negotiate once, offering v2 and v1 for peers that have not upgraded.
+/// Versioned operations check the selected ALPN before sending application data.
 async fn connect_management(
     endpoint: &Endpoint,
     address: EndpointAddr,
 ) -> anyhow::Result<Connection> {
-    let options =
-        ConnectOptions::new().with_additional_alpns(vec![crate::management::LEGACY_ALPN.to_vec()]);
+    let options = ConnectOptions::new().with_additional_alpns(vec![
+        crate::management::V2_ALPN.to_vec(),
+        crate::management::LEGACY_ALPN.to_vec(),
+    ]);
     let connecting = endpoint
         .connect_with_opts(address, crate::management::ALPN, options)
         .await?;
@@ -190,6 +193,7 @@ pub(crate) struct ManagementService {
     controller_gate: AsyncMutex<()>,
     hello_notify: Notify,
     hello_task: Mutex<Option<JoinHandle<()>>>,
+    owner: OnceLock<Weak<Daemon>>,
 }
 
 impl ManagementService {
@@ -206,7 +210,12 @@ impl ManagementService {
             controller_gate: AsyncMutex::new(()),
             hello_notify: Notify::new(),
             hello_task: Mutex::new(None),
+            owner: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn bind_daemon(&self, daemon: &Arc<Daemon>) {
+        let _ = self.owner.set(Arc::downgrade(daemon));
     }
 
     /// Start immediately, retry while offline, and repeat to recover a controller
@@ -297,11 +306,12 @@ impl ManagementService {
         hostname: MachineHostname,
     ) -> anyhow::Result<()> {
         let controller = receipt.controller;
-        let connection = self
-            .transport
-            .endpoint
-            .connect(EndpointAddr::from(controller), crate::management::ALPN)
-            .await?;
+        let connection =
+            connect_management(&self.transport.endpoint, EndpointAddr::from(controller)).await?;
+        anyhow::ensure!(
+            connection.alpn() != crate::management::LEGACY_ALPN,
+            "management v2 required for controller recovery"
+        );
         let (mut send, mut recv) = connection.open_bi().await?;
         {
             // Re-read under the revocation gate: a receipt captured before a
@@ -753,6 +763,44 @@ impl ManagementService {
         }
     }
 
+    pub(crate) async fn delegated_ssh_apply(
+        &self,
+        machine: EndpointId,
+        network: &NetworkName,
+        grants: BTreeMap<String, Vec<String>>,
+    ) -> IpcMessage {
+        match config::load() {
+            Ok(settings)
+                if settings
+                    .managed_machines
+                    .iter()
+                    .any(|m| m.identity == machine) => {}
+            Ok(_) => return ipc_err("managed machine not found"),
+            Err(error) => return ipc_err(format!("failed to load managed machines: {error}")),
+        }
+        let Some(name) = self.registry.active_network_name(network.as_ref()) else {
+            return ipc_err(format!("network '{network}' not active"));
+        };
+        match self
+            .send_request(
+                machine,
+                ManagementAction::ApplySsh {
+                    network_name: NetworkName::new(name),
+                    grants,
+                },
+            )
+            .await
+        {
+            Ok(ManagementResult::Applied { message }) => IpcMessage::Ok { message },
+            Ok(ManagementResult::Unauthorized) => {
+                ipc_err("managed machine has revoked this controller")
+            }
+            Ok(ManagementResult::Error { message }) => ipc_err(message),
+            Ok(other) => ipc_err(format!("unexpected SSH apply response: {other:?}")),
+            Err(error) => ipc_err(error),
+        }
+    }
+
     /// Removes an enrolled machine from this controller's local inventory.
     pub(crate) fn forget_machine(&self, machine: &ManagedMachineSelector) -> IpcMessage {
         let target = match self.resolve_machine(machine) {
@@ -853,6 +901,19 @@ impl ManagementService {
                     .to_string(),
             );
         }
+        if connection.alpn() != crate::management::ALPN
+            && matches!(action, ManagementAction::ApplySsh { .. })
+        {
+            if matches!(&action, ManagementAction::ApplySsh { grants, .. } if grants.is_empty()) {
+                return Ok(ManagementResult::Applied {
+                    message: "mesh SSH: no grants to apply on older machine".to_string(),
+                });
+            }
+            connection.close(0u32.into(), b"management v3 required");
+            return Err(
+                "SSH apply requires management v3; upgrade the managed machine first".to_string(),
+            );
+        }
         let (mut send, mut recv) = connection
             .open_bi()
             .await
@@ -915,6 +976,10 @@ impl ManagementService {
         let reply = if legacy && !message.supported_by_v1() {
             ManagementMsg::ProtocolError {
                 message: "this operation requires management v2".to_string(),
+            }
+        } else if connection.alpn() != crate::management::ALPN && !message.supported_by_v2() {
+            ManagementMsg::ProtocolError {
+                message: "this operation requires management v3".to_string(),
             }
         } else {
             match message {
@@ -991,6 +1056,73 @@ impl ManagementService {
             EnrollmentReceipt::issue(&self.secret_key, machine.identity, machine.enrolled_at)
         })
         .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "desktop")]
+    fn apply_ssh_grants(
+        &self,
+        controller: EndpointId,
+        network_name: NetworkName,
+        grants: BTreeMap<String, Vec<String>>,
+    ) -> std::result::Result<String, String> {
+        let owner = self
+            .owner
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| "daemon is not ready".to_string())?;
+        let is_coordinator = {
+            let handle = self
+                .registry
+                .networks
+                .get(network_name.as_ref())
+                .ok_or_else(|| format!("network '{network_name}' not active"))?;
+            handle
+                .state
+                .read()
+                .unwrap()
+                .members
+                .get(&controller)
+                .is_some_and(|member| member.is_coordinator)
+        };
+        if !is_coordinator {
+            return Err("controller is not a coordinator of this network".to_string());
+        }
+        for (peer, users) in &grants {
+            if peer != "*" && peer.parse::<MachineHostname>().is_err() {
+                return Err(format!("invalid SSH peer hostname '{peer}'"));
+            }
+            if users.iter().any(String::is_empty) {
+                return Err("SSH login users cannot be empty strings".to_string());
+            }
+        }
+        let enable_note = if grants.is_empty() {
+            None
+        } else {
+            match owner.ssh_config_set("on") {
+                IpcMessage::Ok { message } => message
+                    .split_once("\n\n")
+                    .map(|(_, warning)| warning.to_string()),
+                IpcMessage::Error { message } => return Err(message),
+                other => return Err(format!("unexpected SSH enable response: {other:?}")),
+            }
+        };
+        let count = grants.len();
+        config::update_network(network_name.as_ref(), |network| {
+            network.managed_ssh_allow = grants
+                .into_iter()
+                .map(|(peer, users)| config::SshRule { peer, users })
+                .collect();
+            Ok(())
+        })
+        .map_err(|error| format!("failed to save SSH grants: {error}"))?
+        .ok_or_else(|| format!("network '{network_name}' not found"))?;
+        owner.rebuild_ssh_authz();
+        let mut message = format!("mesh SSH: {count} grant(s) applied on '{network_name}'");
+        if let Some(warning) = enable_note {
+            message.push_str("\n\n");
+            message.push_str(&warning);
+        }
+        Ok(message)
     }
 
     async fn apply_action(
@@ -1095,6 +1227,25 @@ impl ManagementService {
                     other => ManagementResult::Error {
                         message: format!("unexpected leave response: {other:?}"),
                     },
+                }
+            }
+            ManagementAction::ApplySsh {
+                network_name,
+                grants,
+            } => {
+                #[cfg(not(feature = "desktop"))]
+                {
+                    let _ = (network_name, grants);
+                    ManagementResult::Error {
+                        message: "mesh SSH is unavailable on this machine".to_string(),
+                    }
+                }
+                #[cfg(feature = "desktop")]
+                {
+                    match self.apply_ssh_grants(controller, network_name, grants) {
+                        Ok(message) => ManagementResult::Applied { message },
+                        Err(message) => ManagementResult::Error { message },
+                    }
                 }
             }
         }

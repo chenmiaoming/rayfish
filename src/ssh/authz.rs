@@ -86,10 +86,20 @@ pub(super) fn auth_banner(
     })
 }
 
+#[cfg(test)]
 pub(super) fn resolve_user_policy(
     authz: &SshAuthz,
     user: &EndpointId,
     networks: &[SmolStr],
+) -> UserPolicy {
+    resolve_user_policy_with_hostnames(authz, user, networks, &|_, _| None)
+}
+
+pub(super) fn resolve_user_policy_with_hostnames(
+    authz: &SshAuthz,
+    user: &EndpointId,
+    networks: &[SmolStr],
+    resolve_hostname: &dyn Fn(&str, &str) -> Option<EndpointId>,
 ) -> UserPolicy {
     let rules_by_network = authz.load();
     let identity = user.to_string();
@@ -97,11 +107,41 @@ pub(super) fn resolve_user_policy(
     for network in networks {
         if let Some(rules) = rules_by_network.get(network.as_str()) {
             for rule in rules {
-                if rule.peer == "*" || rule.peer == identity {
+                if rule.peer == "*"
+                    || rule.peer == identity
+                    || resolve_hostname(network, &rule.peer) == Some(*user)
+                {
                     policy.add(&rule.users);
                 }
             }
         }
     }
     policy
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::SecretKey;
+
+    #[test]
+    fn hostname_grant_resolves_at_login_time() {
+        let peer = SecretKey::generate().public();
+        let authz = new_authz();
+        authz.store(Arc::new(HashMap::from([(
+            "infra".to_string(),
+            vec![crate::config::SshRule {
+                peer: "laptop".to_string(),
+                users: vec!["deploy".to_string()],
+            }],
+        )])));
+        let networks = [SmolStr::new("infra")];
+        let missing = resolve_user_policy_with_hostnames(&authz, &peer, &networks, &|_, _| None);
+        assert!(!missing.authorized());
+        let joined = resolve_user_policy_with_hostnames(&authz, &peer, &networks, &|net, host| {
+            (net == "infra" && host == "laptop").then_some(peer)
+        });
+        assert!(joined.permits("deploy", 1000));
+        assert!(!joined.permits("root", 0));
+    }
 }

@@ -770,6 +770,7 @@ impl NetworkRegistry {
             // happens to be approved on the network later.
             direct_peer: direct.then_some(pre_approved_peer).flatten(),
             ssh_allow: vec![],
+            managed_ssh_allow: vec![],
             aliases: BTreeMap::new(),
             ephemeral_ttl_secs: None,
             exit_allow: vec![],

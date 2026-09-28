@@ -27,7 +27,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Config, LOGIN_GRACE, Origin, SSH_LISTEN_PORT, SSH_PORT, SshAuthz, SshHandler, UserPolicy,
-    auth_banner, disable_nagle, load_host_key, resolve_user_policy, serve, server_config,
+    auth_banner, disable_nagle, load_host_key, resolve_user_policy_with_hostnames, serve,
+    server_config,
 };
 use crate::daemon::NetworkRegistry;
 
@@ -183,7 +184,12 @@ fn grant_for(
     let peer = registry.peers.identity_for_ip(&source)?;
     let user = registry.device_user_map.resolve(&peer);
     let networks = registry.authorization_networks(peer);
-    let policy = resolve_user_policy(authz, &user, &networks);
+    let resolve = |network: &str, hostname: &str| {
+        registry
+            .resolve_peer_in_network(network, hostname)
+            .map(|id| registry.device_user_map.resolve(&id))
+    };
+    let policy = resolve_user_policy_with_hostnames(authz, &user, &networks, &resolve);
     let banner = auth_banner(&policy, &user, &networks);
     tracing::debug!(%client, peer = %user.fmt_short(), authorized = policy.authorized(),
         "macOS app SSH authorization");
