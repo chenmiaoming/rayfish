@@ -40,6 +40,16 @@ async fn send_welcome(
 /// identity, so repeat requests from one peer don't grow it; this caps a flood
 /// across *distinct* identities (an attacker would need a fresh key per slot).
 /// At the cap, the oldest unanswered request is evicted to admit a newer one.
+///
+/// Sustained control-message floods on a single connection are guarded by
+/// [`ControlGate`](crate::ratelimit::ControlGate). The bounded queue below
+/// independently caps memory use across distinct peer identities.
+///
+/// The queue is kept in-memory: joiners persist pending joins locally and retry
+/// with exponential backoff capped at `BACKOFF_MAX` (30s), repopulating the
+/// queue on coordinator restart.
+/// Evictions are recorded in
+/// [`ForwardMetrics::pending_joins_evicted`](crate::stats::ForwardMetrics::pending_joins_evicted).
 pub(crate) const MAX_PENDING_JOINS: usize = 256;
 
 /// Make room for a join request from `incoming`: if the queue is full and this is
@@ -433,6 +443,7 @@ impl CoordinatorAcceptState {
                     if let Some(dropped) =
                         evict_oldest_pending(&mut s.pending, remote_id, MAX_PENDING_JOINS)
                     {
+                        self.ctx.stats.record_pending_join_eviction();
                         tracing::warn!(
                             evicted = %dropped.fmt_short(),
                             "pending-join queue full; evicted oldest request"
