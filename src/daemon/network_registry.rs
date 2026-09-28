@@ -214,6 +214,17 @@ pub(crate) fn missing_networks(
         .collect()
 }
 
+fn networks_joined_with_certificate(
+    saved: &[config::NetworkConfig],
+    primary: EndpointId,
+) -> Vec<String> {
+    saved
+        .iter()
+        .filter(|net| net.join_certificate_issuer == Some(primary))
+        .map(|net| net.name.clone())
+        .collect()
+}
+
 impl NetworkRegistry {
     #[allow(clippy::too_many_arguments)] // one clone per shared daemon handle
     pub(crate) fn new(
@@ -480,39 +491,62 @@ impl NetworkRegistry {
         }
     }
 
-    /// Unpair *this* device from its primary, locally: leave every network this
-    /// device joined (graceful `LEAVE_CODE` close so peers prune us at once),
-    /// purge any saved-but-inactive network configs, then delete the stored cert.
+    /// Record memberships a device held before receiving our certificate.
+    /// A later certificate revocation must not turn those into paired joins.
+    pub(crate) fn remember_independent_paired_device(&self, device: EndpointId) -> Result<()> {
+        let names: Vec<String> = self
+            .networks
+            .iter()
+            .filter_map(|entry| {
+                let state = entry.state.read().unwrap();
+                (state.network_secret_key.is_some()
+                    && state
+                        .members
+                        .get(&device)
+                        .is_some_and(|member| member.user_identity.is_none()))
+                .then(|| entry.key().clone())
+            })
+            .collect();
+        for name in names {
+            config::update_network(&name, |net| {
+                if !net.independent_paired_devices.contains(&device) {
+                    net.independent_paired_devices.push(device);
+                }
+                Ok(())
+            })?
+            .with_context(|| format!("network '{name}' has no saved config"))?;
+        }
+        Ok(())
+    }
+
+    /// Unpair *this* device from its primary, locally: leave only networks whose
+    /// first join used this primary's certificate, then delete the stored cert.
     /// Called by the phone's unpair control, the IPC path, and the device-side
     /// `ControlMsg::Unpaired` / self-nullify handlers (was the `self_unpair_tx`
     /// hand-off to the daemon loop). A device with no cert (a primary) is a no-op.
     pub(crate) async fn unpair_self(&self) -> IpcMessage {
-        if self.current_device_cert().is_none() {
+        let Some(cert) = self.current_device_cert() else {
             return ipc_err("this device is not paired to a primary".to_string());
-        }
-        // Leave every live network first (graceful close + config removal).
-        let networks: Vec<String> = self.networks.iter().map(|e| e.key().clone()).collect();
-        for net in &networks {
-            self.leave_network(net).await;
-        }
-        // Purge saved-but-inactive network configs too: a device unpaired while
-        // offline discovers this at startup restore, before its networks are added
-        // to `self.networks` (the join bails on the nullifier check first), so the
-        // loop above sees none yet the config files remain and would make the node
-        // churn trying to rejoin networks it was removed from.
-        if let Ok(cfg) = config::load() {
-            for net in &cfg.networks {
-                let _ = config::delete_network(&net.name);
+        };
+        let cfg = match config::load() {
+            Ok(cfg) => cfg,
+            Err(error) => return ipc_err(format!("could not read saved networks: {error}")),
+        };
+        let networks = networks_joined_with_certificate(&cfg.networks, cert.user_identity);
+        for name in &networks {
+            if self.networks.contains_key(name) {
+                self.leave_network(name).await;
+            }
+            if let Err(error) = config::delete_network(name) {
+                return ipc_err(format!("could not remove network '{name}': {error}"));
             }
         }
         match crate::identity::delete_device_cert() {
-            Ok(()) => tracing::warn!(
-                "unpaired this device: deleted device certificate and left all networks"
-            ),
+            Ok(()) => tracing::info!(left = networks.len(), "unpaired this device"),
             Err(e) => {
                 tracing::warn!(error = %e, "unpair: failed to delete device cert");
                 return ipc_err(format!(
-                    "left all networks but failed to delete device cert: {e}"
+                    "left certificate-joined networks but failed to delete device cert: {e}"
                 ));
             }
         }
@@ -757,6 +791,8 @@ impl NetworkRegistry {
             approved: approved_entries,
             network_secret_key: Some(net_secret_key.clone()),
             network_public_key: Some(net_public_key),
+            join_certificate_issuer: None,
+            independent_paired_devices: vec![],
             last_group_hash: Some(last_group_hash),
             last_group_hash_published: false,
             transport: None,
@@ -1165,7 +1201,11 @@ impl NetworkRegistry {
                     return None;
                 }
                 let state = entry.state.read().unwrap();
-                if state.nullifiers.contains(&peer) {
+                if state.nullifiers.contains(&peer)
+                    && !state.members.get(&peer).is_some_and(|member| {
+                        member.user_identity.is_none() && member.device_cert.is_none()
+                    })
+                {
                     return None;
                 }
                 (state.members.is_member(&peer) || state.members.is_member(&user))
@@ -1395,6 +1435,27 @@ mod tests {
             network_secret_key: Some(SecretKey::generate()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn unpair_keeps_independent_and_coordinated_networks() {
+        let primary = SecretKey::generate().public();
+        let other_primary = SecretKey::generate().public();
+        let mut paired = net("paired");
+        paired.join_certificate_issuer = Some(primary);
+        let mut other_pairing = net("other-pairing");
+        other_pairing.join_certificate_issuer = Some(other_primary);
+        let saved = vec![
+            net("independent"),
+            coordinator_net("coordinated"),
+            paired,
+            other_pairing,
+        ];
+
+        assert_eq!(
+            networks_joined_with_certificate(&saved, primary),
+            vec!["paired"]
+        );
     }
 
     #[test]

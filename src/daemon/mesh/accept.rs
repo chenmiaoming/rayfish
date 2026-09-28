@@ -599,33 +599,46 @@ impl CoordinatorAcceptState {
             return None;
         }
 
-        // Verify and store device cert if present, unless the device key is
-        // nullified on this network (`ray unpair`): a nullified cert is not
-        // recorded as a paired device, so it stops resolving to the user's
-        // identity.
-        if let Some(ref cert) = device_cert
-            && cert.verify()
-            && cert.device_key == remote_id
-            && !self
-                .state
-                .read()
-                .unwrap()
-                .nullifiers
-                .contains(&cert.device_key)
-        {
-            {
-                let mut s = self.state.write().unwrap();
-                if let Some(m) = s.members.get_mut(&remote_id) {
-                    m.user_identity = Some(cert.user_identity);
-                    m.device_cert = Some(cert.clone());
-                }
-            }
-            self.ctx
-                .device_user_map
-                .insert(remote_id, cert.user_identity);
+        // A known independent member can return without a certificate after
+        // unpairing. Clear its old user binding and publish the change.
+        let verified_cert = device_cert.filter(|cert| {
+            cert.verify()
+                && cert.device_key == remote_id
+                && !self
+                    .state
+                    .read()
+                    .unwrap()
+                    .nullifiers
+                    .contains(&cert.device_key)
+        });
+        let user_identity = verified_cert.as_ref().map(|cert| cert.user_identity);
+        let cert_changed = {
+            let mut state = self.state.write().unwrap();
+            let member = state.members.get_mut(&remote_id)?;
+            let changed =
+                member.user_identity != user_identity || member.device_cert != verified_cert;
+            member.user_identity = user_identity;
+            member.device_cert = verified_cert;
+            changed
+        };
+        if let Some(user_identity) = user_identity {
+            self.ctx.device_user_map.insert(remote_id, user_identity);
+        } else {
+            self.ctx.device_user_map.remove(&remote_id);
         }
 
         let Some(desired) = hostname else {
+            if cert_changed {
+                commit_current_snapshot(&self.state, &self.ctx.blob_store, &self.dht_notify).await;
+                drop(commit_guard);
+                broadcast_member_sync(
+                    &self.ctx.registry,
+                    self.net_pubkey(),
+                    &self.network_name,
+                    None,
+                )
+                .await;
+            }
             return Some(peer_ip);
         };
 
@@ -658,7 +671,7 @@ impl CoordinatorAcceptState {
                 m.hostname = Some(final_hostname.clone());
             }
         }
-        if changed {
+        if changed || cert_changed {
             commit_current_snapshot(&self.state, &self.ctx.blob_store, &self.dht_notify).await;
         }
         drop(commit_guard);
@@ -680,8 +693,8 @@ impl CoordinatorAcceptState {
         )
         .await;
 
-        if changed {
-            tracing::info!(peer = %remote_id.fmt_short(), network = %self.network_name, hostname = %final_hostname, "peer hostname changed; republishing blob + broadcasting MemberSync");
+        if changed || cert_changed {
+            tracing::info!(peer = %remote_id.fmt_short(), network = %self.network_name, hostname = %final_hostname, "peer membership changed; republishing blob + broadcasting MemberSync");
             broadcast_member_sync(
                 &self.ctx.registry,
                 self.net_pubkey(),
@@ -1461,6 +1474,8 @@ impl MemberAcceptState {
         };
         if let Some(user_identity) = binding {
             self.ctx.device_user_map.insert(transport_id, user_identity);
+        } else {
+            self.ctx.device_user_map.remove(&transport_id);
         }
         // A cert that earned no binding (revoked on this network) is not written
         // to the roster either, matching the coordinator's `handle_member_hello`.

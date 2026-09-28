@@ -143,7 +143,18 @@ impl Daemon {
                 // roster flagging it `is_coordinator`. Falls back to the blob's
                 // coordinators if the primary does not admit.
                 for net in networks {
-                    if self.registry.networks.contains_key(&net.network_key) {
+                    let already_joined = net.network_key.parse::<EndpointId>().is_ok_and(|key| {
+                        self.registry
+                            .networks
+                            .iter()
+                            .any(|entry| entry.network_key == key)
+                            || config::load().is_ok_and(|cfg| {
+                                cfg.networks
+                                    .iter()
+                                    .any(|saved| saved.network_public_key == Some(key))
+                            })
+                    });
+                    if already_joined {
                         continue;
                     }
                     let me = Arc::clone(self);
@@ -192,11 +203,10 @@ impl Daemon {
     ///
     /// Records the device key as a durable nullifier (`revoked_devices`), then, on
     /// every network this node coordinates, adds it to the signed blob's nullifier
-    /// set, removes it from the roster, and republishes, so the blob stops
-    /// honoring its cert. Best-effort tells the device to wipe its own cert. Live
-    /// links to the device are severed everywhere; other nodes reject its cert and
-    /// prune it when they reconverge from the republished blob. Networks this node
-    /// does not coordinate are unaffected in Phase 1 (see the amendments design).
+    /// set, removes certificate-joined memberships, and republishes. Independent
+    /// memberships remain. Best-effort tells the device to wipe its own cert.
+    /// Other nodes reject the revoked cert when they receive the signed blob.
+    /// Networks this node does not coordinate rely on the device's local unpair.
     pub(crate) async fn unpair(self: &Arc<Self>, device: &str) -> IpcMessage {
         // Only the primary holds the user identity secret that signs both the
         // certs and their revocation. A secondary carries a device cert.
@@ -277,8 +287,8 @@ impl Daemon {
 
     /// Unpair *this* device from its primary. First asks the primary to write the
     /// authoritative nullifier (`request_primary_nullify`, best-effort while the
-    /// link is up), then locally deletes the stored device cert and leaves every
-    /// network this device joined under the shared identity, closing each
+    /// link is up), then locally deletes the stored device cert and leaves networks
+    /// first joined with that certificate, closing each
     /// connection with the leave code so coordinators prune us and every peer drops
     /// us right away (rather than waiting on the revocation floor). Used by the
     /// phone's "unpair this device" control. A device with no cert (a primary) has

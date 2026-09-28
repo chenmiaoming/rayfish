@@ -66,6 +66,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Unpairing a device keeps networks it joined independently, including networks
+  it coordinates, and removes only memberships gained through its pairing
+  certificate.
+
 - Managed machines can join another network while already connected to its
   coordinator through a different network.
 

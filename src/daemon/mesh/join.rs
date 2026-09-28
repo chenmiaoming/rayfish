@@ -161,6 +161,17 @@ pub(crate) async fn join_mesh_shared(
         initial,
     } = params;
     let my_identity = identity.local_identity();
+    let join_certificate_issuer = if initial
+        && invite_secret.is_none()
+        && !group_blob
+            .members
+            .iter()
+            .any(|member| member.identity == my_identity)
+    {
+        device_cert.as_ref().map(|cert| cert.user_identity)
+    } else {
+        None
+    };
 
     let (mut admitted_blob, direct_key, direct_record, mut record_ts) =
         match perform_join_handshake(
@@ -248,6 +259,7 @@ pub(crate) async fn join_mesh_shared(
         auto_accept_firewall,
         auto_accept_files,
         initial,
+        join_certificate_issuer,
     )?;
 
     let remote_id = initial_conn.remote_id();
@@ -369,6 +381,7 @@ fn persist_join_config(
     auto_accept_firewall: bool,
     auto_accept_files: bool,
     initial: bool,
+    join_certificate_issuer: Option<EndpointId>,
 ) -> Result<()> {
     let persisted_hostname = members
         .iter()
@@ -388,6 +401,7 @@ fn persist_join_config(
         approved: approved_entries.clone(),
         network_secret_key: None,
         network_public_key: Some(net_pubkey),
+        join_certificate_issuer,
         auto_accept_firewall,
         auto_accept_files,
         ..Default::default()
@@ -841,6 +855,8 @@ mod persist_config_tests {
             approved: vec![],
             network_secret_key: Some(admin_key.clone()),
             network_public_key: Some(net_pubkey),
+            join_certificate_issuer: None,
+            independent_paired_devices: vec![],
             last_group_hash: Some(cached_hash),
             last_group_hash_published: true,
             transport: None,
@@ -870,6 +886,7 @@ mod persist_config_tests {
             false,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -909,6 +926,7 @@ mod persist_config_tests {
             false,
             false,
             true,
+            None,
         )
         .unwrap();
         let after_fresh_join = config::load_network("homelab").unwrap().unwrap();
@@ -923,6 +941,42 @@ mod persist_config_tests {
         assert!(
             after_fresh_join.network_secret_key.is_none(),
             "a fresh member join must clear a stale coordinator key"
+        );
+        assert_eq!(after_fresh_join.join_certificate_issuer, None);
+
+        let primary = id(5);
+        persist_join_config(
+            "paired",
+            &[member(2, false), member(4, true)],
+            &[],
+            me,
+            net_pubkey,
+            &Some("device".to_string()),
+            false,
+            false,
+            true,
+            Some(primary),
+        )
+        .unwrap();
+        persist_join_config(
+            "paired",
+            &[member(2, false), member(4, true)],
+            &[],
+            me,
+            net_pubkey,
+            &Some("device".to_string()),
+            false,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            config::load_network("paired")
+                .unwrap()
+                .unwrap()
+                .join_certificate_issuer,
+            Some(primary)
         );
 
         unsafe {
@@ -952,6 +1006,7 @@ mod persist_config_tests {
             false,
             false,
             false,
+            None,
         );
 
         assert!(result.is_err());
