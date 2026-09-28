@@ -690,23 +690,66 @@ private struct AddFirewallRuleSheet: View {
     @State private var peer = ""
     @State private var network = ""
 
+    private var peerOptions: [FirewallPeerOption] {
+        var labelsByIdentity: [String: Set<String>] = [:]
+        for network in controller.status?.networks ?? [] {
+            if !self.network.isEmpty && network.name != self.network { continue }
+            for peer in network.peers {
+                let identity = peer.identity ?? peer.ipv6
+                let name = peer.hostname.isEmpty ? peer.ipv6 : peer.hostname
+                labelsByIdentity[identity, default: []].insert("\(name) · \(network.name)")
+            }
+        }
+        let peers = labelsByIdentity.keys.sorted().compactMap { identity -> FirewallPeerOption? in
+            guard let labels = labelsByIdentity[identity] else { return nil }
+            return FirewallPeerOption(id: identity, label: "\(labels.sorted().joined(separator: ", ")) (\(identity.prefix(6)))")
+        }
+        return [FirewallPeerOption(id: "", label: "Any peer")] + peers
+    }
+
+    private var networkOptions: [FirewallPeerOption] {
+        [FirewallPeerOption(id: "", label: "Any network")] +
+            (controller.status?.networks ?? []).map { FirewallPeerOption(id: $0.name, label: $0.name) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Add firewall rule").font(RayfishTheme.heading(18))
-            Picker("Direction", selection: $direction) {
-                Text("Inbound").tag("in")
-                Text("Outbound").tag("out")
+            fieldRow("Direction") {
+                Picker("Direction", selection: $direction) {
+                    Text("Inbound").tag("in")
+                    Text("Outbound").tag("out")
+                }
+                .labelsHidden().pickerStyle(.menu)
             }
-            Picker("Action", selection: $action) {
-                Text("Allow").tag("allow")
-                Text("Deny").tag("deny")
+            fieldRow("Action") {
+                Picker("Action", selection: $action) {
+                    Text("Allow").tag("allow")
+                    Text("Deny").tag("deny")
+                }
+                .labelsHidden().pickerStyle(.menu)
             }
-            Picker("Protocol", selection: $protocolName) {
-                ForEach(["tcp", "udp", "icmp", "any"], id: \.self) { Text($0.uppercased()).tag($0) }
+            fieldRow("Protocol") {
+                Picker("Protocol", selection: $protocolName) {
+                    ForEach(["tcp", "udp", "icmp", "any"], id: \.self) { Text($0.uppercased()).tag($0) }
+                }
+                .labelsHidden().pickerStyle(.menu)
             }
-            TextField("Ports, for example 22 or 80,443", text: $port)
-            TextField("Peer (optional, any peer if empty)", text: $peer)
-            TextField("Network (optional)", text: $network)
+            fieldRow("Ports") {
+                TextField("Optional, for example 22 or 80,443", text: $port)
+            }
+            fieldRow("Peer") {
+                Picker("Peer", selection: $peer) {
+                    ForEach(peerOptions) { option in Text(option.label).tag(option.id) }
+                }
+                .labelsHidden().pickerStyle(.menu)
+            }
+            fieldRow("Network") {
+                Picker("Network", selection: $network) {
+                    ForEach(networkOptions) { option in Text(option.label).tag(option.id) }
+                }
+                .labelsHidden().pickerStyle(.menu)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -723,9 +766,24 @@ private struct AddFirewallRuleSheet: View {
                 .disabled(controller.isLoading)
             }
         }
-        .padding(24).frame(width: 460)
+        .padding(24).frame(width: 560)
         .background(RayfishTheme.background)
+        .onChange(of: network) { _ in
+            if !peerOptions.contains(where: { $0.id == peer }) { peer = "" }
+        }
     }
+
+    private func fieldRow<Field: View>(_ title: String, @ViewBuilder field: () -> Field) -> some View {
+        HStack(spacing: 16) {
+            Text(title).frame(width: 100, alignment: .leading)
+            field().frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct FirewallPeerOption: Identifiable {
+    let id: String
+    let label: String
 }
 
 private struct RenameHostSheet: View {

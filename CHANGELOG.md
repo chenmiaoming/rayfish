@@ -9,7 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - macOS Settings and the Windows dashboard can view and edit Rayfish firewall
-  rules, including the inbound default action.
+  rules, including peer and network selection and the inbound default action.
 
 - Intel Macs can use the standalone CLI and daemon, self-update, install script,
   and signed native app DMG again.
@@ -45,6 +45,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inventory recovery require both endpoints to support v2.
 
 ### Fixed
+
+- The macOS app serves mesh SSH through a separate helper so macOS no longer
+  drops connections to a listener inside the VPN extension. Enable Rayfish's
+  background helper in Login Items & Extensions when prompted.
+
+- `ray logs` includes macOS app, tunnel, and Rust core diagnostics, with
+  `--since` and `--follow`. The app's bundled CLI can read logs while disconnected.
 
 - Starting a second daemon now fails before it creates another TUN interface or
   changes routes and DNS, leaving the running VPN and its IPC socket intact.
