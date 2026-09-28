@@ -666,6 +666,48 @@ const TS_LEN: usize = 27;
 /// each tick.
 const FOLLOW_POLL: Duration = Duration::from_millis(500);
 
+/// Serve app logs through the existing streaming IPC response for clients that
+/// are not the app's bundled CLI. Drop the child even when an idle client leaves.
+#[cfg(target_os = "macos")]
+pub(crate) async fn stream_app_logs<S: Hangup>(
+    framed: &mut ServedFramed<S>,
+    since: Option<Duration>,
+    follow: bool,
+    token: &CancellationToken,
+) -> Result<()> {
+    use crate::macos_logs::LogReader;
+
+    let mut reader = match LogReader::start(since, follow) {
+        Ok(reader) => reader,
+        Err(error) => return ipc::send(framed, ipc_err(format!("{error:#}"))).await,
+    };
+    let mut buffer = vec![0; LOG_CHUNK_BYTES];
+    loop {
+        let read = tokio::select! {
+            _ = token.cancelled() => return Ok(()),
+            _ = client_gone(framed.get_ref()) => return Ok(()),
+            read = reader.read(&mut buffer) => read,
+        };
+        let message = match read {
+            Ok(0) => IpcMessage::Ok {
+                message: "end of logs".to_owned(),
+            },
+            Ok(n) => IpcMessage::LogChunk {
+                data: buffer[..n].to_vec(),
+            },
+            Err(error) => ipc_err(format!("{error:#}")),
+        };
+        let done = !matches!(message, IpcMessage::LogChunk { .. });
+        tokio::select! {
+            _ = token.cancelled() => return Ok(()),
+            result = ipc::send(framed, message) => result?,
+        }
+        if done {
+            return Ok(());
+        }
+    }
+}
+
 /// Answer an [`IpcMessage::Logs`] request on `framed`, reading the rolling
 /// files under `dir`.
 ///

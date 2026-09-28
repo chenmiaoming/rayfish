@@ -1,5 +1,7 @@
 //! Swift bindings for the Rayfish core running in an Apple packet tunnel.
 
+#[cfg(target_os = "macos")]
+mod logging;
 mod migration;
 
 use std::fmt::Display;
@@ -191,6 +193,8 @@ impl Node {
 impl Node {
     #[uniffi::constructor]
     pub fn new(config_dir: String) -> Arc<Self> {
+        #[cfg(target_os = "macos")]
+        logging::init();
         let config_dir = PathBuf::from(config_dir);
         config::set_config_dir_override(config_dir.clone());
         let runtime = Builder::new_multi_thread()
@@ -480,7 +484,10 @@ impl Node {
     }
 
     pub fn firewall_remove(&self, index: u32) -> Result<(), AppleError> {
-        expect_ok(self.state()?.firewall_remove(index as usize), "firewall rule")
+        expect_ok(
+            self.state()?.firewall_remove(index as usize),
+            "firewall rule",
+        )
     }
 
     pub fn firewall_set_default_inbound(&self, action: String) -> Result<(), AppleError> {

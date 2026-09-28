@@ -826,6 +826,9 @@ pub struct Daemon {
     /// Android build at all.
     #[cfg(feature = "desktop")]
     ssh_token: Mutex<Option<CancellationToken>>,
+    /// Only an OS-owned macOS tunnel delegates SSH to the app's launchd helper.
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    app_ssh_helper: AtomicBool,
     /// Cancellation token for the IPv4 listener bridge (`None` when off / on
     /// standby). Same shape and same reason as `ssh_token`: it binds the mesh
     /// address, so it lives and dies with the data plane. See
@@ -1074,6 +1077,8 @@ impl Daemon {
         reader: R,
         writer: W,
     ) {
+        #[cfg(all(target_os = "macos", feature = "desktop"))]
+        self.app_ssh_helper.store(true, Ordering::SeqCst);
         self.attach_tun(reader, writer).await;
         self.active.store(true, Ordering::SeqCst);
         #[cfg(feature = "desktop")]
@@ -3607,6 +3612,8 @@ mod headless_tests {
         }
 
         // 1. First attach: reader1 + writer1, forwarding active.
+        #[cfg(all(target_os = "macos", feature = "desktop"))]
+        assert!(!daemon.app_ssh_helper.load(Ordering::SeqCst));
         let writer1 = FakeTunWriter::default();
         let sink1 = Arc::clone(&writer1.written);
         daemon
@@ -3621,6 +3628,9 @@ mod headless_tests {
             daemon.status(),
             IpcMessage::StatusResponse { active: true, .. }
         ));
+
+        #[cfg(all(target_os = "macos", feature = "desktop"))]
+        assert!(daemon.app_ssh_helper.load(Ordering::SeqCst));
 
         send_pkt(&daemon, b"packet-1").await;
         assert!(

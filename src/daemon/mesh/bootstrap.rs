@@ -735,6 +735,8 @@ async fn build_daemon_inner(
         ssh_authz: crate::ssh::new_authz(),
         #[cfg(feature = "desktop")]
         ssh_token: Mutex::new(None),
+        #[cfg(all(target_os = "macos", feature = "desktop"))]
+        app_ssh_helper: AtomicBool::new(false),
         #[cfg(feature = "desktop")]
         v4_bridge_token: Mutex::new(None),
     });
@@ -1241,6 +1243,16 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
         if let Some(denied) = host.check_authorized(&req, peer_cred.as_ref()) {
             let _ = ipc::send(&mut framed, denied).await;
             return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if matches!(host, IpcHost::PacketTunnel { .. }) {
+            return super::diagnostics::stream_app_logs(
+                &mut framed,
+                since,
+                follow,
+                &daemon.shutdown_token,
+            )
+            .await;
         }
         return super::diagnostics::stream_logs(
             &crate::logdir::log_dir(),

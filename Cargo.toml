@@ -189,6 +189,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 inotify = { version = "0.11", default-features = false, features = ["stream"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+tracing-oslog = "0.3"
 system-configuration = "0.7"
 core-foundation = "0.9"
 

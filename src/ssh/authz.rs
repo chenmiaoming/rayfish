@@ -14,6 +14,7 @@ pub fn new_authz() -> SshAuthz {
 }
 
 #[derive(Default, Debug, PartialEq)]
+#[cfg_attr(target_os = "macos", derive(serde::Serialize, serde::Deserialize))]
 pub(super) struct UserPolicy {
     matched: bool,
     any: bool,

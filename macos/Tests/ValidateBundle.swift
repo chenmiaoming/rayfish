@@ -33,6 +33,15 @@ func codesign(_ arguments: [String], captureErrors: Bool = false) throws -> Data
 do {
     try require(CommandLine.arguments.count == 2, "Usage: ValidateBundle.swift /path/to/Rayfish.app")
     let app = URL(fileURLWithPath: CommandLine.arguments[1])
+    let helper = try plist(Data(contentsOf: app.appendingPathComponent("Contents/Library/LaunchDaemons/com.rayfish.app.ssh.plist")))
+    try require(helper["Label"] as? String == "com.rayfish.app.ssh", "Missing SSH helper label")
+    try require(helper["BundleProgram"] as? String == "Contents/MacOS/ray", "SSH helper must use the bundled CLI")
+    try require(helper["ProgramArguments"] as? [String] == ["ray", "app-ssh-helper"], "Incorrect SSH helper command")
+    try require(helper["UserName"] as? String == "root", "SSH helper must run as root")
+    let sockets = helper["Sockets"] as? [String: Any] ?? [:]
+    let control = sockets["Control"] as? [String: Any] ?? [:]
+    try require(control["SockPathName"] as? String == "/var/run/com.rayfish.app.ssh.sock", "Incorrect SSH helper socket path")
+    try require(control["SockPathMode"] as? Int == 0o600, "SSH helper socket must be root-only")
     let identifier = "com.rayfish.app.tunnel"
     let extensions = app.appendingPathComponent("Contents/Library/SystemExtensions")
     let names = try FileManager.default.contentsOfDirectory(atPath: extensions.path)

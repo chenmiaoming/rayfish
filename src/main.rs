@@ -232,11 +232,12 @@ pub(crate) enum Command {
     ///
     /// Bundles the rolling log files and the forward metrics.
     Report,
-    /// Show the daemon's log output
+    /// Show Rayfish logs
     ///
-    /// Reads the daemon's rolling log files over IPC, so no root is needed.
-    /// With no arguments, shows everything since the last daily rotation,
-    /// through `$PAGER` (`less`) when the output is a terminal.
+    /// Reads daemon log files over IPC, or unified app and core logs on macOS.
+    /// No root is needed. With no arguments, shows today's logs through
+    /// `$PAGER` (`less`) when the output is a terminal. The macOS app's bundled
+    /// CLI can read logs even while the VPN is disconnected.
     Logs {
         /// Only lines from the last <DUR> (e.g. 10m, 1h, 2h30m)
         #[arg(long, value_name = "DUR")]
@@ -248,6 +249,10 @@ pub(crate) enum Command {
     /// Run the daemon in the foreground (invoked by the system service)
     #[command(hide = true)]
     Daemon,
+    /// Serve macOS app SSH sessions (started only by launchd).
+    #[cfg(all(target_os = "macos", feature = "macos-app"))]
+    #[command(hide = true)]
+    AppSshHelper,
     /// Install the system service if needed and start it
     Up {
         /// Set your default hostname for future networks (e.g. "laptop"). Used
@@ -1521,6 +1526,16 @@ async fn run() -> Result<()> {
         // JSON output must never be colorized or interrupted by spinners.
         style::set_plain(true);
     }
+    #[cfg(all(target_os = "macos", feature = "macos-app"))]
+    if matches!(cli.command, Command::AppSshHelper) {
+        use tracing_oslog::OsLogger;
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new("info,rayfish=debug"))
+            .with(OsLogger::new(rayfish::macos_logs::SUBSYSTEM, "ssh-helper"))
+            .init();
+        return rayfish::ssh::app_helper::run().await;
+    }
     // Keep the appender guard alive for the whole process so file logs flush.
     let _log_guard = init_tracing(matches!(cli.command, Command::Daemon));
 
@@ -1600,6 +1615,8 @@ async fn run() -> Result<()> {
             stats.spawn_logger(token.clone());
             daemon::run_daemon(token, stats).await
         }
+        #[cfg(all(target_os = "macos", feature = "macos-app"))]
+        Command::AppSshHelper => rayfish::ssh::app_helper::run().await,
         Command::Up {
             hostname,
             controller,

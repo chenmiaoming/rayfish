@@ -58,6 +58,10 @@ independent.
 Notarization first covers the app, then the final DMG. Tickets are stapled to both
 so installation does not depend on fetching the ticket from Apple. Users drag
 Rayfish into Applications and approve its network extension on first connection.
+Mesh SSH also registers a launchd helper through `SMAppService`. Approve Rayfish
+in Login Items & Extensions when prompted. The helper is bundled in the app and
+uses a root-only Unix control socket; it closes SSH listeners and sessions when
+the tunnel disconnects. Standalone daemon builds keep their embedded SSH server.
 Build logs, submission IDs, and notarization reports are saved in the diagnostics
 artifacts. A timeout stops publication; inspect that submission before retrying.
 

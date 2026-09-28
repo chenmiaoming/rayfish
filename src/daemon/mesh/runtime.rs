@@ -1070,6 +1070,16 @@ impl Daemon {
         drop(guard);
         self.rebuild_ssh_authz();
         let my_v6 = derive_ipv6(&self.transport.identity.local_identity());
+        #[cfg(target_os = "macos")]
+        if self.app_ssh_helper.load(Ordering::SeqCst) {
+            crate::ssh::app_helper::spawn(
+                my_v6,
+                Arc::clone(&self.registry),
+                Arc::clone(&self.ssh_authz),
+                token,
+            );
+            return;
+        }
         let server =
             crate::ssh::SshServer::new(Arc::clone(&self.registry), Arc::clone(&self.ssh_authz));
         // The overlay carries no IPv4, so there is one address to bind and it is

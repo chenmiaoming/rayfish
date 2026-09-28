@@ -92,7 +92,8 @@ final class TunnelController: ObservableObject {
             let response = try await TunnelIPC.request(ProviderRequest(action: .status))
             guard !isLoading, !isQuitting else { return }
             status = response.status
-            error = nil
+            if status?.sshEnabled == true { try SSHHelper.register() }
+            error = status?.sshEnabled == true ? SSHHelper.approvalMessage : nil
             if Date().timeIntervalSince(lastMachinesRefresh) >= 30 { refreshMachines() }
         } catch {
             if !isLoading, !isQuitting { self.error = error.localizedDescription }
@@ -139,6 +140,10 @@ final class TunnelController: ObservableObject {
                 if isConnected {
                     let response = try await TunnelIPC.request(ProviderRequest(action: .status))
                     status = response.status
+                    if status?.sshEnabled == true {
+                        try SSHHelper.register(openSettings: true)
+                        error = SSHHelper.approvalMessage
+                    }
                     refreshMachines()
                     UserDefaults.standard.set(true, forKey: Self.migrationCompletedKey)
                     return
@@ -257,7 +262,12 @@ final class TunnelController: ObservableObject {
     }
 
     func setSetting(_ setting: ProviderSetting, enabled: Bool) async {
+        if setting == .ssh, enabled {
+            do { try SSHHelper.register(openSettings: true) }
+            catch { self.error = error.localizedDescription; return }
+        }
         guard await perform(ProviderRequest(action: .setSetting, setting: setting, enabled: enabled)) != nil else { return }
+        if setting == .ssh, enabled { error = SSHHelper.approvalMessage }
         if setting == .mdns, status?.mdnsActive != enabled {
             await reconnect()
         }

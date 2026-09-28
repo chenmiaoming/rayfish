@@ -1,4 +1,4 @@
-//! `ray logs`: read the daemon's rolling log files without root.
+//! `ray logs`: read daemon files or the macOS app's unified logs without root.
 //!
 //! The files are `0644 root:root` under `logdir::log_dir()`, so the read goes
 //! through the daemon over IPC, the same way `ray report` gets at them. The
@@ -7,6 +7,7 @@
 
 use std::io::{ErrorKind, IsTerminal, Write};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use crate::*;
 
@@ -19,6 +20,40 @@ pub(crate) async fn ipc_logs(since: Option<String>, follow: bool) -> Result<()> 
         None => None,
     };
 
+    #[cfg(all(target_os = "macos", feature = "macos-app"))]
+    return app_logs(since, follow).await;
+
+    #[cfg(not(all(target_os = "macos", feature = "macos-app")))]
+    daemon_logs(since, follow).await
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-app"))]
+async fn app_logs(since: Option<Duration>, follow: bool) -> Result<()> {
+    use rayfish::macos_logs::LogReader;
+
+    let mut reader = LogReader::start(since, follow)?;
+    let mut sink = Sink::new(!follow && std::io::stdout().is_terminal());
+    let mut buffer = vec![0; ipc::LOG_CHUNK_BYTES];
+    let result = loop {
+        let read = tokio::select! {
+            result = reader.read(&mut buffer) => result,
+            _ = tokio::signal::ctrl_c() => break Ok(()),
+        };
+        match read {
+            Ok(0) => break Ok(()),
+            Ok(n) if !sink.write(&buffer[..n]) => break Ok(()),
+            Ok(_) => {}
+            Err(error) => break Err(error),
+        }
+    };
+    // Stop the live reader before waiting for an interactive pager to close.
+    drop(reader);
+    sink.finish();
+    result
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-app")))]
+async fn daemon_logs(since: Option<Duration>, follow: bool) -> Result<()> {
     let mut stream = ipc::connect().await?;
     ipc::send(&mut stream, ipc::IpcMessage::Logs { since, follow }).await?;
 

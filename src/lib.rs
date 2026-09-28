@@ -89,6 +89,8 @@ mod listen_events;
 #[cfg(feature = "desktop")]
 mod listener;
 pub mod logdir;
+#[cfg(target_os = "macos")]
+pub mod macos_logs;
 pub mod management;
 pub mod membership;
 pub mod network_name;
