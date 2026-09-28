@@ -38,7 +38,12 @@ use rayfish::firewall::{
 /// Packet sizes spanning the MTU: a small control/ACK packet, IPv6's minimum
 /// MTU, and a full TUN packet. The copy cost scales with size; the
 /// zero-copy path should be flat.
-const SIZES: &[usize] = &[64, 1280, rayfish::tun::TUN_MTU as usize];
+const SIZES: &[usize] = &[64, 256, 1200, rayfish::tun::TUN_MTU as usize];
+
+/// Representative packets per NetworkExtension delivery. The direct utun
+/// path no longer crosses this bridge, but these sizes keep the old callback
+/// and a batched callback comparable for future bridge changes.
+const APPLE_BATCH_SIZES: &[usize] = &[1, 8, 32];
 
 /// Pool chunk size used by the old forwarding pool and the direct Android
 /// reader, so allocation stays amortized across packets.
@@ -195,6 +200,40 @@ fn bench_apple_tun_ingress(c: &mut Criterion) {
                 });
             },
         );
+
+        for &batch_size in APPLE_BATCH_SIZES {
+            let batch_bytes = (size * batch_size) as u64;
+            group.throughput(Throughput::Bytes(batch_bytes));
+
+            // Candidate batch bridge: each packet still becomes an owned Vec,
+            // but the bounded queue carries one batch instead of one message
+            // per packet. Drain the complete batch before accepting another,
+            // matching the single-reader ordering contract.
+            group.bench_with_input(
+                BenchmarkId::new("bridge_batch_queue", format!("{size}x{batch_size}")),
+                &packet,
+                |b, pkt| {
+                    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+                    let mut pool = BytesMut::with_capacity(POOL_CHUNK);
+                    b.iter(|| {
+                        let packets = (0..batch_size)
+                            .map(|_| black_box(pkt).to_vec())
+                            .collect::<Vec<_>>();
+                        sender
+                            .try_send(packets)
+                            .expect("benchmark batch queue must have capacity");
+                        let packets = receiver.try_recv().expect("benchmark batch must be queued");
+                        for packet in packets {
+                            if pool.capacity() < MAX_DATAGRAM {
+                                pool.reserve(POOL_CHUNK);
+                            }
+                            pool.extend_from_slice(black_box(&packet));
+                            black_box(pool.split_to(size).freeze());
+                        }
+                    });
+                },
+            );
+        }
     }
     group.finish();
 }

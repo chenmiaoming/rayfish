@@ -172,6 +172,10 @@ proptest = "1"
 name = "forward"
 harness = false
 
+[[bench]]
+name = "apple_bridge"
+harness = false
+
 # The `tun` crate wraps the OS TUN device and is inherently desktop: on Android
 # the packet interface is a `VpnService` fd handed in from Kotlin, not an OS
 # device. Gating it out of the Android build keeps the library free of a
