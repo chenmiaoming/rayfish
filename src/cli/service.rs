@@ -95,6 +95,7 @@ pub(crate) fn ensure_service_installed() -> Result<()> {
 pub(crate) async fn cmd_up(
     hostname: Option<String>,
     controller: Option<ipc::EnrollmentTicket>,
+    enable_ssh: bool,
 ) -> Result<()> {
     #[cfg(windows)]
     let mut operator_claim = WindowsOperatorClaim::begin()?;
@@ -108,6 +109,12 @@ pub(crate) async fn cmd_up(
                 #[cfg(windows)]
                 operator_claim.commit();
                 println!("{message}");
+                if enable_ssh {
+                    ipc_firewall(FirewallAction::Ssh {
+                        action: SshAction::On,
+                    })
+                    .await?;
+                }
                 if let Some(ticket) = controller {
                     ipc_enroll_controller(&ticket).await?;
                 }
@@ -131,6 +138,12 @@ pub(crate) async fn cmd_up(
         std::process::exit(1);
     }
     install_and_start_service(hostname).await?;
+    if enable_ssh {
+        ipc_firewall(FirewallAction::Ssh {
+            action: SshAction::On,
+        })
+        .await?;
+    }
     if let Some(ticket) = controller {
         ipc_enroll_controller(&ticket).await?;
     }
