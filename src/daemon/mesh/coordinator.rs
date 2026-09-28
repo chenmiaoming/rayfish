@@ -9,6 +9,24 @@ use std::net::Ipv6Addr;
 
 use super::super::*;
 
+struct NetworkToNullify {
+    name: String,
+    state: SharedNetworkState,
+    dht_notify: Option<Arc<Notify>>,
+    independent: bool,
+}
+
+fn revoke_certificate_from_roster(members: &mut MemberList, target: EndpointId, independent: bool) {
+    if independent {
+        if let Some(member) = members.get_mut(&target) {
+            member.user_identity = None;
+            member.device_cert = None;
+        }
+    } else {
+        members.remove(&target);
+    }
+}
+
 impl NetworkRegistry {
     /// Single daemon-wide loop consuming every [`MeshConnection`]'s disconnect
     /// report. For each dropped identity it removes the peer from the table, prunes
@@ -253,8 +271,8 @@ impl NetworkRegistry {
     }
 
     /// Nullify a paired secondary device across every network we coordinate: add
-    /// its key to the signed blob's nullifier set, drop it from the roster + `.ray`
-    /// DNS, republish, and sever its links; persist the key in `revoked_devices`
+    /// its key to the signed blob's nullifier set, drop certificate-joined roster
+    /// entries, republish, and sever those links; persist the key in `revoked_devices`
     /// (the durable nullifier seed that survives a restart). Shared by `ray unpair
     /// <device>` (primary-initiated) and the `ControlMsg::RequestUnpair` handler (a
     /// secondary asking its primary to revoke it). Returns the device's display
@@ -271,10 +289,10 @@ impl NetworkRegistry {
         // guards drop before any await.
         let mut display = target.fmt_short().to_string();
         let mut is_paired = false;
-        let mut nets: Vec<(String, SharedNetworkState, Option<Arc<Notify>>, bool)> = Vec::new();
+        let mut nets = Vec::new();
         for entry in self.networks.iter() {
             let s = entry.value().state.read().unwrap();
-            if let Some(m) = s.members.all().iter().find(|m| m.identity == target)
+            if let Some(m) = s.members.get(&target)
                 && m.user_identity == Some(own_user)
             {
                 is_paired = true;
@@ -282,14 +300,23 @@ impl NetworkRegistry {
                     display = h.clone();
                 }
             }
-            let has_key = s.network_secret_key.is_some();
+            if s.network_secret_key.is_none() {
+                continue;
+            }
             drop(s);
-            nets.push((
-                entry.key().clone(),
-                Arc::clone(&entry.value().state),
-                entry.value().dht_notify.clone(),
-                has_key,
-            ));
+            let name = entry.key().clone();
+            let state = Arc::clone(&entry.value().state);
+            let dht_notify = entry.value().dht_notify.clone();
+            drop(entry);
+            let independent = config::load_network(&name)
+                .map_err(|error| format!("could not read network '{name}': {error}"))?
+                .is_some_and(|net| net.independent_paired_devices.contains(&target));
+            nets.push(NetworkToNullify {
+                name,
+                state,
+                dht_notify,
+                independent,
+            });
         }
         if !is_paired {
             return Err(format!(
@@ -313,33 +340,35 @@ impl NetworkRegistry {
 
         // Nullify on every network we coordinate (add to the signed blob's
         // nullifier set + drop it from the roster), republish, and sever links.
-        for (net, state, dht_notify, has_key) in nets {
-            if has_key {
-                {
-                    let mut s = state.write().unwrap();
-                    s.nullifiers.insert(target);
-                    s.members.remove(&target);
-                    s.approved.remove(&target);
-                }
-                // Unconditional: the address derives from the identity, so there
-                // is nothing to look up first, and the prune is a `retain` that
-                // costs nothing when the name was never in the table.
+        for net in nets {
+            {
+                let mut state = net.state.write().unwrap();
+                state.nullifiers.insert(target);
+                revoke_certificate_from_roster(&mut state.members, target, net.independent);
+                state.approved.remove(&target);
+            }
+            if !net.independent {
                 dns::remove_hostname_by_ip(
                     &self.dns.hostname_table,
                     &self.dns.reverse_table,
-                    &net,
+                    &net.name,
                     derive_ipv6(&target),
                 )
                 .await;
-                update_snapshot_and_publish(&state, &self.transport.blob_store, &dht_notify).await;
-                let net_pubkey = state.read().unwrap().network_public_key;
-                broadcast_member_sync(self, net_pubkey, &net, None).await;
             }
-            for (pid, ip, conn) in self.peers.peers_for_network_with_conn(&net) {
+            update_snapshot_and_publish(&net.state, &self.transport.blob_store, &net.dht_notify)
+                .await;
+            let net_pubkey = net.state.read().unwrap().network_public_key;
+            broadcast_member_sync(self, net_pubkey, &net.name, None).await;
+            if net.independent {
+                continue;
+            }
+            for (pid, ip, _conn) in self.peers.peers_for_network_with_conn(&net.name) {
                 if pid == target {
-                    self.pruned_peers.insert((net.clone(), pid));
-                    conn.close(VarInt::from_u32(forward::KICK_CODE), b"unpaired");
-                    self.peers.remove_peer_from_network(&ip, &net);
+                    self.pruned_peers.insert((net.name.clone(), pid));
+                    if let Some(last_conn) = self.peers.remove_peer_from_network(&ip, &net.name) {
+                        last_conn.close(VarInt::from_u32(forward::KICK_CODE), b"unpaired");
+                    }
                 }
             }
         }
@@ -847,6 +876,28 @@ mod sender_authority_tests {
             pending: HashMap::new(),
             last_record_timestamp: None,
         }))
+    }
+
+    #[test]
+    fn revocation_keeps_an_independent_member_without_its_certificate() {
+        let primary = SecretKey::generate();
+        let device = eid(7);
+        let mut member = member(device, false);
+        member.user_identity = Some(primary.public());
+        member.device_cert = Some(control::DeviceCert::create(&primary, &device, 0));
+        let mut members = MemberList::new();
+        members.add(member.clone());
+
+        revoke_certificate_from_roster(&mut members, device, true);
+        let kept = members.get(&device).unwrap();
+        assert_eq!(kept.identity, device);
+        assert_eq!(kept.user_identity, None);
+        assert_eq!(kept.device_cert, None);
+
+        let mut paired_only = MemberList::new();
+        paired_only.add(member);
+        revoke_certificate_from_roster(&mut paired_only, device, false);
+        assert!(paired_only.get(&device).is_none());
     }
 
     #[test]

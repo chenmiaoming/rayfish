@@ -1128,6 +1128,13 @@ impl FileService {
                         };
                         match check {
                             PairCheck::Accepted => {
+                                if let Err(error) = self
+                                    .registry
+                                    .remember_independent_paired_device(device_pubkey)
+                                {
+                                    tracing::warn!(%error, "could not record existing memberships before pairing");
+                                    return;
+                                }
                                 // Sign the device's public key
                                 // Share our saved networks so the new device can auto-join them. Only
                                 // networks with a known public key (skips freshly created, unsynced ones).

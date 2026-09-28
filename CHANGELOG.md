@@ -66,6 +66,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Unpairing a device keeps networks it joined independently, including networks
+  it coordinates, and removes only memberships gained through its pairing
+  certificate.
+
 - Pairing joins all shared networks when several joins reach the same coordinator
   at once. Concurrent joins reuse one mesh connection to that peer.
 

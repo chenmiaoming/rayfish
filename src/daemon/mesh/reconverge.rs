@@ -493,15 +493,20 @@ pub(crate) fn prune_departed_peers(
         // Membership is by roster identity, which for a paired peer is its user
         // identity, not the transport id the PeerTable is keyed on. Check both.
         let user_id = device_user_map.resolve(&peer_id);
-        // A peer whose device key is nullified on this network is severed even if a
-        // stale roster still lists it, the nullifier is authoritative over the
-        // (possibly not-yet-republished) membership. `peer_id` is the transport
-        // (device) key the nullifier set is keyed on.
+        // A nullifier revokes the peer's certificate. A roster row with no
+        // certificate can still authorize an independent membership.
         let nullified = nullifiers.contains(&peer_id);
-        let still_member = {
-            let s = state.read().unwrap();
-            s.members.is_member(&peer_id) || s.members.is_member(&user_id)
-        };
+        let roster = state.read().unwrap();
+        let still_member = roster.members.is_member(&peer_id) || roster.members.is_member(&user_id);
+        let independent_member = roster
+            .members
+            .get(&peer_id)
+            .is_some_and(|member| member.user_identity.is_none() && member.device_cert.is_none());
+        drop(roster);
+        if nullified && independent_member {
+            device_user_map.remove(&peer_id);
+            continue;
+        }
         if !nullified && (still_member || peer_id == my_identity || user_id == my_identity) {
             continue;
         }

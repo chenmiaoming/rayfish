@@ -165,6 +165,15 @@ pub struct NetworkConfig {
     pub network_secret_key: Option<SecretKey>,
     #[serde(default)]
     pub network_public_key: Option<EndpointId>,
+    /// The primary whose certificate was presented on this device's first join.
+    /// Absent for networks created or joined independently, including configs
+    /// saved before this field existed. Reconnects must not change this origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_certificate_issuer: Option<EndpointId>,
+    /// Devices that were already members when this coordinator paired them.
+    /// Revoking their certificate must keep their independent membership.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub independent_paired_devices: Vec<EndpointId>,
     /// Hash of the last complete GroupBlob this node verified or authored.
     /// Coordinator restore uses it only when the signed pkarr record is
     /// unreachable, so an expired record can be republished without rebuilding
@@ -420,6 +429,8 @@ pub(crate) fn empty_network_config(name: &str) -> NetworkConfig {
         approved: vec![],
         network_secret_key: None,
         network_public_key: None,
+        join_certificate_issuer: None,
+        independent_paired_devices: vec![],
         last_group_hash: None,
         last_group_hash_published: true,
         transport: None,
@@ -1814,6 +1825,8 @@ mod tests {
                     approved: vec![],
                     network_secret_key: None,
                     network_public_key: None,
+                    join_certificate_issuer: None,
+                    independent_paired_devices: vec![],
                     last_group_hash: None,
                     last_group_hash_published: true,
                     my_hostname: None,
@@ -1838,6 +1851,8 @@ mod tests {
                     approved: vec![],
                     network_secret_key: None,
                     network_public_key: None,
+                    join_certificate_issuer: None,
+                    independent_paired_devices: vec![],
                     last_group_hash: None,
                     last_group_hash_published: true,
                     my_hostname: None,
@@ -1883,6 +1898,8 @@ mod tests {
             approved: vec![],
             network_secret_key: None,
             network_public_key: None,
+            join_certificate_issuer: None,
+            independent_paired_devices: vec![],
             last_group_hash: None,
             last_group_hash_published: true,
             my_hostname: None,
@@ -1916,6 +1933,8 @@ mod tests {
                 approved: vec![],
                 network_secret_key: None,
                 network_public_key: None,
+                join_certificate_issuer: None,
+                independent_paired_devices: vec![],
                 last_group_hash: None,
                 last_group_hash_published: true,
                 my_hostname: None,
@@ -1942,6 +1961,8 @@ mod tests {
             approved: vec![],
             network_secret_key: None,
             network_public_key: None,
+            join_certificate_issuer: None,
+            independent_paired_devices: vec![],
             last_group_hash: None,
             last_group_hash_published: true,
             my_hostname: None,
@@ -1975,6 +1996,8 @@ mod tests {
                     approved: vec![],
                     network_secret_key: None,
                     network_public_key: None,
+                    join_certificate_issuer: None,
+                    independent_paired_devices: vec![],
                     last_group_hash: None,
                     last_group_hash_published: true,
                     my_hostname: None,
@@ -1999,6 +2022,8 @@ mod tests {
                     approved: vec![],
                     network_secret_key: None,
                     network_public_key: None,
+                    join_certificate_issuer: None,
+                    independent_paired_devices: vec![],
                     last_group_hash: None,
                     last_group_hash_published: true,
                     my_hostname: None,
@@ -2049,6 +2074,8 @@ mod tests {
                 }],
                 network_secret_key: None,
                 network_public_key: None,
+                join_certificate_issuer: None,
+                independent_paired_devices: vec![],
                 last_group_hash: None,
                 last_group_hash_published: true,
                 my_hostname: None,
@@ -2086,6 +2113,8 @@ mod tests {
                 approved: vec![],
                 network_secret_key: Some(secret.clone()),
                 network_public_key: Some(public),
+                join_certificate_issuer: None,
+                independent_paired_devices: vec![],
                 last_group_hash: None,
                 last_group_hash_published: true,
                 my_hostname: None,
@@ -2195,6 +2224,8 @@ name = "test"
             approved: vec![],
             network_secret_key: Some(SecretKey::generate()),
             network_public_key: None,
+            join_certificate_issuer: None,
+            independent_paired_devices: vec![],
             last_group_hash: None,
             last_group_hash_published: true,
             transport: None,
