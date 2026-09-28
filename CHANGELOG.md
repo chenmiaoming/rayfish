@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Pending-join queue evictions are now exposed through the
+  `pending_joins_evicted` metric, making approval-queue saturation observable.
+
 - Firewall suggestions accept `*-host-a,host-b` in `allows` to allow every
   network peer except the named hosts, including peers that join later. Paired
   devices sharing a user identity are excluded together. `ray apply` also accepts
