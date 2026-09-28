@@ -69,8 +69,15 @@ use crate::peers::FastDashMap;
 use anyhow::{Context, Result, bail};
 use arc_swap::ArcSwap;
 use iroh::EndpointId;
+use nom::Parser;
+use nom::bytes::complete::{tag, take_while1};
+use nom::character::complete::char;
+use nom::combinator::all_consuming;
+use nom::error::Error as NomError;
+use nom::multi::separated_list1;
+use nom::sequence::preceded;
 use ray_proto::SuggestedFirewall;
-use ray_proto::ipc::FirewallRuleView;
+use ray_proto::ipc::{FirewallRuleView, MachineHostname};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -90,6 +97,39 @@ pub use ray_proto::{Action, Direction, Protocol};
 pub enum PeerFilter {
     Any,
     Identity(EndpointId),
+    Except {
+        hostnames: Vec<MachineHostname>,
+        identities: Vec<EndpointId>,
+    },
+}
+
+/// Parse `*-host-a,host-b` as a wildcard with excluded peer hostnames.
+/// Ordinary peer selectors return `None`.
+pub fn parse_excluded_peers(selector: &str) -> Result<Option<Vec<MachineHostname>>> {
+    if !selector.starts_with("*-") {
+        return Ok(None);
+    }
+    let (_, exclusions) = all_consuming(preceded(
+        tag("*-"),
+        separated_list1(
+            char::<&str, NomError<&str>>(','),
+            take_while1(|character: char| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            }),
+        ),
+    ))
+    .parse(selector)
+    .map_err(|_| anyhow::anyhow!("invalid excluded-peer selector '{selector}'"))?;
+    let mut hosts = exclusions
+        .into_iter()
+        .map(|host| {
+            host.parse::<MachineHostname>()
+                .with_context(|| format!("invalid excluded peer '{host}' in '{selector}'"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    hosts.sort();
+    hosts.dedup();
+    Ok(Some(hosts))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +374,11 @@ impl SharedFirewall {
                 PeerFilter::Any => {}
                 PeerFilter::Identity(id) => {
                     if id != peer {
+                        continue;
+                    }
+                }
+                PeerFilter::Except { identities, .. } => {
+                    if identities.contains(peer) {
                         continue;
                     }
                 }
@@ -704,8 +749,9 @@ pub fn parse_spec_token(tok: &str) -> Result<(Protocol, Option<PortRange>)> {
 /// own hostname and the wildcard `*` subject (which targets every node, e.g.
 /// "everyone opens 6969"). Peer hostnames are resolved to identities via
 /// `resolve` (the blob's member list); unresolved peers are skipped, their rules
-/// materialize once they join. The `*` peer key means *any peer* and bypasses
-/// resolution. Every rule is inbound, network-scoped to `net`, and tagged
+/// materialize once they join. The `*` peer key means any peer, and
+/// `*-host-a,host-b` means any peer except those hostnames. Every rule is inbound,
+/// network-scoped to `net`, and tagged
 /// `origin: Network(net)`. Suggestions are purely additive: each token yields
 /// exactly one rule (allow or deny) and nothing is synthesized: the node's own
 /// `default_inbound` (Deny by default) already covers anything an allow-list
@@ -717,6 +763,18 @@ pub fn materialize_suggestions(
     my_hostname: &str,
     suggestions: &SuggestedFirewall,
     resolve: &dyn Fn(&str) -> Option<EndpointId>,
+) -> Vec<FirewallRule> {
+    materialize_suggestions_with_exclusion_resolver(net, my_hostname, suggestions, resolve, resolve)
+}
+
+/// Exclusions use the identity seen by the packet filter, which may be a paired
+/// device's user identity instead of its transport identity.
+pub(crate) fn materialize_suggestions_with_exclusion_resolver(
+    net: &str,
+    my_hostname: &str,
+    suggestions: &SuggestedFirewall,
+    resolve: &dyn Fn(&str) -> Option<EndpointId>,
+    resolve_excluded: &dyn Fn(&str) -> Option<EndpointId>,
 ) -> Vec<FirewallRule> {
     let mut rules = Vec::new();
     // The wildcard `*` subject applies to every node, alongside its own subject
@@ -732,14 +790,27 @@ pub fn materialize_suggestions(
     for host in &applicable {
         for (action, list) in [(Action::Allow, &host.allows), (Action::Deny, &host.denies)] {
             for (peer, ports) in list {
-                // `*` ⇒ any peer (no resolution); otherwise resolve the hostname.
-                let filter = if peer == "*" {
-                    PeerFilter::Any
-                } else {
-                    match resolve(peer) {
+                let filter = match parse_excluded_peers(peer) {
+                    Ok(Some(hostnames)) if action == Action::Allow => PeerFilter::Except {
+                        identities: hostnames
+                            .iter()
+                            .filter_map(|hostname| resolve_excluded(hostname.as_ref()))
+                            .collect(),
+                        hostnames,
+                    },
+                    Ok(Some(_)) => {
+                        tracing::warn!(selector = %peer, "excluded-peer selector is only valid in allows");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(selector = %peer, %error, "skipping invalid peer selector");
+                        continue;
+                    }
+                    Ok(None) if peer == "*" => PeerFilter::Any,
+                    Ok(None) => match resolve(peer) {
                         Some(id) => PeerFilter::Identity(id),
                         None => continue,
-                    }
+                    },
                 };
                 for tok in ports.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     match parse_spec_token(tok) {
@@ -780,6 +851,14 @@ pub fn rule_view(
     let peer = match &rule.peer {
         PeerFilter::Any => "any".to_string(),
         PeerFilter::Identity(id) => short_id(id),
+        PeerFilter::Except { hostnames, .. } => format!(
+            "any except {}",
+            hostnames
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     };
     let port = match &rule.port {
         None => "*".to_string(),
@@ -2203,6 +2282,86 @@ mod tests {
         let mut map = SuggestedFirewall::new();
         map.insert(subject.to_string(), entry);
         map
+    }
+
+    #[test]
+    fn excluded_peers_allow_other_members_and_follow_roster_changes() {
+        let excluded = test_id(2);
+        let other = test_id(3);
+        let suggestions = suggest("sample-net", &[("*-a,b", "tcp:12345,tcp:23456")]);
+        let resolve = |host: &str| match host {
+            "a" => Some(excluded),
+            "b" => None,
+            _ => None,
+        };
+        let rules = materialize_suggestions("prod", "sample-net", &suggestions, &resolve);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            rule_view(&rules[0], &|id| id.fmt_short().to_string()).peer,
+            "any except a,b"
+        );
+        let config = FirewallConfig {
+            rules,
+            ..FirewallConfig::default()
+        };
+        assert_eq!(
+            SharedFirewall::match_rule(&config, Direction::In, 6, 12345, &excluded, Some("prod")),
+            None
+        );
+        assert_eq!(
+            SharedFirewall::match_rule(&config, Direction::In, 6, 12345, &other, Some("prod")),
+            Some(Action::Allow)
+        );
+
+        let resolve_after_join = |host: &str| match host {
+            "a" => Some(excluded),
+            "b" => Some(other),
+            _ => None,
+        };
+        let updated =
+            materialize_suggestions("prod", "sample-net", &suggestions, &resolve_after_join);
+        let config = FirewallConfig {
+            rules: updated,
+            ..FirewallConfig::default()
+        };
+        assert_eq!(
+            SharedFirewall::match_rule(&config, Direction::In, 6, 12345, &other, Some("prod")),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_excluded_peer_selector_is_rejected() {
+        assert!(parse_excluded_peers("*-").is_err());
+        assert!(parse_excluded_peers("*-a,").is_err());
+        assert!(parse_excluded_peers("*-A").is_err());
+    }
+
+    #[test]
+    fn excluded_paired_device_matches_its_packet_identity() {
+        let device = test_id(2);
+        let user = test_id(3);
+        let other = test_id(4);
+        let suggestions = suggest("sample-net", &[("*-phone", "tcp:12345")]);
+        let rules = materialize_suggestions_with_exclusion_resolver(
+            "prod",
+            "sample-net",
+            &suggestions,
+            &|hostname| (hostname == "phone").then_some(device),
+            &|hostname| (hostname == "phone").then_some(user),
+        );
+        let config = FirewallConfig {
+            rules,
+            ..FirewallConfig::default()
+        };
+        assert_eq!(
+            SharedFirewall::match_rule(&config, Direction::In, 6, 12345, &user, Some("prod")),
+            None
+        );
+        assert_eq!(
+            SharedFirewall::match_rule(&config, Direction::In, 6, 12345, &other, Some("prod")),
+            Some(Action::Allow)
+        );
     }
 
     #[test]

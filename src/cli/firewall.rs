@@ -483,10 +483,15 @@ pub(crate) async fn ipc_firewall_suggest(
     let entry = suggestions.entry(subject.to_string()).or_default();
     for a in &allow {
         let (peer, ports) = parse_suggest_token(a, "--allow")?;
+        firewall::parse_excluded_peers(&peer)?;
         entry.allows.insert(peer, ports);
     }
     for d in &deny {
         let (peer, ports) = parse_suggest_token(d, "--deny")?;
+        anyhow::ensure!(
+            firewall::parse_excluded_peers(&peer)?.is_none(),
+            "excluded-peer selector '{peer}' is only valid in allows"
+        );
         entry.denies.insert(peer, ports);
     }
     // Drop a now-empty subject so removing all of a host's rules clears it.

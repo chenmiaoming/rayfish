@@ -56,8 +56,22 @@ pub(crate) fn apply_suggested_firewall(
         .filter_map(|m| m.hostname.as_deref().map(|h| (h, m.identity)))
         .collect();
     let resolve = |h: &str| map.get(h).copied();
-    let rules =
-        firewall::materialize_suggestions(network_name, &my_hostname, &suggestions, &resolve);
+    let excluded_map: HashMap<&str, EndpointId> = members
+        .iter()
+        .filter_map(|m| {
+            m.hostname
+                .as_deref()
+                .map(|h| (h, m.user_identity.unwrap_or(m.identity)))
+        })
+        .collect();
+    let resolve_excluded = |h: &str| excluded_map.get(h).copied();
+    let rules = firewall::materialize_suggestions_with_exclusion_resolver(
+        network_name,
+        &my_hostname,
+        &suggestions,
+        &resolve,
+        &resolve_excluded,
+    );
 
     // Auto-install only if this node opted into `--auto-accept-firewall` for the
     // network; otherwise queue the materialized rules for `ray firewall accept`.
@@ -415,10 +429,10 @@ pub(crate) async fn reconverge_and_apply(
         network_name,
         my_identity,
     );
+    apply_suggested_firewall(firewall, my_identity, network_name, state);
     // The mirror of the prune: a peer we are already connected to that this roster
     // now lists, but whose connection never got registered for this network.
     attach_rejoined_peers(peers, device_user_map, &roster, network_name, my_identity).await;
-    apply_suggested_firewall(firewall, my_identity, network_name, state);
     // If a local rename is still unconfirmed by this just-applied blob, keep
     // delivering it to the coordinator set until it lands.
     drain_pending_rename(

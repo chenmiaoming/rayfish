@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Suggested firewall rules for one subject host, keyed by peer hostname.
+/// Suggested firewall rules for one subject host, keyed by peer selector.
 ///
 /// **Neither field may carry `skip_serializing_if`.** This type rides the signed
 /// `GroupBlob`, which is array-encoded (`canonical_group_bytes`), so a skipped
@@ -26,8 +26,9 @@ use serde::{Deserialize, Serialize};
 /// than absent costs one byte per side.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSuggestions {
-    /// peer hostname -> proto:ports spec (e.g. `"tcp:22"`, `"icmp"`, `"tcp:*"`):
-    /// the subject accepts inbound from that peer. Suggestions are additive —
+    /// Peer hostname, `*`, or `*-host-a,host-b` -> proto:ports spec (e.g.
+    /// `"tcp:22"`, `"icmp"`, `"tcp:*"`):
+    /// the subject accepts inbound from that peer. Suggestions are additive:
     /// each entry materializes one allow rule and nothing else; the node's own
     /// inbound default (Deny by default) already drops anything not listed, so
     /// no catch-all deny is synthesized.

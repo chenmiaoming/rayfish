@@ -10,8 +10,8 @@
 //! wire/blob shape and the authoring shape are identical: an admin authors the
 //! exact rules a node will materialize, keyed by hostname, before any host has
 //! joined. A `*` subject targets every node, and a `*` peer in `allows`/`denies`
-//! means any peer, so "everyone opens 6969 to anyone" is one line. Specs are
-//! **YAML only** (most readable); output (`--dry-run`, `--example`) is YAML too.
+//! means any peer. In `allows`, `*-host-a,host-b` means any peer except those
+//! hosts. Specs and their output (`--dry-run`, `--example`) use YAML.
 //!
 //! Firewall model: suggestions are additive. An `allows` list opens exactly the
 //! listed peers/ports (the node's own inbound default, Deny by default, drops
@@ -107,6 +107,27 @@ fn validate_names(spec: &DeploySpec) -> Result<()> {
             "`{name}` is defined as both a group and an alias; names must be unique"
         );
     }
+    for firewall in spec.networks.values() {
+        for rules in firewall.values() {
+            for peer in rules.allows.keys() {
+                if let Some(exclusions) = crate::firewall::parse_excluded_peers(peer)? {
+                    for hostname in exclusions {
+                        anyhow::ensure!(
+                            !spec.groups.contains_key(hostname.as_ref())
+                                && !spec.aliases.contains_key(hostname.as_ref()),
+                            "excluded peer '{hostname}' must be a hostname, not a group or alias"
+                        );
+                    }
+                }
+            }
+            for peer in rules.denies.keys() {
+                anyhow::ensure!(
+                    crate::firewall::parse_excluded_peers(peer)?.is_none(),
+                    "excluded-peer selector '{peer}' is only valid in allows"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -147,8 +168,10 @@ pub const EXAMPLE_SPEC: &str = r#"# Rayfish deploy spec. See `ray apply --help`.
 # --invite-missing` binds into invites — a node joining with such an invite is
 # assigned that exact hostname (it cannot pick another), so the firewall always
 # resolves the peer it names. The `*` subject targets every node, and a `*` peer
-# means any peer. Suggestions are advisory: each node queues them for
-# `ray firewall accept`, or auto-installs them if it joined with
+# means any peer. In `allows`, `*-host-a,host-b` means any peer except those
+# hostnames. Paired devices share a firewall identity, so excluding one also
+# excludes its user's other devices. Suggestions are advisory: each node queues
+# them for `ray firewall accept`, or auto-installs them if it joined with
 # `--auto-accept-firewall`.
 #
 # Optional `aliases:` and `groups:` are coordinator-side shorthand, expanded
@@ -211,7 +234,7 @@ pub fn expected_hosts_for_network(firewall: &SuggestedFirewall) -> BTreeSet<Stri
             set.insert(subject.clone());
         }
         for peer in rules.allows.keys().chain(rules.denies.keys()) {
-            if peer != "*" {
+            if peer != "*" && !peer.starts_with("*-") {
                 set.insert(peer.clone());
             }
         }
@@ -227,7 +250,7 @@ pub fn has_membership_wildcard(firewall: &SuggestedFirewall) -> bool {
                 .allows
                 .keys()
                 .chain(rules.denies.keys())
-                .any(|peer| peer == "*")
+                .any(|peer| peer == "*" || peer.starts_with("*-"))
     })
 }
 
@@ -311,8 +334,8 @@ pub fn expand_firewall(
 
     // Resolve a subject/peer name to concrete hostnames (or keep `*`).
     let mut resolve_name = |name: &str| -> Vec<String> {
-        if name == "*" {
-            return vec!["*".to_string()];
+        if name == "*" || name.starts_with("*-") {
+            return vec![name.to_string()];
         }
         if let Some(members) = groups.get(name) {
             let mut out: Vec<String> = Vec::new();
@@ -411,6 +434,61 @@ networks:
         let g = spec.networks.get("gaming").unwrap();
         let alice = g.get("alice").unwrap();
         assert_eq!(alice.allows.get("bob").map(|s| s.as_str()), Some("tcp:22"));
+    }
+
+    #[test]
+    fn excluded_peer_selector_survives_expansion_and_preserves_membership() {
+        let spec = parse(
+            r#"
+networks:
+  sample-net:
+    target-host:
+      allows:
+        "*-a,b,c": "tcp:12345,tcp:23456"
+"#,
+        )
+        .unwrap();
+        let firewall = &spec.networks["sample-net"];
+        assert_eq!(
+            expected_hosts_for_network(firewall),
+            ["target-host".to_string()].into()
+        );
+        let current = ["target-host", "a", "new-peer"]
+            .into_iter()
+            .map(|host| host.parse().unwrap())
+            .collect();
+        let diff = membership_diff(firewall, &current).unwrap();
+        assert!(diff.joins.is_empty());
+        assert!(diff.leaves.is_empty());
+        let (expanded, warnings) =
+            expand_firewall(firewall, &BTreeMap::new(), &BTreeMap::new(), &|_| {
+                Vec::new()
+            });
+        assert!(warnings.is_empty());
+        assert_eq!(
+            expanded["target-host"].allows["*-a,b,c"],
+            "tcp:12345,tcp:23456"
+        );
+    }
+
+    #[test]
+    fn malformed_or_denied_excluded_peer_selector_fails_validation() {
+        for peer in ["*-", "*-a,", "*-A"] {
+            let yaml = format!(
+                "networks:\n  sample-net:\n    host:\n      allows:\n        '{peer}': 'tcp:12345'\n"
+            );
+            assert!(parse(&yaml).is_err(), "selector {peer} should fail");
+        }
+        assert!(
+            parse(
+                "networks:\n  sample-net:\n    host:\n      denies:\n        '*-a': 'tcp:12345'\n"
+            )
+            .is_err()
+        );
+        assert!(
+            parse("groups:\n  admins: [a]\nnetworks:\n  sample-net:\n    host:\n      allows:\n        '*-admins': 'tcp:12345'\n")
+                .is_err()
+        );
     }
 
     #[test]

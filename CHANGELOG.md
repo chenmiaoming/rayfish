@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Firewall suggestions accept `*-host-a,host-b` in `allows` to allow every
+  network peer except the named hosts, including peers that join later. Paired
+  devices sharing a user identity are excluded together.
+
 - `ray up --enable-ssh` enables and saves mesh SSH while bringing the node up.
   Peer and Unix-user access still follows the existing SSH allow rules.
 
