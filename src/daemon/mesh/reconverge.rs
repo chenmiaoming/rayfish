@@ -319,6 +319,7 @@ pub(crate) async fn reconverge_and_apply(
             network_name,
             my_identity,
             device_cert,
+            registry,
         )
         .await;
         // Re-sync the exit-offer flag on this path too. An offer broadcast can
@@ -442,6 +443,7 @@ pub(crate) async fn reconverge_and_apply(
         network_name,
         my_identity,
         device_cert,
+        registry,
     )
     .await;
     // Re-advertise the exit offer if the fresh roster disagrees with what we
