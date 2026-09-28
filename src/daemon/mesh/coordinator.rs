@@ -9,6 +9,13 @@ use std::net::Ipv6Addr;
 
 use super::super::*;
 
+struct NetworkToNullify {
+    name: String,
+    state: SharedNetworkState,
+    dht_notify: Option<Arc<Notify>>,
+    independent: bool,
+}
+
 fn revoke_certificate_from_roster(members: &mut MemberList, target: EndpointId, independent: bool) {
     if independent {
         if let Some(member) = members.get_mut(&target) {
@@ -299,14 +306,18 @@ impl NetworkRegistry {
             let has_key = s.network_secret_key.is_some();
             drop(s);
             drop(entry);
-            let independent = if has_key {
-                config::load_network(&name)
-                    .map_err(|error| format!("could not read network '{name}': {error}"))?
-                    .is_some_and(|net| net.independent_paired_devices.contains(&target))
-            } else {
-                false
-            };
-            nets.push((name, state, dht_notify, has_key, independent));
+            if !has_key {
+                continue;
+            }
+            let independent = config::load_network(&name)
+                .map_err(|error| format!("could not read network '{name}': {error}"))?
+                .is_some_and(|net| net.independent_paired_devices.contains(&target));
+            nets.push(NetworkToNullify {
+                name,
+                state,
+                dht_notify,
+                independent,
+            });
         }
         if !is_paired {
             return Err(format!(
@@ -330,31 +341,33 @@ impl NetworkRegistry {
 
         // Nullify on every network we coordinate (add to the signed blob's
         // nullifier set + drop it from the roster), republish, and sever links.
-        for (net, state, dht_notify, has_key, independent) in nets {
-            if has_key {
-                {
-                    let mut s = state.write().unwrap();
-                    s.nullifiers.insert(target);
-                    revoke_certificate_from_roster(&mut s.members, target, independent);
-                    s.approved.remove(&target);
-                }
-                if !independent {
-                    dns::remove_hostname_by_ip(
-                        &self.dns.hostname_table,
-                        &self.dns.reverse_table,
-                        &net,
-                        derive_ipv6(&target),
-                    )
-                    .await;
-                }
-                update_snapshot_and_publish(&state, &self.transport.blob_store, &dht_notify).await;
-                let net_pubkey = state.read().unwrap().network_public_key;
-                broadcast_member_sync(self, net_pubkey, &net, None).await;
+        for net in nets {
+            {
+                let mut state = net.state.write().unwrap();
+                state.nullifiers.insert(target);
+                revoke_certificate_from_roster(&mut state.members, target, net.independent);
+                state.approved.remove(&target);
             }
-            for (pid, ip, _conn) in self.peers.peers_for_network_with_conn(&net) {
-                if pid == target && !independent {
-                    self.pruned_peers.insert((net.clone(), pid));
-                    if let Some(last_conn) = self.peers.remove_peer_from_network(&ip, &net) {
+            if !net.independent {
+                dns::remove_hostname_by_ip(
+                    &self.dns.hostname_table,
+                    &self.dns.reverse_table,
+                    &net.name,
+                    derive_ipv6(&target),
+                )
+                .await;
+            }
+            update_snapshot_and_publish(&net.state, &self.transport.blob_store, &net.dht_notify)
+                .await;
+            let net_pubkey = net.state.read().unwrap().network_public_key;
+            broadcast_member_sync(self, net_pubkey, &net.name, None).await;
+            if net.independent {
+                continue;
+            }
+            for (pid, ip, _conn) in self.peers.peers_for_network_with_conn(&net.name) {
+                if pid == target {
+                    self.pruned_peers.insert((net.name.clone(), pid));
+                    if let Some(last_conn) = self.peers.remove_peer_from_network(&ip, &net.name) {
                         last_conn.close(VarInt::from_u32(forward::KICK_CODE), b"unpaired");
                     }
                 }

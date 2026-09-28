@@ -143,19 +143,23 @@ impl Daemon {
                 // roster flagging it `is_coordinator`. Falls back to the blob's
                 // coordinators if the primary does not admit.
                 for net in networks {
-                    let already_joined = net.network_key.parse::<EndpointId>().is_ok_and(|key| {
-                        self.registry
+                    if let Ok(key) = net.network_key.parse::<EndpointId>() {
+                        if self
+                            .registry
                             .networks
                             .iter()
                             .any(|entry| entry.network_key == key)
-                            || config::load().is_ok_and(|cfg| {
-                                cfg.networks
-                                    .iter()
-                                    .any(|saved| saved.network_public_key == Some(key))
-                            })
-                    });
-                    if already_joined {
-                        continue;
+                        {
+                            continue;
+                        }
+                        if let Ok(cfg) = config::load()
+                            && cfg
+                                .networks
+                                .iter()
+                                .any(|saved| saved.network_public_key == Some(key))
+                        {
+                            continue;
+                        }
                     }
                     let me = Arc::clone(self);
                     let net_name = net.name.clone();

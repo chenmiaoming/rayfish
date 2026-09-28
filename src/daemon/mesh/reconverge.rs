@@ -494,21 +494,19 @@ pub(crate) fn prune_departed_peers(
         // A nullifier revokes the peer's certificate. A roster row with no
         // certificate can still authorize an independent membership.
         let nullified = nullifiers.contains(&peer_id);
-        let (still_member, independent_member) = {
-            let s = state.read().unwrap();
-            (
-                s.members.is_member(&peer_id) || s.members.is_member(&user_id),
-                s.members.get(&peer_id).is_some_and(|member| {
-                    member.user_identity.is_none() && member.device_cert.is_none()
-                }),
-            )
-        };
+        let roster = state.read().unwrap();
+        let still_member = roster.members.is_member(&peer_id) || roster.members.is_member(&user_id);
+        let independent_member = roster
+            .members
+            .get(&peer_id)
+            .is_some_and(|member| member.user_identity.is_none() && member.device_cert.is_none());
+        drop(roster);
         if nullified && independent_member {
             device_user_map.remove(&peer_id);
         }
-        if (!nullified || independent_member)
-            && (still_member || peer_id == my_identity || user_id == my_identity)
-        {
+        let allowed_by_nullifier = !nullified || independent_member;
+        let present = still_member || peer_id == my_identity || user_id == my_identity;
+        if allowed_by_nullifier && present {
             continue;
         }
         tracing::info!(peer = %peer_id.fmt_short(), network = %network_name, "pruning peer no longer in roster");

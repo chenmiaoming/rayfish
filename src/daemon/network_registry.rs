@@ -494,19 +494,19 @@ impl NetworkRegistry {
     /// Record memberships a device held before receiving our certificate.
     /// A later certificate revocation must not turn those into paired joins.
     pub(crate) fn remember_independent_paired_device(&self, device: EndpointId) -> Result<()> {
-        let names: Vec<String> = self
-            .networks
-            .iter()
-            .filter_map(|entry| {
-                let state = entry.state.read().unwrap();
-                (state.network_secret_key.is_some()
-                    && state
-                        .members
-                        .get(&device)
-                        .is_some_and(|member| member.user_identity.is_none()))
-                .then(|| entry.key().clone())
-            })
-            .collect();
+        let mut names = Vec::new();
+        for entry in self.networks.iter() {
+            let state = entry.state.read().unwrap();
+            if state.network_secret_key.is_none() {
+                continue;
+            }
+            let Some(member) = state.members.get(&device) else {
+                continue;
+            };
+            if member.user_identity.is_none() {
+                names.push(entry.key().clone());
+            }
+        }
         for name in names {
             config::update_network(&name, |net| {
                 if !net.independent_paired_devices.contains(&device) {
@@ -1201,11 +1201,10 @@ impl NetworkRegistry {
                     return None;
                 }
                 let state = entry.state.read().unwrap();
-                if state.nullifiers.contains(&peer)
-                    && !state.members.get(&peer).is_some_and(|member| {
-                        member.user_identity.is_none() && member.device_cert.is_none()
-                    })
-                {
+                let independent_member = state.members.get(&peer).is_some_and(|member| {
+                    member.user_identity.is_none() && member.device_cert.is_none()
+                });
+                if state.nullifiers.contains(&peer) && !independent_member {
                     return None;
                 }
                 (state.members.is_member(&peer) || state.members.is_member(&user))
