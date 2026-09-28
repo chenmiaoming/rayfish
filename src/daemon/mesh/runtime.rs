@@ -1048,8 +1048,10 @@ impl Daemon {
         let mut map = HashMap::new();
         if let Ok(cfg) = config::load() {
             for n in &cfg.networks {
-                if !n.ssh_allow.is_empty() {
-                    map.insert(n.name.clone(), n.ssh_allow.clone());
+                if !n.ssh_allow.is_empty() || !n.managed_ssh_allow.is_empty() {
+                    let mut rules = n.ssh_allow.clone();
+                    rules.extend(n.managed_ssh_allow.iter().cloned());
+                    map.insert(n.name.clone(), rules);
                 }
             }
         }

@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray apply` accepts per-host `ssh` grants. Applying them to controlled
+  machines enables mesh SSH and permits the named peers to log in as the listed
+  local accounts. Removing a grant from the spec removes that managed grant.
+
 - `ray up --enable-ssh` enables and saves mesh SSH while bringing the node up.
   Peer and Unix-user access still follows the existing SSH allow rules.
 

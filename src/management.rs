@@ -10,8 +10,10 @@
 //! or local confirmation clears the controller's durable removal record. Losing
 //! that record loses the distinction between a forgotten and a missing machine.
 //! Management v1 remains available for enrollment, status, joins, and leaves.
-//! Receipts and recovery require v2; a v1 enrollment stores no receipt.
+//! Receipts and recovery require v2; applying mesh SSH grants requires v3.
+//! A v1 enrollment stores no receipt.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use iroh::{EndpointId, SecretKey, Signature};
@@ -19,7 +21,8 @@ use ray_proto::ipc::{MachineHostname, NetworkName, UnixTimestampSecs};
 use serde::{Deserialize, Serialize};
 
 /// ALPN negotiated for direct controller-to-machine connections.
-pub const ALPN: &[u8] = b"rayfish/manage/2";
+pub const ALPN: &[u8] = b"rayfish/manage/3";
+pub const V2_ALPN: &[u8] = b"rayfish/manage/2";
 pub const LEGACY_ALPN: &[u8] = b"rayfish/manage/1";
 const SECRET_LEN: usize = 32;
 
@@ -173,6 +176,11 @@ pub enum ManagementAction {
     Leave {
         network_name: NetworkName,
     },
+    /// Replace SSH grants installed by the controller's deploy spec.
+    ApplySsh {
+        network_name: NetworkName,
+        grants: BTreeMap<String, Vec<String>>,
+    },
 }
 
 impl fmt::Debug for ManagementAction {
@@ -197,6 +205,14 @@ impl fmt::Debug for ManagementAction {
             Self::Leave { network_name } => f
                 .debug_struct("Leave")
                 .field("network_name", network_name)
+                .finish(),
+            Self::ApplySsh {
+                network_name,
+                grants,
+            } => f
+                .debug_struct("ApplySsh")
+                .field("network_name", network_name)
+                .field("grant_count", &grants.len())
                 .finish(),
         }
     }
@@ -255,6 +271,15 @@ pub enum ManagementMsg {
 }
 
 impl ManagementMsg {
+    pub(crate) fn supported_by_v2(&self) -> bool {
+        !matches!(
+            self,
+            Self::Request {
+                action: ManagementAction::ApplySsh { .. },
+                ..
+            }
+        )
+    }
     /// Gate new messages before processing anything received over the v1 ALPN.
     pub(crate) fn supported_by_v1(&self) -> bool {
         matches!(
@@ -369,6 +394,27 @@ mod tests {
             assert_eq!(restored, receipt);
             assert!(restored.verify(key.public(), machine));
         }
-        assert_eq!(ALPN, b"rayfish/manage/2");
+        assert_eq!(ALPN, b"rayfish/manage/3");
+    }
+
+    #[test]
+    fn ssh_apply_requires_management_v3() {
+        let message = ManagementMsg::Request {
+            request_id: ManagementRequestId::generate(),
+            action: ManagementAction::ApplySsh {
+                network_name: NetworkName::new("infra".to_string()),
+                grants: BTreeMap::from([("laptop".to_string(), vec!["deploy".to_string()])]),
+            },
+        };
+        assert!(!message.supported_by_v1());
+        assert!(!message.supported_by_v2());
+        let bytes = rmp_serde::to_vec(&message).unwrap();
+        assert!(matches!(
+            rmp_serde::from_slice::<ManagementMsg>(&bytes),
+            Ok(ManagementMsg::Request {
+                action: ManagementAction::ApplySsh { .. },
+                ..
+            })
+        ));
     }
 }

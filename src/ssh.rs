@@ -95,8 +95,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::daemon::NetworkRegistry;
+#[cfg(test)]
+use authz::resolve_user_policy;
 pub use authz::{SshAuthz, new_authz};
-use authz::{UserPolicy, auth_banner, resolve_user_policy};
+use authz::{UserPolicy, auth_banner, resolve_user_policy_with_hostnames};
 use host_keys::{load_host_key, sftp_subsystem_command};
 #[cfg(test)]
 use host_keys::{parse_hostkey_paths, parse_sftp_subsystem};
@@ -262,7 +264,12 @@ async fn handle_conn(
     };
     let user_identity = registry.device_user_map.resolve(&peer_id);
     let networks = registry.authorization_networks(peer_id);
-    let policy = resolve_user_policy(&authz, &user_identity, &networks);
+    let resolve = |network: &str, hostname: &str| {
+        registry
+            .resolve_peer_in_network(network, hostname)
+            .map(|id| registry.device_user_map.resolve(&id))
+    };
+    let policy = resolve_user_policy_with_hostnames(&authz, &user_identity, &networks, &resolve);
     // Logged before the handshake, and with the source port, so a session that
     // stalls before it authenticates (and so logs nothing else) is still
     // visible here and can be matched to a socket in `ss` output.

@@ -848,6 +848,7 @@ mod persist_config_tests {
             direct: false,
             direct_peer: None,
             ssh_allow: vec![],
+            managed_ssh_allow: vec![],
             aliases: BTreeMap::new(),
             ephemeral_ttl_secs: None,
             exit_allow: vec!["*".to_string()],

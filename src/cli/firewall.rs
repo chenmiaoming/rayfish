@@ -614,6 +614,7 @@ pub(crate) async fn ipc_apply(
 
     let mut missing_hosts: Vec<(String, String)> = Vec::new(); // (network, hostname)
     let mut removal_failures = false;
+    let mut ssh_failures = false;
     let managed_machines = ipc_managed_machines_for_apply().await.unwrap_or_default();
 
     for (net_name, net_firewall) in &expanded.networks {
@@ -641,14 +642,20 @@ pub(crate) async fn ipc_apply(
         // spec's set; without it, merge into the live set (so `apply` never
         // silently drops subjects authored out-of-band - use --prune for that).
         let to_publish = if prune {
-            net_firewall.clone()
+            apply::suggested_firewall(net_firewall)
         } else {
             let mut live = ipc_firewall_suggestions_get(net_name)
                 .await
                 .unwrap_or_default();
             // Merge spec subjects over live (spec wins on conflict).
             for (subj, rules) in net_firewall {
-                live.insert(subj.clone(), rules.clone());
+                live.insert(
+                    subj.clone(),
+                    ray_proto::policy::HostSuggestions {
+                        allows: rules.allows.clone(),
+                        denies: rules.denies.clone(),
+                    },
+                );
             }
             live
         };
@@ -666,6 +673,7 @@ pub(crate) async fn ipc_apply(
             .collect::<std::result::Result<_, _>>()?;
         let membership = apply::membership_diff(net_firewall, &current)?;
 
+        let mut active_hosts = current.clone();
         for host in membership.joins {
             if managed_machines
                 .iter()
@@ -676,7 +684,10 @@ pub(crate) async fn ipc_apply(
                 match ipc_delegated_join_request(&machine, &network, Some(host.clone()), true, true)
                     .await
                 {
-                    Ok(message) => println!("{}  {message}", style::faint("managed:")),
+                    Ok(message) => {
+                        active_hosts.insert(host.clone());
+                        println!("{}  {message}", style::faint("managed:"));
+                    }
                     Err(error) => {
                         eprintln!(
                             "{}  {net_name}: failed to join managed machine '{host}': {error}",
@@ -691,6 +702,7 @@ pub(crate) async fn ipc_apply(
         }
 
         for host in membership.leaves {
+            active_hosts.remove(&host);
             let status_network = status_networks
                 .iter()
                 .find(|network| network.name == *net_name);
@@ -721,6 +733,65 @@ pub(crate) async fn ipc_apply(
                     "{}  {net_name}: host '{host}' is not controlled; cannot request leave",
                     style::red("  !")
                 );
+            }
+        }
+
+        for host in active_hosts {
+            let mut grants = net_firewall
+                .get("*")
+                .map(|rules| rules.ssh.clone())
+                .unwrap_or_default();
+            if let Some(rules) = net_firewall.get(host.as_ref()) {
+                grants.extend(rules.ssh.clone());
+            }
+            let status_network = status_networks
+                .iter()
+                .find(|network| network.name == *net_name);
+            let Some(machine) =
+                managed_machine_for_hostname(status_network, &host, &managed_machines)
+            else {
+                if !grants.is_empty() {
+                    ssh_failures = true;
+                    eprintln!(
+                        "{}  {net_name}: SSH grants for '{host}' need a controlled machine",
+                        style::red("  !")
+                    );
+                }
+                continue;
+            };
+            let has_grants = !grants.is_empty();
+            let request = ipc::IpcMessage::DelegatedSshApply {
+                machine: ipc::ManagedMachineSelector::new(machine.identity.to_string()),
+                network: ipc::NetworkName::new(net_name.clone()),
+                grants,
+            };
+            match ipc_request(request).await {
+                Ok(ipc::IpcMessage::Ok { message }) => {
+                    if has_grants {
+                        println!("{}  {message}", style::faint("managed:"));
+                    }
+                }
+                Ok(ipc::IpcMessage::Error { message }) => {
+                    ssh_failures |= has_grants;
+                    eprintln!(
+                        "{}  {net_name}: SSH apply failed on '{host}': {message}",
+                        style::red("  !")
+                    );
+                }
+                Ok(other) => {
+                    ssh_failures |= has_grants;
+                    eprintln!(
+                        "{}  {net_name}: unexpected SSH apply response for '{host}': {other:?}",
+                        style::red("  !")
+                    );
+                }
+                Err(error) => {
+                    ssh_failures |= has_grants;
+                    eprintln!(
+                        "{}  {net_name}: SSH apply failed on '{host}': {error}",
+                        style::red("  !")
+                    );
+                }
             }
         }
     }
@@ -767,6 +838,7 @@ pub(crate) async fn ipc_apply(
             );
         }
     }
+    anyhow::ensure!(!ssh_failures, "some SSH grants could not be applied");
     Ok(())
 }
 

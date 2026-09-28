@@ -6,12 +6,10 @@
 //! publishing suggestions, and asking enrolled machines to join or leave from
 //! the per-network hostname diff.
 //!
-//! The spec reuses [`ray_proto::policy::SuggestedFirewall`] verbatim, so the
-//! wire/blob shape and the authoring shape are identical: an admin authors the
-//! exact rules a node will materialize, keyed by hostname, before any host has
-//! joined. A `*` subject targets every node, and a `*` peer in `allows`/`denies`
-//! means any peer, so "everyone opens 6969 to anyone" is one line. Specs are
-//! **YAML only** (most readable); output (`--dry-run`, `--example`) is YAML too.
+//! Firewall rules are published as suggestions; SSH grants are sent directly
+//! to enrolled controlled machines. Both are keyed by hostname. A `*` subject
+//! targets every node, and a `*` peer means any peer. Specs and their output
+//! (`--dry-run`, `--example`) use YAML.
 //!
 //! Firewall model: suggestions are additive. An `allows` list opens exactly the
 //! listed peers/ports (the node's own inbound default, Deny by default, drops
@@ -21,17 +19,17 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::collections::btree_map::Entry;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use ray_proto::ipc::MachineHostname;
-use ray_proto::policy::SuggestedFirewall;
+use ray_proto::policy::{HostSuggestions, SuggestedFirewall};
 use serde::{Deserialize, Serialize};
 
-/// The full deploy spec: a `networks:` map of network name → its suggested
-/// firewall (subject hostname → rules), with no `firewall:` indirection.
-/// Suggestions are advisory on every network; each node queues or auto-accepts
-/// them per its own `--auto-accept-firewall` choice. The [`BTreeMap`] gives a
+/// The full deploy spec: a `networks:` map of network name to target hostname
+/// to rules. Firewall suggestions are advisory; SSH grants require enrollment
+/// and are installed directly on controlled targets. The [`BTreeMap`] gives a
 /// canonical (sorted) serialization, so two admins authoring the same intent
 /// produce byte-identical files.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,10 +51,50 @@ pub struct DeploySpec {
     /// membership.
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
-    /// Network name → its suggested firewall (subject hostname → rules). A bare
-    /// [`SuggestedFirewall`], reused verbatim from `ray_proto::policy`.
+    /// Network name to target hostname to firewall and SSH rules.
     #[serde(default)]
-    pub networks: BTreeMap<String, SuggestedFirewall>,
+    pub networks: BTreeMap<String, DeployNetwork>,
+}
+
+/// Rules for one target host. SSH grants name connecting peers and the local
+/// accounts they may use. An empty account list permits any non-root account.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployHost {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub allows: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub denies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ssh: BTreeMap<String, Vec<String>>,
+}
+
+impl From<HostSuggestions> for DeployHost {
+    fn from(value: HostSuggestions) -> Self {
+        Self {
+            allows: value.allows,
+            denies: value.denies,
+            ssh: BTreeMap::new(),
+        }
+    }
+}
+
+impl DeployHost {
+    fn firewall(&self) -> HostSuggestions {
+        HostSuggestions {
+            allows: self.allows.clone(),
+            denies: self.denies.clone(),
+        }
+    }
+}
+
+pub type DeployNetwork = BTreeMap<String, DeployHost>;
+
+pub fn suggested_firewall(network: &DeployNetwork) -> SuggestedFirewall {
+    network
+        .iter()
+        .map(|(host, rules)| (host.clone(), rules.firewall()))
+        .collect()
 }
 
 /// Load a deploy spec from a YAML file (`.yaml`/`.yml` only). The top level is a
@@ -107,6 +145,20 @@ fn validate_names(spec: &DeploySpec) -> Result<()> {
             "`{name}` is defined as both a group and an alias; names must be unique"
         );
     }
+    for network in spec.networks.values() {
+        for rules in network.values() {
+            for (peer, users) in &rules.ssh {
+                anyhow::ensure!(
+                    !peer.starts_with("*-"),
+                    "excluded-peer selector '{peer}' is not valid in ssh"
+                );
+                anyhow::ensure!(
+                    users.iter().all(|user| !user.is_empty()),
+                    "ssh login users cannot be empty strings"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -147,8 +199,8 @@ pub const EXAMPLE_SPEC: &str = r#"# Rayfish deploy spec. See `ray apply --help`.
 # --invite-missing` binds into invites — a node joining with such an invite is
 # assigned that exact hostname (it cannot pick another), so the firewall always
 # resolves the peer it names. The `*` subject targets every node, and a `*` peer
-# means any peer. Suggestions are advisory: each node queues them for
-# `ray firewall accept`, or auto-installs them if it joined with
+# means any peer. Suggestions are advisory: each node queues
+# them for `ray firewall accept`, or auto-installs them if it joined with
 # `--auto-accept-firewall`.
 #
 # Optional `aliases:` and `groups:` are coordinator-side shorthand, expanded
@@ -184,10 +236,11 @@ networks:
       allows:
         "*": "tcp:6969"
   infra:
-    # Every node lets the `admins` group (alice's devices + jumpbox) reach SSH.
-    "*":
-      allows:
-        admins: "tcp:22"
+    # On a controlled host, `ssh` enables mesh SSH and grants login to peers.
+    # The list names local login accounts; [] means any non-root account.
+    jumpbox:
+      ssh:
+        alice: [deploy]
 "#;
 
 /// Union of every concrete hostname mentioned in the spec, both subjects and
@@ -204,13 +257,18 @@ pub fn expected_hosts(spec: &DeploySpec) -> Vec<String> {
 
 /// Concrete hostnames expected on one network. Wildcards are excluded; the
 /// apply reconciler expands them against the live roster before taking a diff.
-pub fn expected_hosts_for_network(firewall: &SuggestedFirewall) -> BTreeSet<String> {
+pub fn expected_hosts_for_network(firewall: &DeployNetwork) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for (subject, rules) in firewall {
         if subject != "*" {
             set.insert(subject.clone());
         }
-        for peer in rules.allows.keys().chain(rules.denies.keys()) {
+        for peer in rules
+            .allows
+            .keys()
+            .chain(rules.denies.keys())
+            .chain(rules.ssh.keys())
+        {
             if peer != "*" {
                 set.insert(peer.clone());
             }
@@ -220,13 +278,14 @@ pub fn expected_hosts_for_network(firewall: &SuggestedFirewall) -> BTreeSet<Stri
 }
 
 /// A wildcard refers to the live population rather than declaring it absent.
-pub fn has_membership_wildcard(firewall: &SuggestedFirewall) -> bool {
+pub fn has_membership_wildcard(firewall: &DeployNetwork) -> bool {
     firewall.iter().any(|(subject, rules)| {
         subject == "*"
             || rules
                 .allows
                 .keys()
                 .chain(rules.denies.keys())
+                .chain(rules.ssh.keys())
                 .any(|peer| peer == "*")
     })
 }
@@ -244,7 +303,7 @@ pub struct MembershipDiff {
 /// new spec. A wildcard expands to the current roster, so wildcard policy does
 /// not remove machines merely because it does not spell out their names.
 pub fn membership_diff(
-    firewall: &SuggestedFirewall,
+    firewall: &DeployNetwork,
     current: &HashSet<MachineHostname>,
 ) -> Result<MembershipDiff> {
     let mut desired: HashSet<MachineHostname> = expected_hosts_for_network(firewall)
@@ -266,7 +325,7 @@ pub fn membership_diff(
 }
 
 /// Expand all group/alias references in one network's firewall into a pure,
-/// hostname-keyed [`SuggestedFirewall`] ready to publish unchanged.
+/// hostname-keyed deploy rules ready to publish or send to controlled hosts.
 ///
 /// `resolve_alias(identity)` returns the hostnames currently joined for that
 /// identity *in this network* (the caller builds it from live `Status`). A name
@@ -293,11 +352,11 @@ pub fn merge_aliases(
 }
 
 pub fn expand_firewall(
-    fw: &SuggestedFirewall,
+    fw: &DeployNetwork,
     aliases: &BTreeMap<String, String>,
     groups: &BTreeMap<String, Vec<String>>,
     resolve_alias: &dyn Fn(&str) -> Vec<String>,
-) -> (SuggestedFirewall, Vec<String>) {
+) -> (DeployNetwork, Vec<String>) {
     let mut empty_aliases: BTreeSet<String> = BTreeSet::new();
 
     // Resolve one alias name to its joined hostnames, recording it if empty.
@@ -312,7 +371,7 @@ pub fn expand_firewall(
     // Resolve a subject/peer name to concrete hostnames (or keep `*`).
     let mut resolve_name = |name: &str| -> Vec<String> {
         if name == "*" {
-            return vec!["*".to_string()];
+            return vec![name.to_string()];
         }
         if let Some(members) = groups.get(name) {
             let mut out: Vec<String> = Vec::new();
@@ -335,7 +394,7 @@ pub fn expand_firewall(
         vec![name.to_string()] // literal hostname
     };
 
-    let mut out = SuggestedFirewall::new();
+    let mut out = DeployNetwork::new();
     for (subject, rules) in fw {
         // Expand the peer side once, reused for every concrete subject.
         let mut allows: BTreeMap<String, String> = BTreeMap::new();
@@ -350,6 +409,19 @@ pub fn expand_firewall(
                 merge_spec(denies.entry(host).or_default(), spec);
             }
         }
+        let mut ssh: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (peer, users) in &rules.ssh {
+            for host in resolve_name(peer) {
+                match ssh.entry(host) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(users.clone());
+                    }
+                    Entry::Occupied(mut entry) => {
+                        merge_ssh_users(entry.get_mut(), users);
+                    }
+                }
+            }
+        }
 
         for subj in resolve_name(subject) {
             let entry = out.entry(subj).or_default();
@@ -359,10 +431,36 @@ pub fn expand_firewall(
             for (peer, spec) in &denies {
                 merge_spec(entry.denies.entry(peer.clone()).or_default(), spec);
             }
+            for (peer, users) in &ssh {
+                match entry.ssh.entry(peer.clone()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(users.clone());
+                    }
+                    Entry::Occupied(mut entry) => {
+                        merge_ssh_users(entry.get_mut(), users);
+                    }
+                }
+            }
         }
     }
 
     (out, empty_aliases.into_iter().collect())
+}
+
+fn merge_ssh_users(existing: &mut Vec<String>, new: &[String]) {
+    if existing.iter().chain(new).any(|user| user == "*") {
+        *existing = vec!["*".to_string()];
+    } else if existing.is_empty() || new.is_empty() {
+        existing.clear();
+    } else {
+        *existing = existing
+            .iter()
+            .chain(new)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+    }
 }
 
 /// Merge a new comma-separated proto-spec into an existing one, keeping the union
@@ -411,6 +509,49 @@ networks:
         let g = spec.networks.get("gaming").unwrap();
         let alice = g.get("alice").unwrap();
         assert_eq!(alice.allows.get("bob").map(|s| s.as_str()), Some("tcp:22"));
+    }
+
+    #[test]
+    fn ssh_grants_expand_and_do_not_enter_firewall_suggestions() {
+        let spec = parse(
+            "groups:\n  admins: [laptop, phone]\nnetworks:\n  infra:\n    server:\n      ssh:\n        admins: [deploy]\n",
+        )
+        .unwrap();
+        let network = &spec.networks["infra"];
+        assert_eq!(
+            expected_hosts_for_network(network),
+            ["server", "admins"].into_iter().map(String::from).collect()
+        );
+        let (expanded, warnings) =
+            expand_firewall(network, &BTreeMap::new(), &spec.groups, &|_| Vec::new());
+        assert!(warnings.is_empty());
+        assert_eq!(expanded["server"].ssh["laptop"], ["deploy"]);
+        assert_eq!(expanded["server"].ssh["phone"], ["deploy"]);
+        assert!(suggested_firewall(&expanded)["server"].allows.is_empty());
+        assert_eq!(parse(&to_yaml(&spec).unwrap()).unwrap(), spec);
+    }
+
+    #[test]
+    fn ssh_grants_reject_excluded_peer_selectors() {
+        assert!(
+            parse("networks:\n  infra:\n    server:\n      ssh:\n        '*-peer': [deploy]\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn overlapping_ssh_groups_keep_both_named_accounts() {
+        let spec = parse(
+            "groups:\n  admins: [laptop]\n  operators: [laptop]\nnetworks:\n  infra:\n    server:\n      ssh:\n        admins: [deploy]\n        operators: [audit]\n",
+        )
+        .unwrap();
+        let (expanded, _) = expand_firewall(
+            &spec.networks["infra"],
+            &BTreeMap::new(),
+            &spec.groups,
+            &|_| Vec::new(),
+        );
+        assert_eq!(expanded["server"].ssh["laptop"], ["audit", "deploy"]);
     }
 
     #[test]
@@ -484,13 +625,14 @@ networks:
 
     #[test]
     fn roundtrip_yaml_is_stable_and_sorted() {
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert(
             "alice".to_string(),
             HostSuggestions {
                 allows: [("bob".to_string(), "tcp:22".to_string())].into(),
                 denies: [].into(),
-            },
+            }
+            .into(),
         );
         let mut spec = DeploySpec {
             networks: BTreeMap::new(),
@@ -498,7 +640,7 @@ networks:
         };
         spec.networks.insert("gaming".to_string(), fw);
         spec.networks
-            .insert("admin".to_string(), SuggestedFirewall::new());
+            .insert("admin".to_string(), DeployNetwork::new());
         let s1 = to_yaml(&spec).unwrap();
         let s2 = to_yaml(&parse(&s1).unwrap()).unwrap();
         assert_eq!(
@@ -513,13 +655,14 @@ networks:
 
     #[test]
     fn expected_hosts_collects_subjects_and_peers_skipping_wildcard() {
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert(
             "alice".to_string(),
             HostSuggestions {
                 allows: [("bob".to_string(), "tcp:22".to_string())].into(),
                 denies: [("carol".to_string(), "icmp".to_string())].into(),
-            },
+            }
+            .into(),
         );
         // A wildcard subject + wildcard peer must NOT appear as expected hosts.
         fw.insert(
@@ -527,7 +670,8 @@ networks:
             HostSuggestions {
                 allows: [("*".to_string(), "tcp:6969".to_string())].into(),
                 denies: [].into(),
-            },
+            }
+            .into(),
         );
         let mut spec = DeploySpec {
             networks: BTreeMap::new(),
@@ -543,9 +687,9 @@ networks:
 
     #[test]
     fn membership_diff_is_scoped_to_one_network() {
-        let mut firewall = SuggestedFirewall::new();
-        firewall.insert("alice".to_string(), HostSuggestions::default());
-        firewall.insert("bob".to_string(), HostSuggestions::default());
+        let mut firewall = DeployNetwork::new();
+        firewall.insert("alice".to_string(), DeployHost::default());
+        firewall.insert("bob".to_string(), DeployHost::default());
         let current = ["alice", "carol"]
             .into_iter()
             .map(|hostname| hostname.parse().unwrap())
@@ -561,7 +705,7 @@ networks:
 
     #[test]
     fn membership_diff_preserves_current_hosts_for_wildcards() {
-        let mut firewall = SuggestedFirewall::new();
+        let mut firewall = DeployNetwork::new();
         firewall.insert("*".to_string(), allows(&[("*", "tcp:22")]));
         let current = ["alice", "bob"]
             .into_iter()
@@ -576,8 +720,8 @@ networks:
         );
     }
 
-    /// Build a HostSuggestions from (peer, spec) allow pairs.
-    fn allows(pairs: &[(&str, &str)]) -> HostSuggestions {
+    /// Build deploy rules from (peer, spec) allow pairs.
+    fn allows(pairs: &[(&str, &str)]) -> DeployHost {
         HostSuggestions {
             allows: pairs
                 .iter()
@@ -585,6 +729,7 @@ networks:
                 .collect(),
             denies: BTreeMap::new(),
         }
+        .into()
     }
 
     #[test]
@@ -600,7 +745,7 @@ networks:
                 vec![]
             }
         };
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert("*".to_string(), allows(&[("alice", "tcp:22")]));
 
         let (out, warnings) = expand_firewall(&fw, &aliases, &groups, &resolve);
@@ -656,7 +801,7 @@ networks:
                 vec![]
             }
         };
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert("*".to_string(), allows(&[("alice", "tcp:22")]));
         let (out, warnings) = expand_firewall(&fw, &merged, &groups, &resolve);
         assert!(warnings.is_empty());
@@ -684,7 +829,7 @@ networks:
                 vec![]
             }
         };
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert("*".to_string(), allows(&[("admins", "tcp:22")]));
 
         let (out, _) = expand_firewall(&fw, &aliases, &groups, &resolve);
@@ -709,7 +854,7 @@ networks:
         )]
         .into();
         let resolve = |_: &str| -> Vec<String> { vec![] };
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert("webservers".to_string(), allows(&[("*", "tcp:80")]));
 
         let (out, _) = expand_firewall(&fw, &aliases, &groups, &resolve);
@@ -739,7 +884,7 @@ networks:
                 vec![]
             }
         };
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert(
             "*".to_string(),
             allows(&[("admins", "tcp:22"), ("alice", "tcp:80")]),
@@ -755,7 +900,7 @@ networks:
         let aliases = BTreeMap::new();
         let groups = BTreeMap::new();
         let resolve = |_: &str| -> Vec<String> { vec![] };
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert("*".to_string(), allows(&[("*", "tcp:6969")]));
 
         let (out, _) = expand_firewall(&fw, &aliases, &groups, &resolve);
@@ -770,7 +915,7 @@ networks:
         let aliases = BTreeMap::new();
         let groups = BTreeMap::new();
         let resolve = |_: &str| -> Vec<String> { vec![] };
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert("jumpbox".to_string(), allows(&[("monitor", "tcp:9100")]));
 
         let (out, warnings) = expand_firewall(&fw, &aliases, &groups, &resolve);
@@ -791,7 +936,7 @@ networks:
             [("ghost".to_string(), "id-ghost".to_string())].into();
         let groups = BTreeMap::new();
         let resolve = |_: &str| -> Vec<String> { vec![] }; // never joined
-        let mut fw = SuggestedFirewall::new();
+        let mut fw = DeployNetwork::new();
         fw.insert("*".to_string(), allows(&[("ghost", "tcp:22")]));
 
         let (out, warnings) = expand_firewall(&fw, &aliases, &groups, &resolve);
