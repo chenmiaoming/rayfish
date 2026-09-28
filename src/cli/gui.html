@@ -342,6 +342,7 @@
       <nav class="tabs" aria-label="Dashboard pages">
         <button class="tab active" data-page="networks">Networks</button>
         <button class="tab" data-page="devices">Devices</button>
+        <button class="tab" data-page="firewall">Firewall</button>
         <button class="tab" data-page="settings">Settings</button>
         <span class="mesh-label">PRIVATE MESH</span>
       </nav>
@@ -391,6 +392,23 @@
       <section>
         <div class="sec-head"><h2>Network peers</h2></div>
         <div id="networkPeers"></div>
+      </section>
+    </main>
+
+    <main id="pageFirewall" class="page">
+      <section>
+        <div class="sec-head">
+          <h2>Firewall</h2>
+          <span class="spacer"></span>
+          <button id="refreshFirewall" class="small">Refresh</button>
+          <button id="addFirewallRule" class="small primary">Add rule</button>
+        </div>
+        <div class="card settings-card">
+          <div class="setting-row"><span class="setting-title">Inbound default</span><span class="spacer"></span><span id="firewallInbound" class="badge">loading</span><button id="toggleFirewallDefault" class="small">Change</button></div>
+          <div class="setting-row"><span class="setting-title">Outbound default</span><span class="spacer"></span><span id="firewallOutbound" class="badge">loading</span></div>
+          <div class="setting-description">Rayfish mesh rules work alongside the Windows system firewall.</div>
+        </div>
+        <div id="firewallRules" class="card"></div>
       </section>
     </main>
 
@@ -545,6 +563,18 @@
       </div>
     </form>
   </dialog>
+  <dialog id="firewallRuleDlg">
+    <form id="firewallRuleForm">
+      <h3>Add firewall rule</h3>
+      <label>Direction<select id="ruleDirection"><option value="in">Inbound</option><option value="out">Outbound</option></select></label>
+      <label>Action<select id="ruleAction"><option value="allow">Allow</option><option value="deny">Deny</option></select></label>
+      <label>Protocol<select id="ruleProtocol"><option>tcp</option><option>udp</option><option>icmp</option><option>any</option></select></label>
+      <label>Ports, optional<input id="rulePort" placeholder="22 or 80,443"></label>
+      <label>Peer, optional<input id="rulePeer" placeholder="Any peer"></label>
+      <label>Network, optional<input id="ruleNetwork" placeholder="Any network"></label>
+      <div class="dlg-actions"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Add rule</button></div>
+    </form>
+  </dialog>
 
   <div id="toast" role="status"></div>
 
@@ -639,6 +669,7 @@
         if (res.success) toast(okMsg || "done");
         else toast((res.stderr || res.stdout || "command failed").trim().split("\n")[0], true);
         refresh();
+        if (args[0] === "firewall") refreshFirewall();
         return res;
       } catch (err) {
         toast(String(err), true);
@@ -870,6 +901,22 @@
       $("autoUpdateToggle").innerHTML = settingToggle(autoUpdate, ["auto-update", autoUpdate ? "off" : "on"], "Automatic updates", !lastData);
     }
 
+    async function refreshFirewall() {
+      const res = await call(["firewall", "show"], true);
+      if (!res || !res.success) {
+        $("firewallRules").innerHTML = `<div class="empty"><div class="big">Firewall unavailable.</div><div>${esc((res && (res.stderr || res.stdout) || "Could not read firewall state.").trim())}</div></div>`;
+        return;
+      }
+      const state = JSON.parse(res.stdout);
+      $("firewallInbound").textContent = state.default_inbound;
+      $("firewallOutbound").textContent = state.default_outbound;
+      const rules = Array.isArray(state.rules) ? state.rules : [];
+      $("firewallRules").innerHTML = rules.length ? rules.map((rule, index) => `<div class="attn-row">
+        <span class="what"><b>${esc(rule.direction)} ${esc(rule.action)} ${esc(rule.protocol)} ${esc(rule.port)}</b><span class="sub">peer ${esc(rule.peer)} · network ${esc(rule.network)}</span></span>
+        <button class="small danger" data-firewall-remove="${index}">Remove</button>
+      </div>`).join("") : `<div class="empty"><div class="big">No firewall rules.</div><div>Use Add rule to allow or deny mesh traffic.</div></div>`;
+    }
+
     // Fetch details for pending items and render them as actionable rows.
     async function renderAttention(data) {
       const nets = Array.isArray(data.networks) ? data.networks : [];
@@ -955,7 +1002,7 @@
 
     // ---- wiring ----
     document.addEventListener("click", ev => {
-      const t = ev.target.closest("[data-copy],[data-leave],[data-invite],[data-rename],[data-startup],[data-act],[data-run],[data-close]");
+      const t = ev.target.closest("[data-copy],[data-leave],[data-invite],[data-rename],[data-startup],[data-act],[data-run],[data-firewall-remove],[data-close]");
       if (!t) return;
       if (t.dataset.copy != null) {
         if (t.dataset.copy) copyText(t.dataset.copy).then(() => toast("copied"));
@@ -975,6 +1022,8 @@
         window.ipc.postMessage("startup:" + t.dataset.startup);
       } else if (t.dataset.act != null) {
         act(JSON.parse(t.dataset.act), t.dataset.ok);
+      } else if (t.dataset.firewallRemove != null) {
+        act(["firewall", "remove", t.dataset.firewallRemove], "rule removed");
       } else if (t.dataset.run != null) {
         run(splitArgs(t.dataset.run));
       } else if (t.dataset.close != null) {
@@ -990,6 +1039,7 @@
       document.querySelectorAll(".page").forEach(el => el.classList.toggle("active", el.id === "page" + page[0].toUpperCase() + page.slice(1)));
       document.querySelectorAll(".tab").forEach(el => el.classList.toggle("active", el.dataset.page === page));
       if (page === "settings") requestLaunchAtLogin();
+      if (page === "firewall") refreshFirewall();
     }
     document.querySelectorAll(".tab").forEach(tab => {
       tab.onclick = () => showPage(tab.dataset.page);
@@ -1012,6 +1062,22 @@
     $("connectPeerBtn").onclick = () => $("connectDlg").showModal();
     $("copyContact").onclick = () => copyText($("contactId").textContent).then(() => toast("contact ID copied"));
     $("refreshMachines").onclick = () => refresh();
+    $("refreshFirewall").onclick = () => refreshFirewall();
+    $("addFirewallRule").onclick = () => $("firewallRuleDlg").showModal();
+    $("toggleFirewallDefault").onclick = () => {
+      const next = $("firewallInbound").textContent === "deny" ? "allow" : "deny";
+      act(["firewall", "default", next], `inbound default set to ${next}`);
+    };
+    $("firewallRuleForm").addEventListener("submit", ev => {
+      ev.preventDefault();
+      const args = ["firewall", "add", $("ruleDirection").value, $("ruleAction").value,
+        "--proto", $("ruleProtocol").value];
+      if ($("rulePort").value.trim()) args.push("--port", $("rulePort").value.trim());
+      if ($("rulePeer").value.trim()) args.push("--peer", $("rulePeer").value.trim());
+      if ($("ruleNetwork").value.trim()) args.push("--network", $("ruleNetwork").value.trim());
+      act(args, "rule added");
+      $("firewallRuleDlg").close();
+    });
     $("createForm").addEventListener("submit", () => {
       const args = ["create"];
       if ($("createName").value.trim()) args.push("--name", $("createName").value.trim());

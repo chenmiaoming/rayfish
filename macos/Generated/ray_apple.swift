@@ -529,6 +529,14 @@ public protocol NodeProtocol: AnyObject, Sendable {
 
     func denyRequest(network: String, id: String) throws
 
+    func firewallAdd(direction: String, action: String, `protocol`: String, port: String?, peer: String?, network: String?) throws
+
+    func firewallRemove(index: UInt32) throws
+
+    func firewallSetDefaultInbound(action: String) throws
+
+    func firewallShow() throws  -> FirewallState
+
     /**
      * The stable mesh address that the packet tunnel assigns to this device.
      */
@@ -718,6 +726,39 @@ open func denyRequest(network: String, id: String)throws   {try rustCallWithErro
         FfiConverterString.lower(id),$0
     )
 }
+}
+
+open func firewallAdd(direction: String, action: String, `protocol`: String, port: String?, peer: String?, network: String?)throws   {try rustCallWithError(FfiConverterTypeAppleError_lift) {
+    uniffi_ray_apple_fn_method_node_firewall_add(self.uniffiClonePointer(),
+        FfiConverterString.lower(direction),
+        FfiConverterString.lower(action),
+        FfiConverterString.lower(`protocol`),
+        FfiConverterOptionString.lower(port),
+        FfiConverterOptionString.lower(peer),
+        FfiConverterOptionString.lower(network),$0
+    )
+}
+}
+
+open func firewallRemove(index: UInt32)throws   {try rustCallWithError(FfiConverterTypeAppleError_lift) {
+    uniffi_ray_apple_fn_method_node_firewall_remove(self.uniffiClonePointer(),
+        FfiConverterUInt32.lower(index),$0
+    )
+}
+}
+
+open func firewallSetDefaultInbound(action: String)throws   {try rustCallWithError(FfiConverterTypeAppleError_lift) {
+    uniffi_ray_apple_fn_method_node_firewall_set_default_inbound(self.uniffiClonePointer(),
+        FfiConverterString.lower(action),$0
+    )
+}
+}
+
+open func firewallShow()throws  -> FirewallState  {
+    return try  FfiConverterTypeFirewallState_lift(try rustCallWithError(FfiConverterTypeAppleError_lift) {
+    uniffi_ray_apple_fn_method_node_firewall_show(self.uniffiClonePointer(),$0
+    )
+})
 }
 
     /**
@@ -969,6 +1010,194 @@ public func FfiConverterTypeConnectionRequest_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeConnectionRequest_lower(_ value: ConnectionRequest) -> RustBuffer {
     return FfiConverterTypeConnectionRequest.lower(value)
+}
+
+
+public struct FirewallRule {
+    public var direction: String
+    public var action: String
+    public var `protocol`: String
+    public var port: String
+    public var peer: String
+    public var network: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(direction: String, action: String, `protocol`: String, port: String, peer: String, network: String) {
+        self.direction = direction
+        self.action = action
+        self.`protocol` = `protocol`
+        self.port = port
+        self.peer = peer
+        self.network = network
+    }
+}
+
+#if compiler(>=6)
+extension FirewallRule: Sendable {}
+#endif
+
+
+extension FirewallRule: Equatable, Hashable {
+    public static func ==(lhs: FirewallRule, rhs: FirewallRule) -> Bool {
+        if lhs.direction != rhs.direction {
+            return false
+        }
+        if lhs.action != rhs.action {
+            return false
+        }
+        if lhs.`protocol` != rhs.`protocol` {
+            return false
+        }
+        if lhs.port != rhs.port {
+            return false
+        }
+        if lhs.peer != rhs.peer {
+            return false
+        }
+        if lhs.network != rhs.network {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(direction)
+        hasher.combine(action)
+        hasher.combine(`protocol`)
+        hasher.combine(port)
+        hasher.combine(peer)
+        hasher.combine(network)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFirewallRule: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FirewallRule {
+        return
+            try FirewallRule(
+                direction: FfiConverterString.read(from: &buf),
+                action: FfiConverterString.read(from: &buf),
+                protocol: FfiConverterString.read(from: &buf),
+                port: FfiConverterString.read(from: &buf),
+                peer: FfiConverterString.read(from: &buf),
+                network: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FirewallRule, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.direction, into: &buf)
+        FfiConverterString.write(value.action, into: &buf)
+        FfiConverterString.write(value.`protocol`, into: &buf)
+        FfiConverterString.write(value.port, into: &buf)
+        FfiConverterString.write(value.peer, into: &buf)
+        FfiConverterString.write(value.network, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFirewallRule_lift(_ buf: RustBuffer) throws -> FirewallRule {
+    return try FfiConverterTypeFirewallRule.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFirewallRule_lower(_ value: FirewallRule) -> RustBuffer {
+    return FfiConverterTypeFirewallRule.lower(value)
+}
+
+
+public struct FirewallState {
+    public var defaultInbound: String
+    public var defaultOutbound: String
+    public var disabled: Bool
+    public var rules: [FirewallRule]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(defaultInbound: String, defaultOutbound: String, disabled: Bool, rules: [FirewallRule]) {
+        self.defaultInbound = defaultInbound
+        self.defaultOutbound = defaultOutbound
+        self.disabled = disabled
+        self.rules = rules
+    }
+}
+
+#if compiler(>=6)
+extension FirewallState: Sendable {}
+#endif
+
+
+extension FirewallState: Equatable, Hashable {
+    public static func ==(lhs: FirewallState, rhs: FirewallState) -> Bool {
+        if lhs.defaultInbound != rhs.defaultInbound {
+            return false
+        }
+        if lhs.defaultOutbound != rhs.defaultOutbound {
+            return false
+        }
+        if lhs.disabled != rhs.disabled {
+            return false
+        }
+        if lhs.rules != rhs.rules {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(defaultInbound)
+        hasher.combine(defaultOutbound)
+        hasher.combine(disabled)
+        hasher.combine(rules)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFirewallState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FirewallState {
+        return
+            try FirewallState(
+                defaultInbound: FfiConverterString.read(from: &buf),
+                defaultOutbound: FfiConverterString.read(from: &buf),
+                disabled: FfiConverterBool.read(from: &buf),
+                rules: FfiConverterSequenceTypeFirewallRule.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FirewallState, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.defaultInbound, into: &buf)
+        FfiConverterString.write(value.defaultOutbound, into: &buf)
+        FfiConverterBool.write(value.disabled, into: &buf)
+        FfiConverterSequenceTypeFirewallRule.write(value.rules, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFirewallState_lift(_ buf: RustBuffer) throws -> FirewallState {
+    return try FfiConverterTypeFirewallState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFirewallState_lower(_ value: FirewallState) -> RustBuffer {
+    return FfiConverterTypeFirewallState.lower(value)
 }
 
 
@@ -2017,6 +2246,31 @@ fileprivate struct FfiConverterSequenceTypeConnectionRequest: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFirewallRule: FfiConverterRustBuffer {
+    typealias SwiftType = [FirewallRule]
+
+    public static func write(_ value: [FirewallRule], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFirewallRule.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FirewallRule] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FirewallRule]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFirewallRule.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeIncomingFile: FfiConverterRustBuffer {
     typealias SwiftType = [IncomingFile]
 
@@ -2204,6 +2458,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_apple_checksum_method_node_deny_request() != 55734) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_apple_checksum_method_node_firewall_add() != 33674) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_apple_checksum_method_node_firewall_remove() != 44316) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_apple_checksum_method_node_firewall_set_default_inbound() != 61810) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_apple_checksum_method_node_firewall_show() != 1365) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_apple_checksum_method_node_ipv6_address() != 24181) {

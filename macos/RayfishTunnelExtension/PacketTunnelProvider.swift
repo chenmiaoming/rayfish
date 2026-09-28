@@ -135,6 +135,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func handle(_ request: ProviderRequest, node: Node) throws -> ProviderResponse {
         var inviteCode: String?
         var message: String?
+        var firewall: ProviderFirewallState?
         switch request.action {
         case .status:
             break
@@ -159,6 +160,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let network = request.name, let peer = request.id,
                   let users = request.users, let allow = request.enabled else { throw ProviderError.missingSetting }
             try node.setSshRule(network: network, peer: peer, users: users, allow: allow)
+        case .firewallShow:
+            firewall = try providerFirewall(node.firewallShow())
+        case .firewallAdd:
+            guard let direction = request.direction, let action = request.ruleAction,
+                  let protocolName = request.protocolName else { throw ProviderError.missingSetting }
+            try node.firewallAdd(direction: direction, action: action, protocol: protocolName,
+                                 port: request.port, peer: request.peer, network: request.network)
+            firewall = try providerFirewall(node.firewallShow())
+        case .firewallRemove:
+            guard let index = request.ruleIndex else { throw ProviderError.missingSetting }
+            try node.firewallRemove(index: index)
+            firewall = try providerFirewall(node.firewallShow())
+        case .firewallSetDefault:
+            guard let action = request.ruleAction else { throw ProviderError.missingSetting }
+            try node.firewallSetDefaultInbound(action: action)
+            firewall = try providerFirewall(node.firewallShow())
         case .connectPeer:
             guard let id = request.id, !id.isEmpty else { throw ProviderError.missingPeer }
             message = try node.connectPeer(contactId: id, hostname: request.hostname)
@@ -210,7 +227,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             try node.denyRequest(network: name, id: id)
         }
-        return ProviderResponse(success: true, error: nil, status: status(from: try node.status()), inviteCode: inviteCode, message: message)
+        return ProviderResponse(success: true, error: nil, status: status(from: try node.status()), inviteCode: inviteCode, message: message, firewall: firewall)
+    }
+
+    private func providerFirewall(_ state: FirewallState) throws -> ProviderFirewallState {
+        ProviderFirewallState(
+            defaultInbound: state.defaultInbound,
+            defaultOutbound: state.defaultOutbound,
+            disabled: state.disabled,
+            rules: state.rules.map { rule in
+                ProviderFirewallRule(direction: rule.direction, action: rule.action,
+                                     protocolName: rule.`protocol`, port: rule.port,
+                                     peer: rule.peer, network: rule.network)
+            }
+        )
     }
 
     private func status(from status: NodeStatus) -> ProviderStatus {

@@ -528,6 +528,7 @@ private struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Settings").font(RayfishTheme.heading()).foregroundColor(RayfishTheme.ink)
             SSHSettingsView(controller: controller)
+            FirewallSettingsView(controller: controller)
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Text("VPN").font(RayfishTheme.heading(15))
@@ -606,6 +607,124 @@ private struct SettingsView: View {
                     .foregroundColor(RayfishTheme.muted)
             }.padding(18).frame(maxWidth: .infinity, alignment: .leading).rayfishCard()
         }
+    }
+}
+
+private struct FirewallSettingsView: View {
+    @ObservedObject var controller: TunnelController
+    @State private var showingAddRule = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Firewall").font(RayfishTheme.heading(15))
+                Spacer()
+                if let firewall = controller.firewall {
+                    Text(firewall.disabled ? "disabled" : "enabled")
+                        .font(RayfishTheme.mono(11))
+                        .foregroundColor(firewall.disabled ? RayfishTheme.amber : RayfishTheme.green)
+                }
+                Button("Refresh") { Task { await controller.loadFirewall() } }
+                    .disabled(controller.isLoading || !controller.isConnected)
+            }
+            Text("Rules filter traffic on the Rayfish mesh. They work alongside your Mac's system firewall.")
+                .foregroundColor(RayfishTheme.muted)
+            if let firewall = controller.firewall {
+                HStack {
+                    Text("Inbound default")
+                    Spacer()
+                    Button(firewall.defaultInbound) {
+                        Task { await controller.setFirewallDefaultInbound(firewall.defaultInbound == "deny" ? "allow" : "deny") }
+                    }
+                    .disabled(controller.isLoading || !controller.isConnected)
+                }
+                HStack {
+                    Text("Outbound default")
+                    Spacer()
+                    Text(firewall.defaultOutbound).foregroundColor(RayfishTheme.muted)
+                }
+                if firewall.rules.isEmpty {
+                    Text("No rules configured.").font(RayfishTheme.mono(12)).foregroundColor(RayfishTheme.faint)
+                } else {
+                    ForEach(Array(firewall.rules.enumerated()), id: \.offset) { index, rule in
+                        Rectangle().fill(RayfishTheme.line).frame(height: 1)
+                        HStack(alignment: .top, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(rule.direction)  \(rule.action)  \(rule.protocolName)  \(rule.port)")
+                                    .font(RayfishTheme.mono(12)).foregroundColor(RayfishTheme.body)
+                                Text("peer \(rule.peer)  ·  network \(rule.network)")
+                                    .font(RayfishTheme.mono(10)).foregroundColor(RayfishTheme.faint)
+                            }
+                            Spacer()
+                            Button("Remove", role: .destructive) {
+                                Task { await controller.removeFirewallRule(at: UInt32(index)) }
+                            }
+                            .disabled(controller.isLoading || !controller.isConnected)
+                        }
+                    }
+                }
+            } else {
+                Text(controller.isConnected ? "Loading firewall rules…" : "Connect to view and change firewall rules.")
+                    .foregroundColor(RayfishTheme.faint)
+            }
+            Button("Add rule") { showingAddRule = true }
+                .disabled(controller.isLoading || !controller.isConnected)
+        }
+        .padding(18).rayfishCard()
+        .task {
+            if controller.isConnected { await controller.loadFirewall() }
+        }
+        .sheet(isPresented: $showingAddRule) {
+            AddFirewallRuleSheet(controller: controller)
+        }
+    }
+}
+
+private struct AddFirewallRuleSheet: View {
+    @ObservedObject var controller: TunnelController
+    @Environment(\.dismiss) private var dismiss
+    @State private var direction = "in"
+    @State private var action = "allow"
+    @State private var protocolName = "tcp"
+    @State private var port = ""
+    @State private var peer = ""
+    @State private var network = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add firewall rule").font(RayfishTheme.heading(18))
+            Picker("Direction", selection: $direction) {
+                Text("Inbound").tag("in")
+                Text("Outbound").tag("out")
+            }
+            Picker("Action", selection: $action) {
+                Text("Allow").tag("allow")
+                Text("Deny").tag("deny")
+            }
+            Picker("Protocol", selection: $protocolName) {
+                ForEach(["tcp", "udp", "icmp", "any"], id: \.self) { Text($0.uppercased()).tag($0) }
+            }
+            TextField("Ports, for example 22 or 80,443", text: $port)
+            TextField("Peer (optional, any peer if empty)", text: $peer)
+            TextField("Network (optional)", text: $network)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Add rule") {
+                    Task {
+                        await controller.addFirewallRule(direction: direction, action: action,
+                                                         protocolName: protocolName, port: port,
+                                                         peer: peer.isEmpty ? nil : peer,
+                                                         network: network.isEmpty ? nil : network)
+                        if controller.error == nil { dismiss() }
+                    }
+                }
+                .buttonStyle(RayfishButtonStyle(kind: .primary))
+                .disabled(controller.isLoading)
+            }
+        }
+        .padding(24).frame(width: 460)
+        .background(RayfishTheme.background)
     }
 }
 

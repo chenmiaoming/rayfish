@@ -21,6 +21,7 @@ final class TunnelController: ObservableObject {
     @Published var status: ProviderStatus? {
         didSet { notifications.update(status) }
     }
+    @Published private(set) var firewall: ProviderFirewallState?
     @Published private(set) var machines: [ProviderMachine] = []
     @Published private(set) var machinesError: String?
     @Published private(set) var isRefreshingMachines = false
@@ -318,6 +319,25 @@ final class TunnelController: ObservableObject {
                                       enabled: allow, users: rule.users)) != nil
     }
 
+    func loadFirewall() async {
+        _ = await perform(ProviderRequest(action: .firewallShow))
+    }
+
+    func addFirewallRule(direction: String, action: String, protocolName: String,
+                         port: String, peer: String?, network: String?) async {
+        _ = await perform(ProviderRequest(action: .firewallAdd, direction: direction, ruleAction: action,
+                                          protocolName: protocolName, port: port.isEmpty ? nil : port,
+                                          peer: peer, network: network))
+    }
+
+    func removeFirewallRule(at index: UInt32) async {
+        _ = await perform(ProviderRequest(action: .firewallRemove, ruleIndex: index))
+    }
+
+    func setFirewallDefaultInbound(_ action: String) async {
+        _ = await perform(ProviderRequest(action: .firewallSetDefault, ruleAction: action))
+    }
+
     private func perform(_ request: ProviderRequest) async -> ProviderResponse? {
         guard !isLoading, !isQuitting else { return nil }
         isLoading = true
@@ -325,6 +345,7 @@ final class TunnelController: ObservableObject {
         do {
             let response = try await TunnelIPC.request(request)
             status = response.status
+            if let firewall = response.firewall { self.firewall = firewall }
             error = nil
             return response
         } catch {

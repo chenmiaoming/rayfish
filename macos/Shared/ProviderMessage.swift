@@ -18,6 +18,10 @@ struct ProviderRequest: Codable {
         case acceptFile
         case rejectFile
         case setSSHRule
+        case firewallShow
+        case firewallAdd
+        case firewallRemove
+        case firewallSetDefault
     }
 
     var action: Action
@@ -28,10 +32,17 @@ struct ProviderRequest: Codable {
     var setting: ProviderSetting? = nil
     var enabled: Bool? = nil
     var fileId: UInt64? = nil
+    var ruleIndex: UInt32? = nil
     var directory: String? = nil
     var uid: UInt32? = nil
     var gid: UInt32? = nil
     var users: [String]? = nil
+    var direction: String? = nil
+    var ruleAction: String? = nil
+    var protocolName: String? = nil
+    var port: String? = nil
+    var peer: String? = nil
+    var network: String? = nil
 }
 
 enum ProviderSetting: String, Codable {
@@ -45,6 +56,25 @@ struct ProviderResponse: Codable {
     var inviteCode: String?
     var machines: [ProviderMachine]? = nil
     var message: String? = nil
+    var firewall: ProviderFirewallState? = nil
+}
+
+struct ProviderFirewallState: Codable, Equatable {
+    var defaultInbound: String
+    var defaultOutbound: String
+    var disabled: Bool
+    var rules: [ProviderFirewallRule]
+}
+
+struct ProviderFirewallRule: Codable, Equatable, Identifiable {
+    var direction: String
+    var action: String
+    var protocolName: String
+    var port: String
+    var peer: String
+    var network: String
+
+    var id: String { "\(direction):\(action):\(protocolName):\(port):\(peer):\(network)" }
 }
 
 struct ProviderStatus: Codable, Equatable {

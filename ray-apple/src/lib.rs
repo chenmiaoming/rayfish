@@ -12,6 +12,7 @@ use rayfish::config::settings::GlobalKey;
 #[cfg(target_os = "macos")]
 use rayfish::daemon::start_embedded_ipc;
 use rayfish::daemon::{DaemonState, build_headless};
+use rayfish::firewall::{Action, Direction, Protocol};
 use rayfish::invite;
 use rayfish::ipc::{IpcMessage, TransferFileState};
 use rayfish::membership;
@@ -143,6 +144,24 @@ pub struct JoinRequest {
     pub id: String,
     pub hostname: Option<String>,
     pub waiting_secs: u64,
+}
+
+#[derive(uniffi::Record)]
+pub struct FirewallRule {
+    pub direction: String,
+    pub action: String,
+    pub protocol: String,
+    pub port: String,
+    pub peer: String,
+    pub network: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct FirewallState {
+    pub default_inbound: String,
+    pub default_outbound: String,
+    pub disabled: bool,
+    pub rules: Vec<FirewallRule>,
 }
 
 /// One Rayfish node hosted by a packet tunnel provider.
@@ -403,6 +422,70 @@ impl Node {
             ),
             "SSH access",
         )
+    }
+
+    pub fn firewall_show(&self) -> Result<FirewallState, AppleError> {
+        let IpcMessage::FirewallState {
+            default_inbound,
+            default_outbound,
+            disabled,
+            rules,
+            ..
+        } = self.state()?.firewall_show()
+        else {
+            return Err(AppleError::Network("invalid firewall response".to_owned()));
+        };
+        Ok(FirewallState {
+            default_inbound: default_inbound.to_string(),
+            default_outbound: default_outbound.to_string(),
+            disabled,
+            rules: rules
+                .into_iter()
+                .map(|rule| FirewallRule {
+                    direction: rule.direction.to_string(),
+                    action: rule.action.to_string(),
+                    protocol: rule.protocol.to_string(),
+                    port: rule.port,
+                    peer: rule.peer,
+                    network: rule.network,
+                })
+                .collect(),
+        })
+    }
+
+    pub fn firewall_add(
+        &self,
+        direction: String,
+        action: String,
+        protocol: String,
+        port: Option<String>,
+        peer: Option<String>,
+        network: Option<String>,
+    ) -> Result<(), AppleError> {
+        let direction: Direction = direction.parse().map_err(AppleError::network)?;
+        let action: Action = action.parse().map_err(AppleError::network)?;
+        let protocol: Protocol = protocol.parse().map_err(AppleError::network)?;
+        let state = self.state()?;
+        expect_ok(
+            self.runtime.block_on(state.firewall_add(
+                direction,
+                action,
+                protocol,
+                port.as_deref(),
+                peer.as_deref(),
+                network.as_deref(),
+            )),
+            "firewall rule",
+        )
+    }
+
+    pub fn firewall_remove(&self, index: u32) -> Result<(), AppleError> {
+        expect_ok(self.state()?.firewall_remove(index as usize), "firewall rule")
+    }
+
+    pub fn firewall_set_default_inbound(&self, action: String) -> Result<(), AppleError> {
+        let action: Action = action.parse().map_err(AppleError::network)?;
+        expect_ok(self.state()?.firewall_default(action), "firewall default")
     }
 
     pub fn connect_peer(

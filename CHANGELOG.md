@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- macOS Settings and the Windows dashboard can view and edit Rayfish firewall
+  rules, including the inbound default action.
+
 - Intel Macs can use the standalone CLI and daemon, self-update, install script,
   and signed native app DMG again.
 

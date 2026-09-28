@@ -311,6 +311,26 @@ void uniffi_ray_apple_fn_method_node_deactivate(void*_Nonnull ptr, RustCallStatu
 void uniffi_ray_apple_fn_method_node_deny_request(void*_Nonnull ptr, RustBuffer network, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_ADD
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_ADD
+void uniffi_ray_apple_fn_method_node_firewall_add(void*_Nonnull ptr, RustBuffer direction, RustBuffer action, RustBuffer protocol, RustBuffer port, RustBuffer peer, RustBuffer network, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_REMOVE
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_REMOVE
+void uniffi_ray_apple_fn_method_node_firewall_remove(void*_Nonnull ptr, uint32_t index, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_SET_DEFAULT_INBOUND
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_SET_DEFAULT_INBOUND
+void uniffi_ray_apple_fn_method_node_firewall_set_default_inbound(void*_Nonnull ptr, RustBuffer action, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_SHOW
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_FIREWALL_SHOW
+RustBuffer uniffi_ray_apple_fn_method_node_firewall_show(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_IPV6_ADDRESS
 #define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_IPV6_ADDRESS
 RustBuffer uniffi_ray_apple_fn_method_node_ipv6_address(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -707,6 +727,30 @@ uint16_t uniffi_ray_apple_checksum_method_node_deactivate(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_DENY_REQUEST
 #define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_DENY_REQUEST
 uint16_t uniffi_ray_apple_checksum_method_node_deny_request(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_ADD
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_ADD
+uint16_t uniffi_ray_apple_checksum_method_node_firewall_add(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_REMOVE
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_REMOVE
+uint16_t uniffi_ray_apple_checksum_method_node_firewall_remove(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_SET_DEFAULT_INBOUND
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_SET_DEFAULT_INBOUND
+uint16_t uniffi_ray_apple_checksum_method_node_firewall_set_default_inbound(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_SHOW
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_FIREWALL_SHOW
+uint16_t uniffi_ray_apple_checksum_method_node_firewall_show(void
 
 );
 #endif
