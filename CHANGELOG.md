@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Firewall suggestions accept `*-host-a,host-b` in `allows` to allow every
+  network peer except the named hosts, including peers that join later. Paired
+  devices sharing a user identity are excluded together. `ray apply` also accepts
+  groups and aliases in exclusions and expands them to joined hostnames.
+
 - `ray dns partial` resolves explicit `.ray` names without adding search domains
   for bare peer names. `ray config set dns partial` selects the same mode.
 
