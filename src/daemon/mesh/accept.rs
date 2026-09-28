@@ -22,12 +22,18 @@ async fn send_welcome(
     welcome: &ControlMsg,
 ) -> Result<()> {
     control::send_msg(send, Some(network_key), welcome).await?;
-    match tokio::time::timeout(Duration::from_secs(10), send.stopped()).await {
-        Ok(Ok(None)) => Ok(()),
-        Ok(Ok(Some(code))) => anyhow::bail!("peer stopped welcome stream: {code}"),
-        Ok(Err(error)) => Err(error.into()),
-        Err(_) => anyhow::bail!("timed out waiting for welcome delivery"),
+    let stopped = tokio::time::timeout(Duration::from_secs(10), send.stopped())
+        .await
+        .context("timed out waiting for welcome delivery")??;
+    if let Some(code) = stopped {
+        // A receiver that has read the frame but not the FIN stops with code 0
+        // when its receive stream is dropped.
+        anyhow::ensure!(
+            code == VarInt::from_u32(0),
+            "peer stopped welcome stream: {code}"
+        );
     }
+    Ok(())
 }
 
 /// Upper bound on a closed network's in-memory pending-join queue. Keyed by peer
@@ -2075,6 +2081,7 @@ mod welcome_delivery_tests {
                 .unwrap(),
             ControlMsg::Welcome { .. }
         ));
+        recv.stop(VarInt::from_u32(0)).unwrap();
         drop(recv);
         join_reply.await.unwrap();
         let closed = tokio::time::timeout(Duration::from_secs(5), new_client.closed())
