@@ -503,10 +503,9 @@ pub(crate) fn prune_departed_peers(
         drop(roster);
         if nullified && independent_member {
             device_user_map.remove(&peer_id);
+            continue;
         }
-        let allowed_by_nullifier = !nullified || independent_member;
-        let present = still_member || peer_id == my_identity || user_id == my_identity;
-        if allowed_by_nullifier && present {
+        if !nullified && (still_member || peer_id == my_identity || user_id == my_identity) {
             continue;
         }
         tracing::info!(peer = %peer_id.fmt_short(), network = %network_name, "pruning peer no longer in roster");

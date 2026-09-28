@@ -291,11 +291,8 @@ impl NetworkRegistry {
         let mut is_paired = false;
         let mut nets = Vec::new();
         for entry in self.networks.iter() {
-            let name = entry.key().clone();
-            let state = Arc::clone(&entry.value().state);
-            let dht_notify = entry.value().dht_notify.clone();
             let s = entry.value().state.read().unwrap();
-            if let Some(m) = s.members.all().iter().find(|m| m.identity == target)
+            if let Some(m) = s.members.get(&target)
                 && m.user_identity == Some(own_user)
             {
                 is_paired = true;
@@ -303,12 +300,14 @@ impl NetworkRegistry {
                     display = h.clone();
                 }
             }
-            let has_key = s.network_secret_key.is_some();
-            drop(s);
-            drop(entry);
-            if !has_key {
+            if s.network_secret_key.is_none() {
                 continue;
             }
+            drop(s);
+            let name = entry.key().clone();
+            let state = Arc::clone(&entry.value().state);
+            let dht_notify = entry.value().dht_notify.clone();
+            drop(entry);
             let independent = config::load_network(&name)
                 .map_err(|error| format!("could not read network '{name}': {error}"))?
                 .is_some_and(|net| net.independent_paired_devices.contains(&target));

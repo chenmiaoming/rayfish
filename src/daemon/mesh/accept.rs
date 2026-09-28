@@ -657,11 +657,9 @@ impl CoordinatorAcceptState {
             let final_hostname = crate::hostname::resolve_collision(&desired, &taken_refs);
             let old = s
                 .members
-                .all()
-                .iter()
-                .find(|m| m.identity == remote_id)
-                .and_then(|m| m.hostname.clone());
-            let changed = old.as_deref() != Some(final_hostname.as_str());
+                .get(&remote_id)
+                .and_then(|m| m.hostname.as_deref());
+            let changed = old != Some(final_hostname.as_str());
             (final_hostname, changed)
         };
 
