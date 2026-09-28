@@ -13,6 +13,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   devices sharing a user identity are excluded together. `ray apply` also accepts
   groups and aliases in exclusions and expands them to joined hostnames.
 
+- `ray dns partial` resolves explicit `.ray` names without adding search domains
+  for bare peer names. `ray config set dns partial` selects the same mode.
+
 - `ray up --enable-ssh` enables and saves mesh SSH while bringing the node up.
   Peer and Unix-user access still follows the existing SSH allow rules.
 
@@ -41,6 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Explicitly forgotten machines stay forgotten until confirmed or enrolled again.
 
 ### Changed
+
+- `ray status` shows managed machines only with `--machines`.
 
 - **The project README is now a short overview and install guide.** It links
   directly to the macOS DMG, Windows installer, and full Rayfish documentation.
