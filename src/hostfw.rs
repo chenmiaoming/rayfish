@@ -8,8 +8,11 @@
 //! policy the SYN dies in the host firewall: our listener is up, the mesh
 //! firewall permits the flow, ICMP still works, and `ssh` just hangs.
 //!
-//! This module only ever *reads* the host firewall and reports. rayfish never
-//! edits a ruleset another tool owns; the operator gets the exact command.
+//! Enabling mesh SSH adds an interface-scoped TCP allow rule through active UFW,
+//! or ip6tables when no firewall manager is active. Other firewall managers get
+//! a warning and a suggested command. UFW rules persist across restarts; raw
+//! rules are restored on startup when needed. Disabling SSH stops the listener
+//! without deleting any host firewall rules.
 //!
 //! Detection is deliberately conservative. A verdict of [`Verdict::WouldBlock`]
 //! requires positive evidence of a default-deny inbound policy *and* the
@@ -106,12 +109,21 @@ impl Verdict {
 /// this reports [`Verdict::Unknown`] rather than guessing.
 #[cfg(target_os = "linux")]
 pub fn check_inbound_tcp(tun: &str, port: u16) -> Verdict {
+    check_inbound_tcp_with(tun, port, &mut run)
+}
+
+#[cfg(target_os = "linux")]
+fn check_inbound_tcp_with(
+    tun: &str,
+    port: u16,
+    run: &mut impl FnMut(&[&str]) -> Option<String>,
+) -> Verdict {
     // ufw and firewalld both render into iptables/nft, so the ruleset below is
     // the ground truth either way. Identify the front-end first purely so the
     // fix we print is the one the operator's own tooling will accept: telling a
     // ufw user to run `iptables -I` invites a rule their next `ufw reload`
     // silently discards.
-    let manager = detect_manager();
+    let manager = detect_manager(run);
 
     if let Some(rules) = run(&["ip6tables", "-S"])
         && let Some(blocked) = iptables_blocks_port(&rules, tun, port)
@@ -136,6 +148,83 @@ pub fn check_inbound_tcp(_tun: &str, _port: u16) -> Verdict {
     Verdict::Unknown
 }
 
+/// Allow mesh SSH through active UFW or unmanaged ip6tables, then verify it.
+/// Other managers are read-only. Existing rules are never removed or replaced.
+pub fn ensure_inbound_tcp(tun: &str, port: u16) -> Verdict {
+    #[cfg(target_os = "linux")]
+    {
+        ensure_inbound_tcp_with(tun, port, &mut run)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        check_inbound_tcp(tun, port)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_inbound_tcp_with(
+    tun: &str,
+    port: u16,
+    run: &mut impl FnMut(&[&str]) -> Option<String>,
+) -> Verdict {
+    let before = check_inbound_tcp_with(tun, port, run);
+    let Verdict::WouldBlock { manager, .. } = &before else {
+        return before;
+    };
+    let port_arg = port.to_string();
+    let installed = match manager {
+        Manager::Ufw => run(&[
+            "ufw", "allow", "in", "on", tun, "to", "any", "port", &port_arg, "proto", "tcp",
+        ])
+        .is_some(),
+        Manager::Iptables => {
+            let mut args = [
+                "ip6tables",
+                "-w",
+                "5",
+                "-C",
+                "INPUT",
+                "-i",
+                tun,
+                "-p",
+                "tcp",
+                "--dport",
+                &port_arg,
+                "-j",
+                "ACCEPT",
+            ];
+            if run(&args).is_some() {
+                true
+            } else {
+                args[3] = "-I";
+                run(&args).is_some()
+            }
+        }
+        _ => return before,
+    };
+    if !installed {
+        tracing::warn!(
+            manager = manager.as_str(),
+            "could not add the mesh SSH firewall rule"
+        );
+        return before;
+    }
+    match check_inbound_tcp_with(tun, port, run) {
+        Verdict::Clear => {
+            tracing::info!(
+                manager = manager.as_str(),
+                interface = tun,
+                port,
+                "allowed mesh SSH through the host firewall"
+            );
+            Verdict::Clear
+        }
+        // Keep the actionable warning if the write could not be verified.
+        Verdict::Unknown => before,
+        blocked => blocked,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn verdict(blocked: bool, manager: Manager, tun: &str, port: u16) -> Verdict {
     if blocked {
@@ -148,10 +237,9 @@ fn verdict(blocked: bool, manager: Manager, tun: &str, port: u16) -> Verdict {
     }
 }
 
-/// Which front-end owns the ruleset, if we can tell. Only affects the wording of
-/// the suggested fix.
+/// Which front-end owns the ruleset, if we can tell.
 #[cfg(target_os = "linux")]
-fn detect_manager() -> Option<Manager> {
+fn detect_manager(run: &mut impl FnMut(&[&str]) -> Option<String>) -> Option<Manager> {
     if run(&["ufw", "status"]).is_some_and(|s| s.contains("Status: active")) {
         return Some(Manager::Ufw);
     }
@@ -244,6 +332,179 @@ fn nft_line_permits(line: &str, tun: &str, port: u16) -> bool {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    const BLOCKED_TEST_RULES: &str = "-P INPUT DROP\n";
+    const ALLOWED_TEST_RULES: &str =
+        "-P INPUT DROP\n-A INPUT -i mesh-test -p tcp --dport 4242 -j ACCEPT\n";
+
+    struct TestFirewall {
+        ufw_status: Option<&'static str>,
+        firewalld_active: bool,
+        raw_rule_exists: bool,
+        rules: Option<&'static str>,
+        after_write: Option<&'static str>,
+        fail_write: bool,
+        writes: usize,
+    }
+
+    impl TestFirewall {
+        fn blocked() -> Self {
+            Self {
+                ufw_status: Some("Status: active"),
+                firewalld_active: false,
+                raw_rule_exists: false,
+                rules: Some(BLOCKED_TEST_RULES),
+                after_write: Some(ALLOWED_TEST_RULES),
+                fail_write: false,
+                writes: 0,
+            }
+        }
+
+        fn run(&mut self, args: &[&str]) -> Option<String> {
+            match args {
+                ["ufw", "status"] => self.ufw_status.map(str::to_owned),
+                ["firewall-cmd", "--state"] => self.firewalld_active.then(|| "running".into()),
+                ["nft", "list", "ruleset"] => None,
+                ["ip6tables", "-S"] => self.rules.map(str::to_owned),
+                ["ip6tables", "-w", "5", "-C", ..] => {
+                    assert_eq!(args, Self::raw_args("-C"));
+                    if self.raw_rule_exists {
+                        self.rules = self.after_write;
+                        Some(String::new())
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    if self.ufw_status == Some("Status: active") {
+                        assert_eq!(
+                            args,
+                            [
+                                "ufw",
+                                "allow",
+                                "in",
+                                "on",
+                                "mesh-test",
+                                "to",
+                                "any",
+                                "port",
+                                "4242",
+                                "proto",
+                                "tcp"
+                            ]
+                        );
+                    } else {
+                        assert_eq!(args, Self::raw_args("-I"));
+                    }
+                    self.writes += 1;
+                    if self.fail_write {
+                        return None;
+                    }
+                    self.rules = self.after_write;
+                    Some("Rule added".into())
+                }
+            }
+        }
+
+        fn ensure(&mut self) -> Verdict {
+            ensure_inbound_tcp_with("mesh-test", 4242, &mut |args| self.run(args))
+        }
+
+        fn raw_args(action: &str) -> [&str; 13] {
+            [
+                "ip6tables",
+                "-w",
+                "5",
+                action,
+                "INPUT",
+                "-i",
+                "mesh-test",
+                "-p",
+                "tcp",
+                "--dport",
+                "4242",
+                "-j",
+                "ACCEPT",
+            ]
+        }
+    }
+
+    #[test]
+    fn blocked_ufw_gets_one_interface_scoped_rule() {
+        let mut firewall = TestFirewall::blocked();
+        assert_eq!(firewall.ensure(), Verdict::Clear);
+        assert_eq!(firewall.writes, 1);
+        assert_eq!(firewall.ensure(), Verdict::Clear);
+        assert_eq!(
+            firewall.writes, 1,
+            "repeated enable must not add another rule"
+        );
+    }
+
+    #[test]
+    fn ufw_failures_keep_the_manual_fix_warning() {
+        let mut failed = TestFirewall::blocked();
+        failed.fail_write = true;
+        let mut still_blocked = TestFirewall::blocked();
+        still_blocked.after_write = Some(BLOCKED_TEST_RULES);
+        let mut unreadable = TestFirewall::blocked();
+        unreadable.after_write = None;
+        for mut firewall in [failed, still_blocked, unreadable] {
+            assert_eq!(
+                firewall.ensure(),
+                verdict(true, Manager::Ufw, "mesh-test", 4242)
+            );
+            assert_eq!(firewall.writes, 1);
+        }
+    }
+
+    #[test]
+    fn clear_unknown_and_other_managed_firewalls_are_not_modified() {
+        let mut clear = TestFirewall::blocked();
+        clear.rules = Some(ALLOWED_TEST_RULES);
+        let mut unknown = TestFirewall::blocked();
+        unknown.rules = None;
+        let mut firewalld = TestFirewall::blocked();
+        firewalld.ufw_status = None;
+        firewalld.firewalld_active = true;
+        for mut firewall in [clear, unknown, firewalld] {
+            firewall.ensure();
+            assert_eq!(firewall.writes, 0);
+        }
+    }
+
+    #[test]
+    fn missing_or_inactive_ufw_falls_back_to_ip6tables() {
+        for ufw_status in [None, Some("Status: inactive")] {
+            let mut firewall = TestFirewall::blocked();
+            firewall.ufw_status = ufw_status;
+            assert_eq!(firewall.ensure(), Verdict::Clear);
+            assert_eq!(firewall.writes, 1);
+            assert_eq!(firewall.ensure(), Verdict::Clear);
+            assert_eq!(firewall.writes, 1);
+        }
+    }
+
+    #[test]
+    fn ip6tables_does_not_duplicate_an_existing_rule() {
+        let mut firewall = TestFirewall::blocked();
+        firewall.ufw_status = None;
+        firewall.raw_rule_exists = true;
+        assert_eq!(firewall.ensure(), Verdict::Clear);
+        assert_eq!(firewall.writes, 0);
+    }
+
+    #[test]
+    fn ip6tables_failure_keeps_the_manual_fix_warning() {
+        let mut firewall = TestFirewall::blocked();
+        firewall.ufw_status = None;
+        firewall.fail_write = true;
+        assert_eq!(
+            firewall.ensure(),
+            verdict(true, Manager::Iptables, "mesh-test", 4242)
+        );
+        assert_eq!(firewall.writes, 1);
+    }
 
     // The ruleset from the host that prompted this module: ufw active, default
     // deny inbound, "22/tcp ALLOW" and nothing else. Mesh SSH listens on 30022.
