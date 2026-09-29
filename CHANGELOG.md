@@ -13,6 +13,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - When a macOS update is ready, a notification offers to restart Rayfish and
   install it. The VPN reconnects if it was connected before the restart.
 
+### Fixed
+
+- `ray status` highlights a peer's RTT only when it exceeds that peer's recent
+  baseline, so normal long-distance connections stay neutral.
+
+## [0.5.5] - 2026-09-29
+
+### Added
+
 - Paired devices pick up networks added to their primary while they were offline.
   New networks are joined when the device reconnects.
 
@@ -2543,7 +2552,8 @@ First public release.
 - **Optional transports / export**: `--features tor` (Tor transport) and
   `--features otel` (OTLP span export).
 
-[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/rayfish/rayfish/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/rayfish/rayfish/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/rayfish/rayfish/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/rayfish/rayfish/compare/v0.5.1...v0.5.2

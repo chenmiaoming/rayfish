@@ -1510,6 +1510,10 @@ pub struct PeerStatus {
     #[serde(default)]
     pub incompatible: bool,
     pub connection: Option<ConnectionInfo>,
+    /// Current RTT exceeds the peer's preceding rolling median plus one
+    /// standard deviation. False until enough samples establish a baseline.
+    #[serde(default)]
+    pub rtt_high: bool,
     /// Coarse liveness for the three-state display (Tailscale-style). `Active`
     /// when a live connection exists; `Offline` only after an actual reach attempt
     /// failed and no later success cleared it; `Idle` otherwise (a known roster
@@ -2586,6 +2590,7 @@ mod tests {
                     is_own_device: false,
                     incompatible: false,
                     connection: None,
+                    rtt_high: false,
                     state: PeerState::Idle,
                     exit_node: false,
                     exit_in_use: false,
