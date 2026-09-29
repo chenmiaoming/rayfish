@@ -35,6 +35,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `ray status` highlights a peer's RTT only when it exceeds that peer's recent
+  baseline, so normal long-distance connections stay neutral.
+
 - The macOS app retries its VPN connection when the network becomes available
   after an offline login. Disconnecting in the app still keeps it offline.
 

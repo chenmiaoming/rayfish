@@ -1051,7 +1051,15 @@ fn device_row(
                 ipc::ConnType::Unknown => "?",
             };
             let (rtt_plain, rtt_styled) = match ci.rtt_ms {
-                Some(ms) => (format!("{ms:.0}ms"), style::latency(ms)),
+                Some(ms) => {
+                    let text = format!("{ms:.0}ms");
+                    let styled = if peer.rtt_high {
+                        style::red(&text)
+                    } else {
+                        style::value(&text)
+                    };
+                    (text, styled)
+                }
                 None => ("—".into(), style::faint("—")),
             };
             // One cell per direction: the counter is right-padded to the column's
@@ -1298,6 +1306,7 @@ mod grouping_tests {
             is_own_device: own,
             incompatible,
             connection: online.then(conn),
+            rtt_high: false,
             // Mirror the daemon's derivation so the render tests see realistic state.
             state: if online {
                 ipc::PeerState::Active
@@ -1476,6 +1485,7 @@ mod grouping_tests {
             is_own_device: false,
             incompatible: false,
             connection: Some(conn()),
+            rtt_high: false,
             state: ipc::PeerState::Active,
             exit_node: false,
             exit_in_use: false,
@@ -1633,6 +1643,7 @@ mod grouping_tests {
                 is_own_device: false,
                 incompatible: false,
                 connection: None,
+                rtt_high: false,
                 state: ipc::PeerState::Offline,
                 exit_node: false,
                 exit_in_use: false,
