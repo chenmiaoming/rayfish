@@ -207,7 +207,7 @@ fn print_not_authorized() {
     println!();
 }
 
-pub(crate) async fn ipc_status(show_machines: bool) -> Result<()> {
+pub(crate) async fn ipc_status(show_machines: bool, with_ips: bool) -> Result<()> {
     let connected = match ipc::connect().await {
         Ok(stream) => Some(stream),
         // Being refused is not the same as nothing being there, and reporting a
@@ -237,7 +237,7 @@ pub(crate) async fn ipc_status(show_machines: bool) -> Result<()> {
             // No address here: it derives from our identity, which this path
             // deliberately does not load (the daemon is down and the config is
             // all we have). The name and member count are what the listing is
-            // for; `ray status` with the daemon up prints the address.
+            // for; `ray status --with-ips` with the daemon up prints the address.
             println!(
                 "    {}  {}",
                 style::value(&net.name),
@@ -350,7 +350,7 @@ pub(crate) async fn ipc_status(show_machines: bool) -> Result<()> {
                 println!("  {}", style::faint("no active networks"));
             } else {
                 for net in &networks {
-                    print_network(net);
+                    print_network(net, with_ips);
                 }
             }
 
@@ -360,10 +360,10 @@ pub(crate) async fn ipc_status(show_machines: bool) -> Result<()> {
             // is root-owned, so every failed restore rendered as no mention at all.
             for net in &inactive_networks {
                 println!();
-                print!("{}", inactive_network_block(net));
+                print!("{}", inactive_network_block(net, with_ips));
             }
 
-            print_nearby(&lan_peers);
+            print_nearby(&lan_peers, with_ips);
 
             if !controllers.is_empty() {
                 println!();
@@ -428,7 +428,7 @@ const NEARBY_SHOWN: usize = 5;
 /// Render the "nearby" block: rayfish nodes seen on this LAN that we are not
 /// already on a network with. Prints nothing when there are none, so the common
 /// case (no strangers around) leaves status exactly as it was.
-fn print_nearby(peers: &[ipc::LanPeerInfo]) {
+fn print_nearby(peers: &[ipc::LanPeerInfo], with_ips: bool) {
     if peers.is_empty() {
         return;
     }
@@ -438,24 +438,7 @@ fn print_nearby(peers: &[ipc::LanPeerInfo]) {
         style::bold("nearby"),
         style::faint("(on this LAN, not connected)")
     );
-    let rows = peers
-        .iter()
-        .take(NEARBY_SHOWN)
-        .map(|p| {
-            let addrs = if p.addrs.is_empty() {
-                "—".to_string()
-            } else {
-                p.addrs.join(", ")
-            };
-            let seen = format!("{}s", p.last_seen_secs);
-            vec![
-                layout::Cell::new(p.short_id.clone(), style::rose(&p.short_id)),
-                layout::Cell::new(addrs.clone(), style::value(&addrs)),
-                layout::Cell::right(seen.clone(), style::faint(&seen)),
-            ]
-        })
-        .collect();
-    print!("{}", table(&["peer", "addresses", "seen"], rows, 4));
+    print!("{}", nearby_table(peers, with_ips));
     if peers.len() > NEARBY_SHOWN {
         println!(
             "    {}",
@@ -469,6 +452,36 @@ fn print_nearby(peers: &[ipc::LanPeerInfo]) {
         "    {}",
         style::faint("link up with: ray connect <peer> (they approve it)")
     );
+}
+
+fn nearby_table(peers: &[ipc::LanPeerInfo], with_ips: bool) -> String {
+    let rows = peers
+        .iter()
+        .take(NEARBY_SHOWN)
+        .map(|p| {
+            let mut cells = vec![layout::Cell::new(
+                p.short_id.clone(),
+                style::rose(&p.short_id),
+            )];
+            if with_ips {
+                let addrs = if p.addrs.is_empty() {
+                    "-".to_string()
+                } else {
+                    p.addrs.join(", ")
+                };
+                cells.push(layout::Cell::new(addrs.clone(), style::value(&addrs)));
+            }
+            let seen = format!("{}s", p.last_seen_secs);
+            cells.push(layout::Cell::right(seen.clone(), style::faint(&seen)));
+            cells
+        })
+        .collect();
+    let headers: &[&str] = if with_ips {
+        &["peer", "addresses", "seen"]
+    } else {
+        &["peer", "seen"]
+    };
+    table(headers, rows, 4)
 }
 
 /// Where a network block's contents come from, which is also how much of it can
@@ -494,7 +507,7 @@ enum Liveness {
 /// until an attempt has actually failed and `offline` after, with every peer row
 /// offline because nothing on an unregistered network is reachable. The reason,
 /// when the daemon has one, is what the reader would otherwise go find in the log.
-fn inactive_network_block(net: &ipc::InactiveNetwork) -> String {
+fn inactive_network_block(net: &ipc::InactiveNetwork, with_ips: bool) -> String {
     let live = if net.reason.is_some() {
         Liveness::Offline
     } else {
@@ -522,7 +535,7 @@ fn inactive_network_block(net: &ipc::InactiveNetwork) -> String {
         ));
     }
     match net.saved {
-        Some(ref saved) => network_block(saved, live, Some(&note)),
+        Some(ref saved) => network_block(saved, live, Some(&note), with_ips),
         // A daemon predating the saved projection sends the name alone. Say what
         // little there is rather than drop the group from the listing.
         None => format!(
@@ -539,7 +552,7 @@ fn inactive_network_block(net: &ipc::InactiveNetwork) -> String {
 ///
 /// Built as a string rather than printed so the flags can be tested, the way the
 /// peer rows already are.
-fn network_header(net: &ipc::NetworkStatus, live: Liveness) -> String {
+fn network_header(net: &ipc::NetworkStatus, live: Liveness, with_ips: bool) -> String {
     use std::fmt::Write as _;
 
     let role = net.role.to_string();
@@ -568,8 +581,10 @@ fn network_header(net: &ipc::NetworkStatus, live: Liveness) -> String {
     if let Some(ref dns) = net.my_hostname {
         let _ = write!(out, "   {}", style::value(dns));
     }
-    let my_addr = net.my_ipv6.to_string();
-    let _ = write!(out, "   {}", style::faint(&my_addr));
+    if with_ips {
+        let my_addr = net.my_ipv6.to_string();
+        let _ = write!(out, "   {}", style::faint(&my_addr));
+    }
     // `reachable/total` is a live reading. On a group with no registration there
     // is nothing to reach yet, and "0/3" would send the reader looking for three
     // members that are down rather than one network that has not come up.
@@ -619,22 +634,27 @@ fn network_header(net: &ipc::NetworkStatus, live: Liveness) -> String {
     out
 }
 
-fn print_network(net: &ipc::NetworkStatus) {
+fn print_network(net: &ipc::NetworkStatus, with_ips: bool) {
     println!();
-    print!("{}", network_block(net, Liveness::Live, None));
+    print!("{}", network_block(net, Liveness::Live, None, with_ips));
 }
 
-/// Render one network block, ending in a newline: header (name · role · dns · ip
-/// · member count), the aligned peer table, and the shareable join code
+/// Render one network block: header with optional IP, aligned peer table,
+/// and the shareable join code
 /// (suppressed for direct `ray connect` networks).
 ///
 /// Shared by live networks and by the ones still being restored, so a group does
 /// not change shape the moment its coordinator answers. `note`, when given, is a
 /// block of already-indented lines placed between the header and the roster.
-fn network_block(net: &ipc::NetworkStatus, live: Liveness, note: Option<&str>) -> String {
+fn network_block(
+    net: &ipc::NetworkStatus,
+    live: Liveness,
+    note: Option<&str>,
+    with_ips: bool,
+) -> String {
     use std::fmt::Write as _;
 
-    let mut out = format!("{}\n", network_header(net, live));
+    let mut out = format!("{}\n", network_header(net, live, with_ips));
     if let Some(note) = note {
         out.push_str(note);
     }
@@ -647,7 +667,7 @@ fn network_block(net: &ipc::NetworkStatus, live: Liveness, note: Option<&str>) -
         .map(|(alias, identity)| (identity.as_str(), alias.as_str()))
         .collect();
 
-    // Peer rows as aligned columns: glyph · host · ipv4 · via · rtt · ↑tx · ↓rx.
+    // Peer rows align the name, optional IP, connection details, and counters.
     // Pre-measure the widest up/down counter so each arrow hugs its number (one
     // space) while the digits still right-align across rows.
     let counter_width = |pick: fn(&ipc::ConnectionInfo) -> u64| {
@@ -658,9 +678,12 @@ fn network_block(net: &ipc::NetworkStatus, live: Liveness, note: Option<&str>) -
             .max()
             .unwrap_or(0)
     };
-    let up_w = counter_width(|c| c.bytes_tx);
-    let down_w = counter_width(|c| c.bytes_rx);
-    let rows = grouped_peer_rows(net, &alias_by_identity, up_w, down_w);
+    let format = PeerRowFormat {
+        with_ips,
+        up_w: counter_width(|c| c.bytes_tx),
+        down_w: counter_width(|c| c.bytes_rx),
+    };
+    let rows = grouped_peer_rows(net, &alias_by_identity, &format);
     if rows.is_empty() {
         let _ = writeln!(out, "    {}", style::faint("(no other members)"));
     } else {
@@ -699,8 +722,7 @@ fn peer_alias<'a>(
 fn grouped_peer_rows(
     net: &ipc::NetworkStatus,
     alias_by_identity: &HashMap<&str, &str>,
-    up_w: usize,
-    down_w: usize,
+    format: &PeerRowFormat,
 ) -> Vec<Vec<layout::Cell>> {
     let mut rows = Vec::new();
     let mut emitted: std::collections::HashSet<EndpointId> = std::collections::HashSet::new();
@@ -722,8 +744,7 @@ fn grouped_peer_rows(
                 peer,
                 peer_alias(peer, alias_by_identity),
                 "",
-                up_w,
-                down_w,
+                format,
             ));
             continue;
         }
@@ -753,8 +774,7 @@ fn grouped_peer_rows(
                     primary,
                     peer_alias(primary, alias_by_identity),
                     "",
-                    up_w,
-                    down_w,
+                    format,
                 ));
                 for (i, d) in secondaries.iter().enumerate() {
                     let branch = if i + 1 == secondaries.len() {
@@ -762,7 +782,7 @@ fn grouped_peer_rows(
                     } else {
                         "   ├─ "
                     };
-                    rows.push(device_row(d, None, branch, up_w, down_w));
+                    rows.push(device_row(d, None, branch, format));
                 }
             }
             // The primary is not visible here (e.g. it is us, filtered out of our
@@ -776,7 +796,7 @@ fn grouped_peer_rows(
                     } else {
                         "   ├─ "
                     };
-                    rows.push(device_row(d, None, branch, up_w, down_w));
+                    rows.push(device_row(d, None, branch, format));
                 }
             }
         }
@@ -855,9 +875,16 @@ fn user_display_name(
     format!("user {}", uid.fmt_short())
 }
 
+#[derive(Default)]
+struct PeerRowFormat {
+    with_ips: bool,
+    up_w: usize,
+    down_w: usize,
+}
+
 /// One device's status row: a merged `prefix + glyph + host` first cell, then
-/// ipv4 · via · rtt · ↑tx · ↓rx. `prefix` is the tree branch when the device is
-/// nested under a user (empty for a top-level member). A local `alias`, when set,
+/// an optional IP, connection details, and traffic counters. `prefix` is the
+/// tree branch when nested under a user (empty for a top-level member). An `alias`
 /// shows as `host [alias]` (only for standalone members; a paired device's alias
 /// rides its parent row), and the network's coordinator carries a `·coord·`
 /// marker. No ownership marker: an own device always nests under your own parent
@@ -868,15 +895,20 @@ fn device_row(
     peer: &ipc::PeerStatus,
     alias: Option<&str>,
     prefix: &str,
-    up_w: usize,
-    down_w: usize,
+    format: &PeerRowFormat,
 ) -> Vec<layout::Cell> {
-    // The address column is the peer's mesh IPv6, which is the only address it
-    // can be reached on and the one people copy into `ssh` and `ping`. It is
-    // three times the width of the dotted quad it replaces: wider rows are the
-    // price, a wrong address is not.
-    let addr = peer.ipv6.to_string();
-    let base = peer.hostname.clone().unwrap_or_else(|| addr.clone());
+    let PeerRowFormat {
+        with_ips,
+        up_w,
+        down_w,
+    } = *format;
+    let base = peer.hostname.clone().unwrap_or_else(|| {
+        if with_ips {
+            peer.ipv6.to_string()
+        } else {
+            peer.endpoint_id.fmt_short().to_string()
+        }
+    });
     let host = match alias {
         Some(a) => format!("{base} [{a}]"),
         None => base,
@@ -911,7 +943,6 @@ fn device_row(
         format!("{prefix}{glyph_plain} {host}{coord_plain}"),
         format!("{prefix}{glyph_styled} {}{coord_styled}", host_style(&host)),
     );
-    let ip = layout::Cell::new(addr.clone(), style::faint(&addr));
     let mut cells = match &peer.connection {
         Some(ci) => {
             let via = match ci.conn_type {
@@ -931,7 +962,6 @@ fn device_row(
             let down = format!("↓ {:>down_w$}", format_bytes(ci.bytes_rx));
             vec![
                 name,
-                ip,
                 layout::Cell::new(via, style::faint(via)),
                 layout::Cell::right(rtt_plain, rtt_styled),
                 layout::Cell::new(up.clone(), style::faint(&up)),
@@ -942,7 +972,6 @@ fn device_row(
         // (with a `ray update` nudge) rather than a plain offline peer.
         None if peer.incompatible => vec![
             name,
-            ip,
             layout::Cell::new("—", style::faint("—")),
             layout::Cell::right("incompatible", style::red("incompatible")),
             layout::Cell::new("ray update", style::faint("ray update")),
@@ -957,17 +986,20 @@ fn device_row(
             };
             vec![
                 name,
-                ip,
                 layout::Cell::new("—", style::faint("—")),
                 layout::Cell::right(label_plain, label_styled),
                 layout::Cell::plain(""),
             ]
         }
     };
+    if with_ips {
+        let addr = peer.ipv6.to_string();
+        cells.insert(1, layout::Cell::new(addr.clone(), style::faint(&addr)));
+    }
     // Trailing exit-node column: which peer is carrying our internet traffic, and
     // which merely offer to. Short rows (no live connection) are padded to the
     // connected width first, so the column lands in the same place on every row.
-    while cells.len() < CONNECTED_CELLS {
+    while cells.len() < CONNECTED_CELLS + usize::from(with_ips) {
         cells.push(layout::Cell::plain(""));
     }
     cells.push(match (peer.exit_in_use, peer.exit_node) {
@@ -978,9 +1010,9 @@ fn device_row(
     cells
 }
 
-/// Cells in a peer row with a live connection (name, ip, via, rtt, up, down): the
-/// widest row shape, and the width every row is padded to before the exit column.
-const CONNECTED_CELLS: usize = 6;
+/// Cells in a connected peer row without its optional IP column. Every row is
+/// padded to the connected width before the exit column.
+const CONNECTED_CELLS: usize = 5;
 
 /// Render the trailing "pending" summary: things waiting on the user, each with
 /// the command that clears it. Per-network items (firewall suggestions, join
@@ -1201,7 +1233,10 @@ mod grouping_tests {
     }
 
     fn render(net: &ipc::NetworkStatus) -> String {
-        layout::columns(&grouped_peer_rows(net, &HashMap::new(), 0, 0), 3)
+        layout::columns(
+            &grouped_peer_rows(net, &HashMap::new(), &PeerRowFormat::default()),
+            3,
+        )
     }
 
     #[test]
@@ -1238,9 +1273,74 @@ mod grouping_tests {
         p.ipv6 = "200::9".parse().unwrap();
         let net = net("laptop", vec![p]);
 
-        let out = render(&net);
+        let out = network_block(&net, Liveness::Live, None, true);
         assert!(out.contains("200::9"), "{out}");
         assert!(!out.contains("100.64."), "{out}");
+    }
+
+    #[test]
+    fn network_addresses_are_opt_in_for_live_and_saved_rosters() {
+        let primary = peer("build-box", None, false, true, false);
+        let secondary = peer("tablet", Some(primary.endpoint_id), false, false, false);
+        let incompatible = peer("old-box", None, false, false, true);
+        let mut unnamed = peer("", None, false, false, false);
+        unnamed.hostname = None;
+        unnamed.state = ipc::PeerState::Offline;
+        let short_id = unnamed.endpoint_id.fmt_short().to_string();
+        let network = net("laptop", vec![primary, secondary, incompatible, unnamed]);
+        let saved = ipc::InactiveNetwork {
+            name: network.name.clone(),
+            reason: None,
+            saved: Some(network.clone()),
+        };
+        for with_ips in [false, true] {
+            for out in [
+                network_block(&network, Liveness::Live, None, with_ips),
+                inactive_network_block(&saved, with_ips),
+            ] {
+                assert_eq!(out.contains("200::1"), with_ips, "{out}");
+                assert_eq!(out.contains("200::2"), with_ips, "{out}");
+                for label in [
+                    "laptop",
+                    "build-box",
+                    "tablet",
+                    "old-box",
+                    "direct",
+                    "idle",
+                    "offline",
+                    "incompatible",
+                ] {
+                    assert!(out.contains(label), "{out}");
+                }
+                if !with_ips {
+                    assert!(out.contains(&short_id), "{out}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nearby_addresses_and_their_column_are_opt_in() {
+        let endpoint_id = iroh::SecretKey::generate().public();
+        let short_id = endpoint_id.fmt_short().to_string();
+        let peers = vec![ipc::LanPeerInfo {
+            endpoint_id,
+            short_id: short_id.clone(),
+            addrs: vec![
+                "192.0.2.1:1234".to_string(),
+                "[2001:db8::1]:1234".to_string(),
+            ],
+            last_seen_secs: 7,
+            shared_network: None,
+        }];
+        for with_ips in [false, true] {
+            let out = nearby_table(&peers, with_ips);
+            assert!(out.contains(&short_id) && out.contains("7s"), "{out}");
+            assert_eq!(out.contains("addresses"), with_ips, "{out}");
+            for addr in &peers[0].addrs {
+                assert_eq!(out.contains(addr), with_ips, "{out}");
+            }
+        }
     }
 
     /// Which node admits members and signs the roster is not derivable from a
@@ -1343,7 +1443,7 @@ mod grouping_tests {
             network: 2,
             ours: 4,
         });
-        let out = network_header(&n, Liveness::Live);
+        let out = network_header(&n, Liveness::Live, false);
         assert!(out.contains("incompatible"), "{out}");
         // Both versions, so the reader can tell which side is behind.
         assert!(out.contains("v2"), "{out}");
@@ -1357,6 +1457,7 @@ mod grouping_tests {
         let out = network_header(
             &net("laptop", vec![peer("srv", None, false, true, false)]),
             Liveness::Live,
+            false,
         );
         assert!(!out.contains("incompatible"), "{out}");
         assert!(!out.contains("ray update"), "{out}");
@@ -1368,11 +1469,14 @@ mod grouping_tests {
     /// carries is what the reader would otherwise have to go find in the log.
     #[test]
     fn lists_a_saved_network_the_daemon_never_registered() {
-        let out = inactive_network_block(&ipc::InactiveNetwork {
-            name: "homelab".to_string(),
-            reason: Some("runs mesh protocol v2, this build speaks v4".to_string()),
-            saved: None,
-        });
+        let out = inactive_network_block(
+            &ipc::InactiveNetwork {
+                name: "homelab".to_string(),
+                reason: Some("runs mesh protocol v2, this build speaks v4".to_string()),
+                saved: None,
+            },
+            false,
+        );
         assert!(out.contains("homelab"), "{out}");
         assert!(out.contains("inactive"), "{out}");
         assert!(out.contains("peers on it are unreachable"), "{out}");
@@ -1383,11 +1487,14 @@ mod grouping_tests {
     /// `reason` line would read as one.
     #[test]
     fn an_inactive_network_without_a_reason_prints_no_reason_line() {
-        let out = inactive_network_block(&ipc::InactiveNetwork {
-            name: "homelab".to_string(),
-            reason: None,
-            saved: None,
-        });
+        let out = inactive_network_block(
+            &ipc::InactiveNetwork {
+                name: "homelab".to_string(),
+                reason: None,
+                saved: None,
+            },
+            false,
+        );
         assert!(out.contains("homelab"), "{out}");
         assert!(!out.contains("reason"), "{out}");
     }
@@ -1431,11 +1538,14 @@ mod grouping_tests {
     /// and the join code are all knowable before the coordinator answers.
     #[test]
     fn a_connecting_group_lists_its_saved_roster() {
-        let out = inactive_network_block(&ipc::InactiveNetwork {
-            name: "homelab".to_string(),
-            reason: None,
-            saved: Some(saved_roster(&["desktop", "phone"])),
-        });
+        let out = inactive_network_block(
+            &ipc::InactiveNetwork {
+                name: "homelab".to_string(),
+                reason: None,
+                saved: Some(saved_roster(&["desktop", "phone"])),
+            },
+            false,
+        );
         assert!(out.contains("homelab"), "{out}");
         assert!(out.contains("connecting"), "{out}");
         assert!(out.contains("desktop") && out.contains("phone"), "{out}");
@@ -1453,11 +1563,14 @@ mod grouping_tests {
     /// group reads offline and says why.
     #[test]
     fn a_group_whose_restore_failed_reads_offline() {
-        let out = inactive_network_block(&ipc::InactiveNetwork {
-            name: "homelab".to_string(),
-            reason: Some("runs mesh protocol v2, this build speaks v4".to_string()),
-            saved: Some(saved_roster(&["desktop"])),
-        });
+        let out = inactive_network_block(
+            &ipc::InactiveNetwork {
+                name: "homelab".to_string(),
+                reason: Some("runs mesh protocol v2, this build speaks v4".to_string()),
+                saved: Some(saved_roster(&["desktop"])),
+            },
+            false,
+        );
         let header = out.lines().next().unwrap();
         assert!(header.contains("offline"), "{out}");
         assert!(!header.contains("connecting"), "{out}");
@@ -1470,7 +1583,7 @@ mod grouping_tests {
     /// to go looking for the three that are down.
     #[test]
     fn a_connecting_group_counts_members_without_a_reachable_split() {
-        let out = network_header(&saved_roster(&["a", "b", "c"]), Liveness::Connecting);
+        let out = network_header(&saved_roster(&["a", "b", "c"]), Liveness::Connecting, false);
         assert!(out.contains("members 3"), "{out}");
         assert!(!out.contains("0/3"), "{out}");
     }
@@ -1479,11 +1592,14 @@ mod grouping_tests {
     /// has to be named rather than vanish.
     #[test]
     fn a_group_from_a_daemon_without_a_saved_roster_still_gets_named() {
-        let out = inactive_network_block(&ipc::InactiveNetwork {
-            name: "homelab".to_string(),
-            reason: None,
-            saved: None,
-        });
+        let out = inactive_network_block(
+            &ipc::InactiveNetwork {
+                name: "homelab".to_string(),
+                reason: None,
+                saved: None,
+            },
+            false,
+        );
         assert!(out.contains("homelab"), "{out}");
         assert!(out.contains("inactive"), "{out}");
     }
