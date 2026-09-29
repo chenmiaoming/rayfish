@@ -20,6 +20,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `ray status` shows each network's admission mode. Member networks show
+  `mode unknown` because the coordinator does not share this setting.
+
 - `ray firewall show` displays peer hostnames when known, falling back to short
   identities for unresolved peers. JSON output keeps identities.
 
