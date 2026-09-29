@@ -554,6 +554,7 @@ pub(crate) async fn ipc_apply(
     // Fetch live state once: status gives this node's identity, active networks,
     // per-peer identities, and joined hostnames.
     let (self_id, status_networks) = ipc_status_full().await?;
+    let self_id = self_id.to_string();
     let active_names: std::collections::HashSet<&str> =
         status_networks.iter().map(|n| n.name.as_str()).collect();
 
@@ -896,32 +897,87 @@ pub(crate) fn joined_hostnames(networks: &[ipc::NetworkStatus], network: &str) -
     hosts.into_iter().collect()
 }
 
-/// `ray identityof <net> <host>`: print the identity string to paste into a
-/// spec's `aliases:` map. Resolves to the user identity if the device is paired,
-/// else the device's transport identity. Open read.
-pub(crate) async fn cmd_identityof(network: &str, hostname: &str, json: bool) -> Result<()> {
-    let (self_id, networks) = ipc_status_full().await?;
-    let net = networks
+#[derive(Debug, serde::Serialize)]
+struct HostIdentityMatch<'a> {
+    network: &'a str,
+    hostname: &'a str,
+    identity: EndpointId,
+    paired: bool,
+}
+
+/// Search joined hostnames, optionally restricted to one network.
+fn host_identity_matches<'a>(
+    networks: &'a [ipc::NetworkStatus],
+    self_id: &EndpointId,
+    hostname: &'a str,
+    network: Option<&str>,
+) -> Result<Vec<HostIdentityMatch<'a>>> {
+    if let Some(network) = network
+        && !networks.iter().any(|net| net.name == network)
+    {
+        anyhow::bail!("network '{network}' not found (is it active?)");
+    }
+    let mut matches: Vec<_> = networks
         .iter()
-        .find(|n| n.name == network)
-        .ok_or_else(|| anyhow::anyhow!("network '{network}' not found (is it active?)"))?;
+        .filter(|net| network.is_none_or(|name| net.name == name))
+        .filter_map(|net| {
+            let (identity, paired) = resolve_host_identity(net, self_id, hostname)?;
+            Some(HostIdentityMatch {
+                network: &net.name,
+                hostname,
+                identity,
+                paired,
+            })
+        })
+        .collect();
+    if matches.is_empty() {
+        if let Some(network) = network {
+            anyhow::bail!("host '{hostname}' is not currently joined on '{network}'");
+        }
+        anyhow::bail!("host '{hostname}' is not currently joined on any network");
+    }
+    matches.sort_by(|a, b| a.network.cmp(b.network));
+    Ok(matches)
+}
 
-    let Some((identity, paired)) = resolve_host_identity(net, &self_id, hostname) else {
-        anyhow::bail!(
-            "host '{hostname}' is not currently joined on '{network}' \
-             (an alias can only name an already-joined member)"
-        );
+fn identity_matches_text(matches: &[HostIdentityMatch<'_>]) -> String {
+    let Some(first) = matches.first() else {
+        return String::new();
     };
+    if matches.iter().all(|m| m.identity == first.identity) {
+        return first.identity.to_string();
+    }
+    let rows = matches
+        .iter()
+        .map(|m| {
+            let identity = m.identity.to_string();
+            vec![
+                layout::Cell::new(m.network, style::value(m.network)),
+                layout::Cell::new(m.hostname, style::value(m.hostname)),
+                layout::Cell::new(identity.clone(), style::rose(&identity)),
+            ]
+        })
+        .collect();
+    table(&["network", "name", "identity"], rows, 2)
+}
 
-    if json {
-        print_json(&serde_json::json!({
-            "network": network,
-            "hostname": hostname,
-            "identity": identity,
-            "paired": paired,
-        }));
+/// JSON retains each matching network, even when identities are equal.
+fn identity_matches_json(matches: &[HostIdentityMatch<'_>]) -> serde_json::Value {
+    if let [single] = matches {
+        serde_json::json!(single)
     } else {
-        println!("{identity}");
+        serde_json::json!(matches)
+    }
+}
+
+pub(crate) async fn cmd_identityof(peer: &str, hostname: Option<&str>, json: bool) -> Result<()> {
+    let (self_id, networks) = ipc_status_full().await?;
+    let network = hostname.map(|_| peer);
+    let matches = host_identity_matches(&networks, &self_id, hostname.unwrap_or(peer), network)?;
+    if json {
+        print_json(&identity_matches_json(&matches));
+    } else {
+        println!("{}", identity_matches_text(&matches));
     }
     Ok(())
 }
@@ -931,26 +987,26 @@ pub(crate) async fn cmd_identityof(network: &str, hostname: &str, json: bool) ->
 /// device endpoint id. Shared by `ray identityof` and `ray alias set`.
 pub(crate) fn resolve_host_identity(
     net: &ipc::NetworkStatus,
-    self_id: &str,
+    self_id: &EndpointId,
     hostname: &str,
-) -> Option<(String, bool)> {
+) -> Option<(EndpointId, bool)> {
     if net.my_hostname.as_deref() == Some(hostname) {
-        Some((self_id.to_string(), false))
+        Some((*self_id, false))
     } else {
         net.peers
             .iter()
             .find(|p| p.hostname.as_deref() == Some(hostname))
             .map(|p| match p.user_identity {
-                Some(u) => (u.to_string(), true),
-                None => (p.endpoint_id.to_string(), false),
+                Some(u) => (u, true),
+                None => (p.endpoint_id, false),
             })
     }
 }
 
-/// Fetch live status: this node's own device identity (as a canonical string)
+/// Fetch live status: this node's own device identity
 /// plus every network's roster. The identity is needed to resolve an alias that
 /// names the coordinator itself.
-pub(crate) async fn ipc_status_full() -> Result<(String, Vec<ipc::NetworkStatus>)> {
+pub(crate) async fn ipc_status_full() -> Result<(EndpointId, Vec<ipc::NetworkStatus>)> {
     let mut stream = ipc::connect().await?;
     ipc::send(&mut stream, ipc::IpcMessage::Status).await?;
     match ipc::recv(&mut stream).await? {
@@ -958,7 +1014,7 @@ pub(crate) async fn ipc_status_full() -> Result<(String, Vec<ipc::NetworkStatus>
             endpoint_id,
             networks,
             ..
-        } => Ok((endpoint_id.to_string(), networks)),
+        } => Ok((endpoint_id, networks)),
         other => anyhow::bail!("unexpected status response: {other:?}"),
     }
 }
@@ -974,7 +1030,7 @@ fn canonicalize_aliases(
         .map(|(name, id)| {
             let parsed = id.parse::<iroh::EndpointId>().map_err(|_| {
                 anyhow::anyhow!(
-                    "alias '{name}' has an invalid identity '{id}' (copy it from `ray identityof <net> <host>`)"
+                    "alias '{name}' has an invalid identity '{id}' (copy it from `ray identityof <host>`)"
                 )
             })?;
             Ok((name.clone(), parsed.to_string()))
@@ -1242,31 +1298,120 @@ mod tests {
     #[test]
     fn resolve_self_hostname_returns_self_id() {
         let n = net(Some("me"), vec![]);
-        let got = resolve_host_identity(&n, "self-id", "me");
-        assert_eq!(got, Some(("self-id".to_string(), false)));
+        let self_id = iroh::SecretKey::generate().public();
+        let got = resolve_host_identity(&n, &self_id, "me");
+        assert_eq!(got, Some((self_id, false)));
     }
 
     #[test]
     fn resolve_paired_peer_prefers_user_identity() {
         let user = iroh::SecretKey::generate().public();
         let n = net(Some("me"), vec![peer("alice", Some(user))]);
-        let got = resolve_host_identity(&n, "self-id", "alice");
-        assert_eq!(got, Some((user.to_string(), true)));
+        let got = resolve_host_identity(&n, &iroh::SecretKey::generate().public(), "alice");
+        assert_eq!(got, Some((user, true)));
     }
 
     #[test]
     fn resolve_unpaired_peer_uses_endpoint_id() {
         let p = peer("bob", None);
-        let want = p.endpoint_id.to_string();
+        let want = p.endpoint_id;
         let n = net(Some("me"), vec![p]);
-        let got = resolve_host_identity(&n, "self-id", "bob");
+        let got = resolve_host_identity(&n, &iroh::SecretKey::generate().public(), "bob");
         assert_eq!(got, Some((want, false)));
     }
 
     #[test]
     fn resolve_unknown_hostname_is_none() {
         let n = net(Some("me"), vec![peer("alice", None)]);
-        assert_eq!(resolve_host_identity(&n, "self-id", "ghost"), None);
+        assert_eq!(
+            resolve_host_identity(&n, &iroh::SecretKey::generate().public(), "ghost"),
+            None
+        );
+    }
+
+    #[test]
+    fn identityof_lists_conflicting_names_with_full_identities() {
+        let self_id = iroh::SecretKey::generate().public();
+        let remote = peer("build-box", None);
+        let remote_id = remote.endpoint_id;
+        let mut first = net(None, vec![remote]);
+        first.name = "network-b".into();
+        let mut second = net(Some("build-box"), vec![]);
+        second.name = "network-a".into();
+        let networks = [first, second];
+        let matches = host_identity_matches(&networks, &self_id, "build-box", None).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].network, "network-a");
+        assert_eq!(matches[0].identity, self_id);
+        assert_eq!(matches[1].identity, remote_id);
+        let output = identity_matches_text(&matches);
+        for value in [
+            "network",
+            "name",
+            "identity",
+            "network-a",
+            "network-b",
+            "build-box",
+        ] {
+            assert!(output.contains(value), "missing {value}: {output}");
+        }
+        assert!(output.contains(&self_id.to_string()));
+        assert!(output.contains(&remote_id.to_string()));
+        let json = identity_matches_json(&matches);
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["network"], "network-a");
+        assert_eq!(json[1]["identity"], remote_id.to_string());
+
+        let scoped =
+            host_identity_matches(&networks, &self_id, "build-box", Some("network-b")).unwrap();
+        assert_eq!(identity_matches_text(&scoped), remote_id.to_string());
+        let json = identity_matches_json(&scoped);
+        assert_eq!(json["network"], "network-b");
+        assert_eq!(json["hostname"], "build-box");
+        assert_eq!(json["identity"], remote_id.to_string());
+        assert_eq!(json["paired"], false);
+    }
+
+    #[test]
+    fn identityof_prints_shared_user_identity_once_across_networks() {
+        let user = iroh::SecretKey::generate().public();
+        let mut first = net(None, vec![peer("build-box", Some(user))]);
+        first.name = "network-a".into();
+        let mut second = net(None, vec![peer("build-box", Some(user))]);
+        second.name = "network-b".into();
+        let networks = [first, second];
+        let matches = host_identity_matches(&networks, &user, "build-box", None).unwrap();
+        assert_eq!(identity_matches_text(&matches), user.to_string());
+        let json = identity_matches_json(&matches);
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["paired"], true);
+        assert_eq!(json[1]["identity"], user.to_string());
+    }
+
+    #[test]
+    fn identityof_reports_missing_hosts_and_networks() {
+        let self_id = iroh::SecretKey::generate().public();
+        let networks = [net(None, vec![peer("build-box", None)])];
+        for networks in [&networks[..], &[]] {
+            let error =
+                host_identity_matches(networks, &self_id, "missing-host", None).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("not currently joined on any network")
+            );
+        }
+        let error =
+            host_identity_matches(&networks, &self_id, "build-box", Some("missing-network"))
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("network 'missing-network' not found")
+        );
+        let error =
+            host_identity_matches(&networks, &self_id, "missing-host", Some("n")).unwrap_err();
+        assert!(error.to_string().contains("not currently joined on 'n'"));
     }
 
     #[test]

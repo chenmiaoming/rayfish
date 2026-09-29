@@ -55,6 +55,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `ray identityof <peer>` searches all networks. If the name has different
+  identities, it lists the network, name, and full identity in a table.
+  The existing `ray identityof <network> <host>` form still works.
+
 - `ray status` hides IP addresses in text output unless `--with-ips` (or `--ips`)
   is given. JSON output keeps its address fields.
 

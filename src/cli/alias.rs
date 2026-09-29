@@ -36,10 +36,10 @@ async fn alias_set(network: &str, key: &str, alias: &str) -> Result<()> {
                 resolve_host_identity(net, &self_id, key).ok_or_else(|| {
                     anyhow::anyhow!(
                         "'{key}' is neither a valid identity nor a joined hostname on '{network}' \
-                         (copy an identity from `ray identityof <net> <host>`)"
+                         (copy an identity from `ray identityof <host>`)"
                     )
                 })?;
-            identity
+            identity.to_string()
         }
     };
 

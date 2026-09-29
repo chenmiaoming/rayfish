@@ -516,15 +516,17 @@ pub(crate) enum Command {
     ///
     /// The value to paste into a `ray apply` spec's `aliases:` map. Resolves to
     /// the user identity if the device is paired, else the device's transport
-    /// identity.
+    /// identity. Searches all networks; different identities sharing a name
+    /// are listed in a table. The older `identityof <network> <hostname>` form
+    /// limits the lookup to one network.
     #[command(visible_alias = "whois")]
     Identityof {
-        /// Network name
-        #[arg(add = complete::networks())]
-        network: String,
-        /// Hostname to look up
+        /// Hostname to look up across all networks
         #[arg(add = complete::peers())]
-        hostname: String,
+        peer: String,
+        /// Hostname for a scoped lookup, treating PEER as the network name
+        #[arg(add = complete::peers())]
+        hostname: Option<String>,
         /// Emit machine-readable JSON instead of styled text
         #[arg(long, global = true)]
         json: bool,
@@ -1703,10 +1705,10 @@ async fn run() -> Result<()> {
         } => ipc_apply(spec, prune, dry_run, invite_missing, example).await,
         Command::Hostname { network, name } => ipc_set_hostname(&network, &name).await,
         Command::Identityof {
-            network,
+            peer,
             hostname,
             json,
-        } => cmd_identityof(&network, &hostname, json).await,
+        } => cmd_identityof(&peer, hostname.as_deref(), json).await,
         Command::Alias {
             network,
             action,
@@ -1969,6 +1971,25 @@ mod tests {
     use rayfish::update::{
         nightly_asset_name, normalize_version, release_asset_name, version_is_newer,
     };
+
+    #[test]
+    fn identityof_accepts_global_and_scoped_lookups() {
+        for command in ["identityof", "whois"] {
+            let cli = Cli::try_parse_from(["ray", command, "build-box"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Identityof { peer, hostname: None, json: false } if peer == "build-box"
+            ));
+            let cli =
+                Cli::try_parse_from(["ray", command, "network-a", "build-box", "--json"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Identityof { peer, hostname: Some(hostname), json: true }
+                    if peer == "network-a" && hostname == "build-box"
+            ));
+        }
+        assert!(Cli::try_parse_from(["ray", "identityof"]).is_err());
+    }
 
     #[test]
     fn status_ip_flags_are_opt_in_and_accept_both_spellings() {

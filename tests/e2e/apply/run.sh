@@ -105,7 +105,7 @@ wait_roster "$A" srv-b srv-c
 
 # ---------------------------------------------------------------------------
 step "3. ray identityof prints a joined host's identity"
-B_IDENT="$(on "$A" "ray identityof $NET srv-b" | strip | tr -d '[:space:]')"
+B_IDENT="$(on "$A" "ray identityof srv-b" | strip | tr -d '[:space:]')"
 [[ -n "$B_IDENT" ]] && pass "identityof srv-b printed an identity (${B_IDENT:0:16}…)" \
   || { fail "identityof srv-b printed nothing"; summary; }
 # --json carries the same identity and paired=false (srv-b is unpaired).

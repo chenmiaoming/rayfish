@@ -263,14 +263,14 @@ pub const EXAMPLE_SPEC: &str = r#"# Rayfish deploy spec. See `ray apply --help`.
 #
 # Optional `aliases:` and `groups:` are coordinator-side shorthand, expanded
 # client-side before publishing (they never reach the network). An alias names a
-# user by identity (copy it from `ray identityof <net> <host>`) and expands to
+# user by identity (copy it from `ray identityof <host>`) and expands to
 # all of that user's joined device hostnames. A group is a named set of aliases
 # and/or literal hostnames. Both can be used as a rule subject or peer. An alias
 # only resolves once the user has joined; literal hostnames work pre-join.
 
 aliases:
   # Fill in a real identity, e.g.:
-  #   alice: <paste from `ray identityof infra alice-laptop`>
+  #   alice: <paste from `ray identityof <host>`>
 groups:
   admins: [alice, jumpbox]   # `alice` (alias, once defined) + a literal hostname
 
