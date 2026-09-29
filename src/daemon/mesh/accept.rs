@@ -1915,7 +1915,7 @@ impl iroh::protocol::ProtocolHandler for ManagementProtocol {
 pub(crate) struct ProtocolRouter {
     blobs: Arc<BlobsProtocol>,
     /// File-transfer + pairing state and their ALPN accept arms. The accept loop
-    /// delegates the `FILES_ALPN`/`PAIR_ALPN` arms to this; `Daemon` holds
+    /// delegates the file and pairing arms to this; `Daemon` holds
     /// the same handle for the IPC-side file/pairing commands.
     files: Arc<FileService>,
     /// `ray connect` state (pending/approved/outgoing maps) and the `CONNECT_ALPN`

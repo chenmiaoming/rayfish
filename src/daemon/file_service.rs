@@ -2,7 +2,7 @@
 //! split across `ProtocolRouter` (pending offers, id counter, pairing secret,
 //! signing key) and `Daemon`.
 //!
-//! The two ALPN accept arms (`FILES_ALPN` file offers, `PAIR_ALPN` pairing) live
+//! The file and pairing ALPN accept arms live
 //! here; the `ProtocolRouter` accept loop holds an `Arc<FileService>` and
 //! delegates to them. The IPC handlers (`send_file`/`accept_file`/`start_pairing`
 //! /…) stay on `Daemon` since they orchestrate over core handles (endpoint,
@@ -186,6 +186,31 @@ pub(crate) fn take_pending(pending: &mut Vec<PendingFile>, id: u64) -> Option<Pe
 ///
 /// Five minutes is the scan-it-now window the ticket is for.
 pub(crate) const PAIRING_TTL: Duration = Duration::from_secs(300);
+
+fn saved_pair_networks() -> Result<Vec<control::PairNetwork>> {
+    Ok(config::load()?
+        .networks
+        .into_iter()
+        .filter_map(|network| {
+            network.network_public_key.map(|key| control::PairNetwork {
+                name: network.name,
+                network_key: key.to_string(),
+            })
+        })
+        .collect())
+}
+
+fn authorized_network_sync(
+    cert: &control::DeviceCert,
+    remote: EndpointId,
+    primary: EndpointId,
+    revoked: &[EndpointId],
+) -> bool {
+    cert.verify()
+        && cert.device_key == remote
+        && cert.user_identity == primary
+        && !revoked.contains(&remote)
+}
 
 /// Whether two pairing secrets match, in time independent of *where* they differ.
 ///
@@ -1069,9 +1094,9 @@ impl FileService {
         let remote_id = conn.remote_id();
         match conn.accept_bi().await {
             Ok((mut send, mut recv)) => {
-                // Read length-prefixed PairMsg::Request
+                // Read one length-prefixed pairing protocol message.
                 let request: control::PairMsg = match control::recv_framed(&mut recv).await {
-                    Ok(r) => r,
+                    Ok(request) => request,
                     Err(e) => {
                         tracing::warn!(error = %e, peer = %remote_id.fmt_short(), "failed to read pair request");
                         return;
@@ -1138,19 +1163,7 @@ impl FileService {
                                 // Sign the device's public key
                                 // Share our saved networks so the new device can auto-join them. Only
                                 // networks with a known public key (skips freshly created, unsynced ones).
-                                let networks: Vec<control::PairNetwork> = match config::load() {
-                                    Ok(cfg) => cfg
-                                        .networks
-                                        .into_iter()
-                                        .filter_map(|n| {
-                                            n.network_public_key.map(|k| control::PairNetwork {
-                                                name: n.name,
-                                                network_key: k.to_string(),
-                                            })
-                                        })
-                                        .collect(),
-                                    Err(_) => Vec::new(),
-                                };
+                                let networks = saved_pair_networks().unwrap_or_default();
                                 // A deliberate (re-)pair re-authorizes this device.
                                 // Clear any nullifier for it (durable seed + every
                                 // coordinated blob) so admission stops rejecting the
@@ -1191,6 +1204,29 @@ impl FileService {
                             }
                         }
                     }
+                    control::PairMsg::NetworkListRequest { cert } => {
+                        let Ok(cfg) = config::load() else {
+                            return;
+                        };
+                        if !authorized_network_sync(
+                            &cert,
+                            remote_id,
+                            self.transport.endpoint.id(),
+                            &config::revoked_device_ids(&cfg),
+                        ) {
+                            tracing::warn!(device = %remote_id.fmt_short(), "refused paired network sync");
+                            return;
+                        }
+                        let Ok(networks) = saved_pair_networks() else {
+                            return;
+                        };
+                        let response = control::PairMsg::NetworkListResponse { networks };
+                        if control::send_framed(&mut send, &response).await.is_ok() {
+                            let _ = send.finish();
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+                        }
+                    }
                     _ => {
                         tracing::warn!(peer = %remote_id.fmt_short(), "unexpected pair message type");
                     }
@@ -1208,6 +1244,36 @@ mod tests {
     use super::*;
     use iroh_blobs::Hash;
     use std::time::Instant;
+
+    #[test]
+    fn paired_network_list_requires_a_valid_cert_for_the_dialer() {
+        let primary = SecretKey::generate();
+        let device = SecretKey::generate().public();
+        let stranger = SecretKey::generate().public();
+        let cert = control::DeviceCert::create(&primary, &device, 0);
+        assert!(authorized_network_sync(
+            &cert,
+            device,
+            primary.public(),
+            &[]
+        ));
+        assert!(!authorized_network_sync(
+            &cert,
+            stranger,
+            primary.public(),
+            &[]
+        ));
+        assert!(!authorized_network_sync(&cert, device, stranger, &[]));
+        assert!(!authorized_network_sync(
+            &cert,
+            device,
+            primary.public(),
+            &[device],
+        ));
+        let mut forged = cert;
+        forged.user_identity = stranger;
+        assert!(!authorized_network_sync(&forged, device, stranger, &[]));
+    }
 
     fn pending(id: u64) -> PendingFile {
         PendingFile {
