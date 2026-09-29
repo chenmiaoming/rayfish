@@ -182,12 +182,12 @@ pub(crate) enum Command {
         #[arg(long)]
         delegate: Option<ipc::ManagedMachineSelector>,
     },
-    /// Destroy a network (coordinator only)
+    /// Leave a network, destroying it if the last coordinator
     Nuke {
         /// Three-word network name
         #[arg(add = complete::networks())]
         name: String,
-        /// Force destroy even if other members exist
+        /// Proceed even if other members exist
         #[arg(long)]
         force: bool,
     },

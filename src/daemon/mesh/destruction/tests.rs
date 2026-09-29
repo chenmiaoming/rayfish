@@ -161,7 +161,7 @@ async fn create(daemon: &Daemon, name: &str) -> config::NetworkConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
-async fn nuke_delivers_proof_preserves_shared_links_and_blocks_offline_coordinator() {
+async fn last_coordinator_nuke_delivers_proof_and_preserves_shared_links() {
     let _lock = config::CONFIG_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -226,7 +226,8 @@ async fn nuke_delivers_proof_preserves_shared_links_and_blocks_offline_coordinat
         let mut state = state.write().unwrap();
         let mut member = state.members.all()[0].clone();
         member.identity = peer.id();
-        member.hostname = Some("other-coordinator".to_string());
+        member.hostname = Some("member-node".to_string());
+        member.is_coordinator = false;
         state.members.add(member);
     }
     assert!(matches!(
@@ -267,7 +268,7 @@ async fn nuke_delivers_proof_preserves_shared_links_and_blocks_offline_coordinat
     drop(daemon);
     drop(env);
 
-    // A different node was offline for the broadcast and has no local proof.
+    // A former coordinator has stale config and missed the broadcast.
     let offline_dir = tempfile::tempdir().unwrap();
     let _offline_env = ConfigDir::set(offline_dir.path());
     relay.configure();
@@ -277,6 +278,116 @@ async fn nuke_delivers_proof_preserves_shared_links_and_blocks_offline_coordinat
     assert!(config::load_network("doomed").unwrap().is_none());
     assert!(config::destruction::load(key.public()).unwrap().is_some());
     restored.shutdown_and_close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn nuke_leaves_network_to_remaining_coordinator_even_when_offline() {
+    let _lock = config::CONFIG_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let _env = ConfigDir::set(dir.path());
+    let relay = Relay::start().await;
+    relay.configure();
+    let daemon = build_headless(false).await.unwrap();
+    let alpn = transport::mesh_alpn();
+    let peer = Endpoint::builder(presets::N0)
+        .relay_mode(RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .alpns(vec![alpn.clone()])
+        .bind()
+        .await
+        .unwrap();
+    let (outbound, inbound) = tokio::join!(
+        daemon.transport.endpoint.connect(peer.addr(), &alpn),
+        async { peer.accept().await.unwrap().await.unwrap() },
+    );
+    let conn = outbound.unwrap();
+    let ip = derive_ipv6(&peer.id());
+    create(&daemon, "survivor").await;
+    daemon
+        .registry
+        .peers
+        .add(ip, conn.clone(), peer.id(), "survivor");
+    let client = dht::create_pkarr_client(&daemon.transport.endpoint, &relay.url).unwrap();
+
+    for connected in [true, false] {
+        let name = if connected {
+            "online-owner"
+        } else {
+            "offline-owner"
+        };
+        let net = create(&daemon, name).await;
+        let key = net.network_secret_key.as_ref().unwrap();
+        let state = Arc::clone(&daemon.registry.networks.get(name).unwrap().state);
+        {
+            let mut state = state.write().unwrap();
+            let template = state.members.all()[0].clone();
+            state.members.add(Member {
+                identity: peer.id(),
+                is_coordinator: true,
+                hostname: Some("other-coordinator".to_string()),
+                ..template
+            });
+        }
+        if connected {
+            daemon.registry.peers.add(ip, conn.clone(), peer.id(), name);
+        }
+        assert!(matches!(
+            daemon.registry.nuke_network(name, false).await,
+            IpcMessage::Error { .. }
+        ));
+        let receive = async {
+            if connected {
+                let (_, mut recv) = inbound.accept_bi().await.unwrap();
+                assert!(matches!(
+                    control::recv_msg(&mut recv).await.unwrap(),
+                    ControlMsg::LeaveNetwork
+                ));
+            }
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(daemon.registry.nuke_network(name, true), receive)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
+        assert!(!daemon.registry.networks.contains_key(name));
+        assert!(config::load_network(name).unwrap().is_none());
+        assert!(!state.read().unwrap().destroyed);
+        assert!(config::destruction::load(key.public()).unwrap().is_none());
+        assert!(
+            destruction::resolve(
+                &client,
+                destruction::discovery_key(key).public(),
+                key.public(),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(!destruction::is_destroyed(
+            &dht::resolve_network_packet(&client, key.public())
+                .await
+                .unwrap()
+        ));
+        assert!(conn.close_reason().is_none());
+        // The remaining coordinator can still persist and publish this key.
+        config::save_network(&net).unwrap();
+        let record = dht::encode_network_record(key, &net.last_group_hash.unwrap(), &[]).unwrap();
+        destruction::publish(&client, &record).await.unwrap();
+        assert!(!destruction::is_destroyed(
+            &dht::resolve_network_packet(&client, key.public())
+                .await
+                .unwrap()
+        ));
+        config::delete_network(name).unwrap();
+    }
+    daemon.shutdown_and_close().await;
+    peer.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

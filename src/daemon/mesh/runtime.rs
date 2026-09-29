@@ -425,8 +425,7 @@ impl NetworkRegistry {
 
     #[tracing::instrument(skip(self), fields(net = name))]
     pub(crate) async fn nuke_network(&self, name: &str, force: bool) -> IpcMessage {
-        // Check we're the coordinator and whether other members exist
-        let (is_coordinator, has_other_members) = {
+        let (is_coordinator, has_other_members, has_other_coordinators) = {
             let handle = match self.networks.get(name) {
                 Some(h) => h,
                 None => {
@@ -441,7 +440,14 @@ impl NetworkRegistry {
                 .map(|m| m.is_coordinator)
                 .unwrap_or(false);
             let others = state.members.all().len() > 1;
-            (is_coord, others)
+            // An offline coordinator still owns the network. Connectivity must
+            // not turn a local departure into destruction for everyone else.
+            let other_coordinators = state
+                .members
+                .all()
+                .iter()
+                .any(|member| member.identity != my_id && member.is_coordinator);
+            (is_coord, others, other_coordinators)
         };
 
         if !is_coordinator {
@@ -450,9 +456,18 @@ impl NetworkRegistry {
 
         if has_other_members && !force {
             return ipc_err(
-                "network has other members — use --force to destroy, or transfer ownership first"
+                "network has other members; use --force to leave, or destroy if the last coordinator"
                     .to_string(),
             );
+        }
+
+        if has_other_coordinators {
+            return match self.leave_network(name).await {
+                IpcMessage::Ok { .. } => IpcMessage::Ok {
+                    message: format!("left network '{name}'; other coordinators keep it running"),
+                },
+                response => response,
+            };
         }
 
         let key = self

@@ -37,8 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preserve app data. Existing debug installs need a one-time backup and restore
   into the release app, which installs alongside the debug app.
 
-- `ray nuke` tells members and other coordinators to forget the network. Signed
-  deletion records stop returning coordinators from reviving it.
+- `ray nuke --force` leaves the network running when another coordinator remains.
+  The last coordinator tells all peers to leave before closing connections, with
+  signed deletion records for peers that missed the notice.
 
 ## [0.5.4] - 2026-09-29
 
