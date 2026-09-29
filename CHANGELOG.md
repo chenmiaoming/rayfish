@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray apply` accepts `*-host-a,host-b` as a target, including aliases and
+  groups, to skip firewall suggestions and SSH grants on those devices without
+  removing them from the network. Targets expand at apply time; reapply after
+  new hosts join.
+
 - `ray fw` is an alias for `ray firewall`.
 
 - The macOS app checks for stable updates and installs them when it quits. Use
