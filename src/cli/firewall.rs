@@ -34,21 +34,20 @@ pub(crate) async fn ipc_firewall(action: FirewallAction) -> Result<()> {
             disabled,
             mut rules,
         } => {
-            if !json_enabled()
-                && let Ok((self_id, networks)) = ipc_status_full().await
-            {
-                for rule in &mut rules {
-                    rule.peer = firewall_peer_name(rule, &self_id, &networks);
+            if json_enabled() {
+                print_json(&serde_json::json!({
+                    "default_inbound": default_inbound,
+                    "default_outbound": default_outbound,
+                    "reject": reject,
+                    "disabled": disabled,
+                    "rules": rules,
+                }));
+            } else {
+                if let Ok((self_id, networks)) = ipc_status_full().await {
+                    for rule in &mut rules {
+                        rule.peer = firewall_peer_name(rule, &self_id, &networks);
+                    }
                 }
-            }
-            let data = serde_json::json!({
-                "default_inbound": default_inbound,
-                "default_outbound": default_outbound,
-                "reject": reject,
-                "disabled": disabled,
-                "rules": rules,
-            });
-            printout(&data, || {
                 print!(
                     "{}",
                     render_firewall_rules(
@@ -58,7 +57,7 @@ pub(crate) async fn ipc_firewall(action: FirewallAction) -> Result<()> {
                         &rules
                     )
                 );
-            })?;
+            }
         }
         ipc::IpcMessage::Error { message } => fail_with("firewall", &message),
         other => fail_unexpected(&other),
@@ -193,7 +192,7 @@ async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
     match resp {
         ipc::IpcMessage::Ok { message } => println!("{message}"),
         ipc::IpcMessage::FirewallSshState { enabled, networks } => {
-            render_ssh_state(enabled, networks, filter.as_deref())?
+            render_ssh_state(enabled, networks, filter.as_deref())
         }
         ipc::IpcMessage::Error { message } => fail_with("firewall ssh", &message),
         other => fail_unexpected(&other),
@@ -207,62 +206,63 @@ fn render_ssh_state(
     enabled: bool,
     networks: Vec<(String, Vec<ipc::SshAllowView>)>,
     filter: Option<&str>,
-) -> Result<()> {
+) {
     let networks: Vec<(String, Vec<ipc::SshAllowView>)> = networks
         .into_iter()
         .filter(|(n, _)| filter.is_none_or(|f| f == n))
         .collect();
-    let data = serde_json::json!({
-        "enabled": enabled,
-        "networks": networks.iter().map(|(n, a)| serde_json::json!({
-            "network": n,
-            "allow": a.iter().map(|r| serde_json::json!({
-                "peer": r.peer,
-                "users": r.users,
+    if json_enabled() {
+        print_json(&serde_json::json!({
+            "enabled": enabled,
+            "networks": networks.iter().map(|(n, a)| serde_json::json!({
+                "network": n,
+                "allow": a.iter().map(|r| serde_json::json!({
+                    "peer": r.peer,
+                    "users": r.users,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
-    });
-    printout(&data, || {
-        println!("mesh SSH: {}", if enabled { "on" } else { "off" });
-        if networks.is_empty() {
-            println!("  (no SSH allow rules)");
-            return;
-        }
-        for (net, allow) in &networks {
-            let entries: Vec<String> = allow
-                .iter()
-                .map(|r| {
-                    let peer = if r.peer == "*" || r.peer.len() <= 12 {
-                        r.peer.clone()
-                    } else {
-                        format!("{}…", &r.peer[..12])
-                    };
-                    // Empty users = the non-root default; `*` = any user incl. root.
-                    let users = if r.users.is_empty() {
-                        "any non-root user".to_string()
-                    } else if r.users.iter().any(|u| u == "*") {
-                        "any user".to_string()
-                    } else {
-                        r.users.join(",")
-                    };
-                    format!("{peer} → {users}")
-                })
-                .collect();
-            println!("  {net}: {}", entries.join("; "));
-        }
-        // Rules listed under an off server never fire: mesh `:22` still goes to the
-        // host sshd. Say so here rather than leaving the two lines unconnected.
-        if !enabled {
-            println!("\nThese rules are not in effect: mesh SSH is off.");
-            println!("Start the server with `ray firewall ssh on`.");
-            return;
-        }
-        // Self-traffic is delivered over loopback and never enters the TUN, so the
-        // port rewrite that makes mesh `:22` land on the server never runs and the
-        // connection is refused. Cheaper to say than to diagnose from an RST.
-        println!("\nThis node cannot mesh-SSH to itself; `ssh <this node>` is refused.");
-        println!("Use `ssh localhost` on the box itself.");
-    })
+        }));
+        return;
+    }
+    println!("mesh SSH: {}", if enabled { "on" } else { "off" });
+    if networks.is_empty() {
+        println!("  (no SSH allow rules)");
+        return;
+    }
+    for (net, allow) in &networks {
+        let entries: Vec<String> = allow
+            .iter()
+            .map(|r| {
+                let peer = if r.peer == "*" || r.peer.len() <= 12 {
+                    r.peer.clone()
+                } else {
+                    format!("{}…", &r.peer[..12])
+                };
+                // Empty users = the non-root default; `*` = any user incl. root.
+                let users = if r.users.is_empty() {
+                    "any non-root user".to_string()
+                } else if r.users.iter().any(|u| u == "*") {
+                    "any user".to_string()
+                } else {
+                    r.users.join(",")
+                };
+                format!("{peer} → {users}")
+            })
+            .collect();
+        println!("  {net}: {}", entries.join("; "));
+    }
+    // Rules listed under an off server never fire: mesh `:22` still goes to the
+    // host sshd. Say so here rather than leaving the two lines unconnected.
+    if !enabled {
+        println!("\nThese rules are not in effect: mesh SSH is off.");
+        println!("Start the server with `ray firewall ssh on`.");
+        return;
+    }
+    // Self-traffic is delivered over loopback and never enters the TUN, so the
+    // port rewrite that makes mesh `:22` land on the server never runs and the
+    // connection is refused. Cheaper to say than to diagnose from an RST.
+    println!("\nThis node cannot mesh-SSH to itself; `ssh <this node>` is refused.");
+    println!("Use `ssh localhost` on the box itself.");
 }
 
 /// Print a JSON value as one compact line to stdout (jq-friendly).
@@ -1025,14 +1025,15 @@ fn identity_matches_json(matches: &[HostIdentityMatch<'_>]) -> serde_json::Value
     }
 }
 
-pub(crate) async fn cmd_identityof(peer: &str, hostname: Option<&str>) -> Result<()> {
+pub(crate) async fn cmd_identityof(peer: &str, hostname: Option<&str>, json: bool) -> Result<()> {
     let (self_id, networks) = ipc_status_full().await?;
     let network = hostname.map(|_| peer);
     let matches = host_identity_matches(&networks, &self_id, hostname.unwrap_or(peer), network)?;
-    let data = identity_matches_json(&matches);
-    printout(&data, || {
+    if json {
+        print_json(&identity_matches_json(&matches));
+    } else {
         println!("{}", identity_matches_text(&matches));
-    })?;
+    }
     Ok(())
 }
 

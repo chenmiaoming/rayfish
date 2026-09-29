@@ -2,7 +2,33 @@
 //! user identity. Aliases are display-only (shown inline in `ray status`) and
 //! seed `ray apply`'s `aliases:` map; they never reach the signed blob.
 
+use std::collections::BTreeMap;
+use std::fmt::{self, Display, Formatter};
+
 use crate::*;
+
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+struct AliasesOutput<'a>(&'a BTreeMap<String, String>);
+
+impl Display for AliasesOutput<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return write!(f, "\n  {}\n\n", style::faint("no aliases set"));
+        }
+        let rows: Vec<Vec<layout::Cell>> = self
+            .0
+            .iter()
+            .map(|(alias, identity)| {
+                vec![
+                    layout::Cell::new(alias.clone(), style::value(alias)),
+                    layout::Cell::new(identity.clone(), style::faint(identity)),
+                ]
+            })
+            .collect();
+        write!(f, "\n{}\n", indent(&layout::columns(&rows, 2), 2))
+    }
+}
 
 pub(crate) async fn cmd_alias(network: &str, action: AliasAction) -> Result<()> {
     match action {
@@ -90,24 +116,7 @@ async fn alias_list(network: &str) -> Result<()> {
     .await?;
     match ipc::recv(&mut stream).await? {
         ipc::IpcMessage::AliasListResponse { aliases } => {
-            printout(&aliases, || {
-                if aliases.is_empty() {
-                    println!("\n  {}\n", style::faint("no aliases set"));
-                } else {
-                    println!();
-                    let rows: Vec<Vec<layout::Cell>> = aliases
-                        .iter()
-                        .map(|(alias, identity)| {
-                            vec![
-                                layout::Cell::new(alias.clone(), style::value(alias)),
-                                layout::Cell::new(identity.clone(), style::faint(identity)),
-                            ]
-                        })
-                        .collect();
-                    print!("{}", indent(&layout::columns(&rows, 2), 2));
-                    println!();
-                }
-            })?;
+            printout(&AliasesOutput(&aliases))?;
         }
         ipc::IpcMessage::Error { message } => fail_with("error", &message),
         other => fail_unexpected(&other),
