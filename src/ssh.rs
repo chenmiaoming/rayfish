@@ -1351,29 +1351,19 @@ mod tests {
     }
 
     #[test]
-    fn banner_names_the_permitted_users_when_restricted() {
+    fn no_banner_for_authorized_peers() {
         let peer = id(8);
         let mut policy = UserPolicy::default();
-        policy.add(&[]); // the default grant: any non-root user
-        let banner = auth_banner(&policy, &peer, &[SmolStr::new("trade")])
-            .expect("a restricted peer must be told what it may use");
-        assert!(banner.contains("any user except root"));
+        policy.add(&[]);
+        assert_eq!(auth_banner(&policy, &peer, &[SmolStr::new("trade")]), None);
 
         let mut named = UserPolicy::default();
         named.add(&["deploy".to_string(), "ci".to_string()]);
-        let banner = auth_banner(&named, &peer, &[SmolStr::new("trade")]).expect("restricted");
-        assert!(
-            banner.contains("ci, deploy"),
-            "users listed sorted: {banner}"
-        );
-    }
+        assert_eq!(auth_banner(&named, &peer, &[SmolStr::new("trade")]), None);
 
-    #[test]
-    fn no_banner_when_the_peer_may_log_in_as_anyone() {
-        // Nothing to warn about, so don't nag on every successful connection.
-        let mut policy = UserPolicy::default();
-        policy.add(&["*".to_string()]);
-        assert_eq!(auth_banner(&policy, &id(9), &[SmolStr::new("trade")]), None);
+        let mut any = UserPolicy::default();
+        any.add(&["*".to_string()]);
+        assert_eq!(auth_banner(&any, &peer, &[SmolStr::new("trade")]), None);
     }
 
     fn rule(peer: &str, users: &[&str]) -> crate::config::SshRule {

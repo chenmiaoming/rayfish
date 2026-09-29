@@ -52,6 +52,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Mesh SSH no longer prints an authorization banner on successful connections.
+
 - `ray status` shows managed machines only with `--machines`.
 
 - **The project README is now a short overview and install guide.** It links
