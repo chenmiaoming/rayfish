@@ -791,11 +791,17 @@ pub(crate) async fn ipc_apply(
             }
         }
 
+        let status_network = status_networks
+            .iter()
+            .find(|network| network.name == *net_name);
         for host in active_hosts {
+            // SSH apply manages remote machines, not the local controller.
+            if status_network.and_then(|network| network.my_hostname.as_deref())
+                == Some(host.as_ref())
+            {
+                continue;
+            }
             let grants = apply::ssh_grants_for_host(net_firewall, host.as_ref());
-            let status_network = status_networks
-                .iter()
-                .find(|network| network.name == *net_name);
             let Some(machine) =
                 managed_machine_for_hostname(status_network, &host, &managed_machines)
             else {

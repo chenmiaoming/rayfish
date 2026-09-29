@@ -29,6 +29,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `ray apply` skips the local machine when applying SSH grants, avoiding a
+  misleading controlled-machine warning and failed exit status.
+
 - Enabling mesh SSH automatically allows its internal TCP listener on the mesh
   interface when blocked, using active UFW or falling back to ip6tables when no
   firewall manager is active. Startup also checks the rule.
