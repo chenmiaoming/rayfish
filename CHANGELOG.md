@@ -11,6 +11,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The macOS app checks for stable updates and installs them when it quits. Use
   "Check for Updates" in the app menu to check at any time.
 
+### Changed
+
+- `ray identityof <peer>` searches all networks. If the name has different
+  identities, it lists the network, name, and full identity in a table.
+  The existing `ray identityof <network> <host>` form still works.
+
+## [0.5.4] - 2026-09-29
+
+### Added
+
 - macOS developers can build an optimized, locally signed app with
   `just macos-release` and install it with `just macos-release-install`.
 
@@ -32,16 +42,88 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ray up --enable-ssh` enables and saves mesh SSH while bringing the node up.
   Peer and Unix-user access still follows the existing SSH allow rules.
 
+### Changed
+
+- `ray status` hides IP addresses in text output unless `--with-ips` (or `--ips`)
+  is given. JSON output keeps its address fields.
+
+- Mesh SSH no longer prints an authorization banner on successful connections.
+
+- `ray status` shows managed machines only with `--machines`.
+
+### Fixed
+
+- Unpairing a device keeps networks it joined independently, including networks
+  it coordinates, and removes only memberships gained through its pairing
+  certificate.
+
+- Pairing joins all shared networks when several joins reach the same coordinator
+  at once. Concurrent joins reuse one mesh connection to that peer.
+
+- Managed machines can join another network while already connected to its
+  coordinator through a different network.
+
+- mDNS discovery can be turned on or off without interrupting the VPN or existing peer connections.
+
+### Security
+
+- Network invite secrets are no longer written to debug logs during joins.
+
+## [0.5.3] - 2026-09-28
+
+### Added
+
 - macOS Settings and the Windows dashboard can view and edit Rayfish firewall
   rules, including peer and network selection and the inbound default action.
+
+### Fixed
+
+- The macOS app serves mesh SSH through a separate helper so macOS no longer
+  drops connections to a listener inside the VPN extension. Enable Rayfish's
+  background helper in Login Items & Extensions when prompted.
+
+- `ray logs` includes macOS app, tunnel, and Rust core diagnostics, with
+  `--since` and `--follow`. The app's bundled CLI can read logs while disconnected.
+
+- Starting a second daemon now fails before it creates another TUN interface or
+  changes routes and DNS, leaving the running VPN and its IPC socket intact.
+
+- The macOS direct tunnel starts correctly when connecting from the app.
+
+### Performance
+
+- **macOS packet forwarding now uses the system tunnel directly.** Packets no
+  longer cross the Swift bridge or a Rust channel, and TUN reads no longer need
+  an intermediate copy.
+
+## [0.5.2] - 2026-09-25
+
+### Added
 
 - Intel Macs can use the standalone CLI and daemon, self-update, install script,
   and signed native app DMG again.
 
 - macOS notifies you about connection requests, network join requests, and incoming
   files. Click a notification to review it; files can be saved or declined in the app.
+
 - macOS Settings can enable mesh SSH and manage which network peers may sign in
   and which local accounts they may use.
+
+### Fixed
+
+- Mesh SSH honors a peer's grants across all verified shared networks, even when
+  its current connection was established through a different network.
+
+- The macOS app's bundled CLI authorizes the app's user without an operator
+  setting. Connection approvals and firewall changes work from that user's shell.
+  The standalone daemon keeps its operator access rules.
+
+- Pending network joins reach every available coordinator, so any coordinator
+  can approve them. Approval clears the request from the other coordinators.
+
+## [0.5.1] - 2026-09-25
+
+### Added
 
 - **Windows has a desktop dashboard and tray app matching the macOS design.**
   Closing its window leaves Rayfish in the notification area, where the VPN can
@@ -58,17 +140,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `ray identityof <peer>` searches all networks. If the name has different
-  identities, it lists the network, name, and full identity in a table.
-  The existing `ray identityof <network> <host>` form still works.
-
-- `ray status` hides IP addresses in text output unless `--with-ips` (or `--ips`)
-  is given. JSON output keeps its address fields.
-
-- Mesh SSH no longer prints an authorization banner on successful connections.
-
-- `ray status` shows managed machines only with `--machines`.
-
 - **The project README is now a short overview and install guide.** It links
   directly to the macOS DMG, Windows installer, and full Rayfish documentation.
 
@@ -80,38 +151,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inventory recovery require both endpoints to support v2.
 
 ### Fixed
-
-- Unpairing a device keeps networks it joined independently, including networks
-  it coordinates, and removes only memberships gained through its pairing
-  certificate.
-
-- Pairing joins all shared networks when several joins reach the same coordinator
-  at once. Concurrent joins reuse one mesh connection to that peer.
-
-- Managed machines can join another network while already connected to its
-  coordinator through a different network.
-
-- mDNS discovery can be turned on or off without interrupting the VPN or existing peer connections.
-
-- The macOS app serves mesh SSH through a separate helper so macOS no longer
-  drops connections to a listener inside the VPN extension. Enable Rayfish's
-  background helper in Login Items & Extensions when prompted.
-
-- `ray logs` includes macOS app, tunnel, and Rust core diagnostics, with
-  `--since` and `--follow`. The app's bundled CLI can read logs while disconnected.
-
-- Starting a second daemon now fails before it creates another TUN interface or
-  changes routes and DNS, leaving the running VPN and its IPC socket intact.
-
-- The macOS direct tunnel starts correctly when connecting from the app.
-
-- Mesh SSH honors a peer's grants across all verified shared networks, even when
-  its current connection was established through a different network.
-- The macOS app's bundled CLI authorizes the app's user without an operator
-  setting. Connection approvals and firewall changes work from that user's shell.
-  The standalone daemon keeps its operator access rules.
-- Pending network joins reach every available coordinator, so any coordinator
-  can approve them. Approval clears the request from the other coordinators.
 
 - **Mesh connections recover when a replacement connection fails to arrive.**
   Rayfish retries the missing link automatically, so SSH and other traffic do
@@ -125,16 +164,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Commands that target network members accept their hostnames consistently.**
   Admin grants now accept names, and network-scoped commands do not resolve a
   duplicate name from another network.
-
-### Security
-
-- Network invite secrets are no longer written to debug logs during joins.
-
-### Performance
-
-- **macOS packet forwarding now uses the system tunnel directly.** Packets no
-  longer cross the Swift bridge or a Rust channel, and TUN reads no longer need
-  an intermediate copy.
 
 ## [0.5.0] - 2026-09-24
 
@@ -2475,7 +2504,11 @@ First public release.
 - **Optional transports / export**: `--features tor` (Tor transport) and
   `--features otel` (OTLP span export).
 
-[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/rayfish/rayfish/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/rayfish/rayfish/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/rayfish/rayfish/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/rayfish/rayfish/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/rayfish/rayfish/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/rayfish/rayfish/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/rayfish/rayfish/compare/v0.4.0...v0.4.1
