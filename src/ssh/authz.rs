@@ -41,20 +41,6 @@ impl UserPolicy {
     pub(super) fn permits(&self, name: &str, uid: u32) -> bool {
         self.any || self.users.contains(name) || (self.nonroot && uid != 0)
     }
-
-    fn restriction(&self) -> Option<String> {
-        if self.any {
-            return None;
-        }
-        let mut named: Vec<&str> = self.users.iter().map(String::as_str).collect();
-        named.sort_unstable();
-        Some(match (self.nonroot, named.is_empty()) {
-            (true, true) => "any user except root".to_string(),
-            (true, false) => format!("any user except root, plus {}", named.join(", ")),
-            (false, false) => named.join(", "),
-            (false, true) => "no users".to_string(),
-        })
-    }
 }
 
 pub(super) fn auth_banner(
@@ -62,28 +48,21 @@ pub(super) fn auth_banner(
     peer: &EndpointId,
     networks: &[SmolStr],
 ) -> Option<String> {
+    if policy.authorized() {
+        return None;
+    }
     let network = networks
         .iter()
         .min()
         .map(ToString::to_string)
         .unwrap_or_else(|| "<network>".to_string());
-    if !policy.authorized() {
-        return Some(format!(
-            "rayfish mesh SSH: peer {} is not authorized on this node.\r\n\
-             Authorize it here with: ray firewall ssh allow {network} {} [-u <users>]\r\n\
-             A password prompt after this line comes from the system sshd, not rayfish.\r\n",
-            peer.fmt_short(),
-            peer.fmt_short(),
-        ));
-    }
-    policy.restriction().map(|allowed| {
-        format!(
-            "rayfish mesh SSH: peer {} may log in as {allowed}.\r\n\
-             Widen it with: ray firewall ssh allow {network} {} -u '*'\r\n",
-            peer.fmt_short(),
-            peer.fmt_short(),
-        )
-    })
+    Some(format!(
+        "rayfish mesh SSH: peer {} is not authorized on this node.\r\n\
+         Authorize it here with: ray firewall ssh allow {network} {} [-u <users>]\r\n\
+         A password prompt after this line comes from the system sshd, not rayfish.\r\n",
+        peer.fmt_short(),
+        peer.fmt_short(),
+    ))
 }
 
 #[cfg(test)]
