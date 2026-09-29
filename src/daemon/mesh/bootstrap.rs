@@ -130,7 +130,6 @@ fn initial_alpns() -> Vec<Vec<u8>> {
         iroh_blobs::protocol::ALPN.to_vec(),
         transport::FILES_ALPN.to_vec(),
         PAIR_ALPN.to_vec(),
-        PAIRED_NETWORK_ALPN.to_vec(),
         transport::CONNECT_ALPN.to_vec(),
         crate::management::ALPN.to_vec(),
         crate::management::V2_ALPN.to_vec(),

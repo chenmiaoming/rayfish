@@ -2,7 +2,7 @@
 //! split across `ProtocolRouter` (pending offers, id counter, pairing secret,
 //! signing key) and `Daemon`.
 //!
-//! The file, pairing, and paired-network ALPN accept arms live
+//! The file and pairing ALPN accept arms live
 //! here; the `ProtocolRouter` accept loop holds an `Arc<FileService>` and
 //! delegates to them. The IPC handlers (`send_file`/`accept_file`/`start_pairing`
 //! /…) stay on `Daemon` since they orchestrate over core handles (endpoint,
@@ -1094,8 +1094,8 @@ impl FileService {
         let remote_id = conn.remote_id();
         match conn.accept_bi().await {
             Ok((mut send, mut recv)) => {
-                // Read length-prefixed PairMsg::Request
-                let request: control::PairMsg = match control::recv_framed(&mut recv).await {
+                // Read one length-prefixed pairing protocol message.
+                let request: control::PairMsg = match control::recv_pair_msg(&mut recv).await {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(error = %e, peer = %remote_id.fmt_short(), "failed to read pair request");
@@ -1204,6 +1204,44 @@ impl FileService {
                             }
                         }
                     }
+                    control::PairMsg::Extension {
+                        kind: control::PAIR_NETWORK_LIST_REQUEST,
+                        payload,
+                        ..
+                    } => {
+                        let Ok(cert) = rmp_serde::from_slice::<control::DeviceCert>(&payload)
+                        else {
+                            return;
+                        };
+                        let Ok(cfg) = config::load() else {
+                            return;
+                        };
+                        if !authorized_network_sync(
+                            &cert,
+                            remote_id,
+                            self.transport.endpoint.id(),
+                            &config::revoked_device_ids(&cfg),
+                        ) {
+                            tracing::warn!(device = %remote_id.fmt_short(), "refused paired network sync");
+                            return;
+                        }
+                        let Ok(networks) = saved_pair_networks() else {
+                            return;
+                        };
+                        let Ok(payload) = rmp_serde::to_vec(&networks) else {
+                            return;
+                        };
+                        let response = control::PairMsg::Extension {
+                            kind: control::PAIR_NETWORK_LIST_RESPONSE,
+                            required: true,
+                            payload,
+                        };
+                        if control::send_framed(&mut send, &response).await.is_ok() {
+                            let _ = send.finish();
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+                        }
+                    }
                     _ => {
                         tracing::warn!(peer = %remote_id.fmt_short(), "unexpected pair message type");
                     }
@@ -1212,47 +1250,6 @@ impl FileService {
             Err(e) => {
                 tracing::warn!(error = %e, peer = %remote_id.fmt_short(), "failed to accept bi stream for pairing");
             }
-        }
-    }
-
-    /// Give a paired secondary the current network list. The certificate must
-    /// belong to the transport key that dialed us and must still be authorized.
-    pub(crate) async fn accept_paired_network_request(&self, conn: Connection) {
-        let remote = conn.remote_id();
-        let Ok(Ok((mut send, mut recv))) =
-            tokio::time::timeout(Duration::from_secs(10), conn.accept_bi()).await
-        else {
-            return;
-        };
-        let Ok(Ok(control::PairedNetworkMsg::Request { cert })) = tokio::time::timeout(
-            Duration::from_secs(10),
-            control::recv_framed::<control::PairedNetworkMsg>(&mut recv),
-        )
-        .await
-        else {
-            return;
-        };
-        let Ok(cfg) = config::load() else {
-            return;
-        };
-        if !authorized_network_sync(
-            &cert,
-            remote,
-            self.transport.endpoint.id(),
-            &config::revoked_device_ids(&cfg),
-        ) {
-            tracing::warn!(device = %remote.fmt_short(), "refused paired network sync");
-            return;
-        }
-        let Ok(networks) = saved_pair_networks() else {
-            return;
-        };
-        if control::send_framed(&mut send, &control::PairedNetworkMsg::Response { networks })
-            .await
-            .is_ok()
-        {
-            let _ = send.finish();
-            let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
         }
     }
 }

@@ -119,7 +119,7 @@ impl Daemon {
             return ipc_err(format!("failed to send pair request: {e}"));
         }
 
-        let response: control::PairMsg = match control::recv_framed(&mut recv).await {
+        let response: control::PairMsg = match control::recv_pair_msg(&mut recv).await {
             Ok(r) => r,
             Err(e) => {
                 return ipc_err(format!("failed to read pair response: {e}"));
@@ -229,23 +229,24 @@ impl Daemon {
         let request_cert = cert.clone();
         let addr: iroh::EndpointAddr = primary.into();
         let sync = async {
-            let conn = self
-                .transport
-                .endpoint
-                .connect(addr, PAIRED_NETWORK_ALPN)
-                .await?;
+            let conn = self.transport.endpoint.connect(addr, PAIR_ALPN).await?;
             if conn.remote_id() != primary {
                 anyhow::bail!("connected to an unexpected primary");
             }
             let (mut send, mut recv) = conn.open_bi().await?;
-            control::send_framed(
-                &mut send,
-                &control::PairedNetworkMsg::Request { cert: request_cert },
-            )
-            .await?;
-            let response: control::PairedNetworkMsg = control::recv_framed(&mut recv).await?;
+            let request = control::PairMsg::Extension {
+                kind: control::PAIR_NETWORK_LIST_REQUEST,
+                required: false,
+                payload: rmp_serde::to_vec(&request_cert)?,
+            };
+            control::send_framed(&mut send, &request).await?;
+            let response = control::recv_pair_msg(&mut recv).await?;
             match response {
-                control::PairedNetworkMsg::Response { networks } => Ok(networks),
+                control::PairMsg::Extension {
+                    kind: control::PAIR_NETWORK_LIST_RESPONSE,
+                    payload,
+                    ..
+                } => Ok(rmp_serde::from_slice(&payload)?),
                 _ => anyhow::bail!("unexpected paired network response"),
             }
         };
