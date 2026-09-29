@@ -39,6 +39,13 @@ Configure these repository secrets before running it:
 | `APPLE_API_PRIVATE_KEY` | Contents of an App Store Connect team API `.p8` key |
 | `APPLE_API_KEY_ID` | That API key's ID |
 | `APPLE_API_ISSUER_ID` | That API key's issuer ID |
+| `SPARKLE_ED_PRIVATE_KEY` | Base64 Ed25519 seed for signing macOS app updates |
+
+The macOS app uses Sparkle to check for stable updates and install them on quit.
+Each versioned release publishes a signed appcast for each architecture after its
+notarized DMG is attached. Keep the Sparkle private key outside Git and back it
+up: every shipped app has the matching public key embedded. A missing key stops
+the versioned release before building.
 
 The profiles must belong to team `3D9W8F63CL` and allow the capabilities in the
 Release entitlements, including the packet tunnel system extension and app group.

@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		022130780000000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 022130780000000000000003 /* Sparkle */; };
+		022130780000000000000002 /* Sparkle in Embed Frameworks */ = {isa = PBXBuildFile; productRef = 022130780000000000000003 /* Sparkle */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		022130780000000000000006 /* Sparkle-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 022130780000000000000007 /* Sparkle-LICENSE.txt */; };
 		06642DCA858987EA27C2BA74 /* RayfishNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1BD3D661631EB1DA93E7F2 /* RayfishNotifications.swift */; };
 		10CF514C0F2FBA56B5D6CE1B /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = F551764865C525E7C133EBD7 /* main.swift */; };
 		25FEF3ADDF7FAF7D8C10120E /* com.rayfish.app.tunnel.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 2D7FF352C42FF4506E6FB496 /* com.rayfish.app.tunnel.systemextension */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -45,6 +48,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		022130780000000000000004 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				022130780000000000000002 /* Sparkle in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		30D24859D5817641FFF561F0 /* Embed System Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -59,6 +73,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		022130780000000000000007 /* Sparkle-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Sparkle-LICENSE.txt"; sourceTree = "<group>"; };
 		04F957D1BDEDFDAB48E32699 /* TunnelPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelPreferences.swift; sourceTree = "<group>"; };
 		224C89EE4A7C4B10E79D1104 /* SystemExtensionInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemExtensionInstaller.swift; sourceTree = "<group>"; };
 		26C97C969BAC3B6E6C4CAC12 /* LegacyDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyDaemon.swift; sourceTree = "<group>"; };
@@ -94,6 +109,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				022130780000000000000001 /* Sparkle in Frameworks */,
 				79AF5623414DA00917956853 /* UserNotifications.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -146,6 +162,7 @@
 			isa = PBXGroup;
 			children = (
 				EA6E6748C8715BF45A6683B1 /* Assets.xcassets */,
+				022130780000000000000007 /* Sparkle-LICENSE.txt */,
 			);
 			path = Rayfish;
 			sourceTree = "<group>";
@@ -202,6 +219,7 @@
 				D76FB9A2773706815890D604 /* Sources */,
 				F32F4FD569FADCA723AEDB17 /* Resources */,
 				1F296514FB611F11757D2805 /* Frameworks */,
+				022130780000000000000004 /* Embed Frameworks */,
 				30D24859D5817641FFF561F0 /* Embed System Extensions */,
 				4291C25C81A92889E7B6D181 /* Bundle the Rust ray command */,
 			);
@@ -212,6 +230,7 @@
 			);
 			name = Rayfish;
 			packageProductDependencies = (
+				022130780000000000000003 /* Sparkle */,
 			);
 			productName = Rayfish;
 			productReference = 3D56C418C2CCB66CC3EEA18D /* Rayfish.app */;
@@ -261,6 +280,9 @@
 			);
 			mainGroup = E4870274DCC4E9944C9F835B;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				022130780000000000000005 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5189EF84F1DD2ED99BD8FC64 /* Products */;
 			projectDirPath = "";
@@ -278,6 +300,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D1DAD4DF0D9F1B71525FBF36 /* Assets.xcassets in Resources */,
+				022130780000000000000006 /* Sparkle-LICENSE.txt in Resources */,
 				3F18BD7B209CAAE5E1FF4F58 /* Fonts in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -369,6 +392,25 @@
 		};
 /* End PBXTargetDependency section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		022130780000000000000005 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.10.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		022130780000000000000003 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 022130780000000000000005 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
+
 /* Begin XCBuildConfiguration section */
 		230A22BF6DE2810858888DD5 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -430,6 +472,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RAYFISH_APP_PROFILE = Rayfish;
 				RAYFISH_TUNNEL_PROFILE = "Rayfish tunnel";
+				RAYFISH_UPDATE_FEED = "";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
@@ -494,6 +537,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RAYFISH_APP_PROFILE = Rayfish;
 				RAYFISH_TUNNEL_PROFILE = "Rayfish tunnel";
+				RAYFISH_UPDATE_FEED = "";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
@@ -681,6 +725,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RAYFISH_APP_PROFILE = Rayfish;
 				RAYFISH_TUNNEL_PROFILE = "Rayfish tunnel";
+				RAYFISH_UPDATE_FEED = "";
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";

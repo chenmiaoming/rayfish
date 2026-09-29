@@ -14,5 +14,13 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>SUFeedURL</key>
+	<string>$(RAYFISH_UPDATE_FEED)</string>
+	<key>SUPublicEDKey</key>
+	<string>6mb/Qbpjq4VQfFeZKAJeQUUabX9ObJxW598aszI5avc=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
 </dict>
 </plist>
