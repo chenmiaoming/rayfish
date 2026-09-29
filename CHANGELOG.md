@@ -17,6 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identities, it lists the network, name, and full identity in a table.
   The existing `ray identityof <network> <host>` form still works.
 
+### Fixed
+
+- Android release and nightly APKs use a permanent signing key so future updates
+  preserve app data. Existing debug installs need a one-time backup and restore
+  into the release app, which installs alongside the debug app.
+
 ## [0.5.4] - 2026-09-29
 
 ### Added

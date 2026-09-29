@@ -370,7 +370,7 @@ jobs:
 
       - name: Install NDK
         run: |
-          sdkmanager "ndk;27.2.12479018"
+          sdkmanager "ndk;27.2.12479018" "build-tools;35.0.0"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       # Gradle's cargoNdkBuild task only rebuilds the .so; the Kotlin bindings
@@ -385,15 +385,17 @@ jobs:
             --no-format
           sh scripts/format-generated-kotlin.sh
 
-      - name: Build APK
-        working-directory: android
-        run: ./gradlew :app:assembleDebug
+      - name: Build and verify signed APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash scripts/build-android-release.sh
 
-      # Debug-signed for now (installable by anyone) since there is no release
-      # keystore yet. Swap to a signed assembleRelease once one exists.
       - name: Package APK
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk rayfish-android.apk
+          cp android/app/build/outputs/apk/release/app-release.apk rayfish-android.apk
           sha256sum rayfish-android.apk > rayfish-android.apk.sha256
 
       - name: Upload release assets

@@ -10,10 +10,8 @@ plugins {
 }
 
 // Release signing is driven by a gitignored keystore.properties at the android/
-// project root (see keystore.properties.example). It is absent on CI and on any
-// checkout that only builds debug, so every use is guarded by exists(): without
-// it the release build stays unsigned and Play App Signing (or a later manual
-// sign) takes over.
+// project root (see keystore.properties.example). Release workflows create it
+// from Actions secrets. Without it, release builds stay unsigned for later signing.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) {
@@ -134,7 +132,7 @@ android {
             isMinifyEnabled = false
             isDebuggable = false
             // Sign with the release keystore only when it is configured; otherwise
-            // leave the build unsigned for Play App Signing to handle.
+            // leave the build unsigned for later signing.
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
