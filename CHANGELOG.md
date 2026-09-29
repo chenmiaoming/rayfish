@@ -32,6 +32,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The macOS app retries its VPN connection when the network becomes available
+  after an offline login. Disconnecting in the app still keeps it offline.
+
 - `ray apply` skips the local machine when applying SSH grants, avoiding a
   misleading controlled-machine warning and failed exit status.
 

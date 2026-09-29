@@ -1,6 +1,7 @@
 import Combine
 import Darwin
 import Foundation
+import Network
 import NetworkExtension
 import OSLog
 import ServiceManagement
@@ -13,6 +14,11 @@ final class TunnelController: ObservableObject {
     private var isQuitting = false
     private var pollingTask: Task<Void, Never>?
     private var machinesTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "com.rayfish.app.network-path")
+    private var networkAvailable = false
+    private var wantsConnection = false
     private var lastMachinesRefresh = Date.distantPast
     let notifications = RayfishNotifications()
 
@@ -51,11 +57,17 @@ final class TunnelController: ObservableObject {
         }
     }
 
-    deinit { pollingTask?.cancel(); machinesTask?.cancel() }
+    deinit {
+        pollingTask?.cancel()
+        machinesTask?.cancel()
+        reconnectTask?.cancel()
+        pathMonitor.cancel()
+    }
 
     func startup() async {
         guard !didStart else { return }
         didStart = true
+        startNetworkMonitoring()
         Task { await notifications.requestAuthorization() }
         refreshLaunchAtLogin()
         RayfishLog.app.info("Starting Rayfish build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown", privacy: .public)")
@@ -63,7 +75,11 @@ final class TunnelController: ObservableObject {
             let manager = try await TunnelPreferences.load()
             let needsImport = LegacyDaemon.isInstalled
                 && !UserDefaults.standard.bool(forKey: Self.migrationCompletedKey)
-            if needsImport || launchAtLoginEnabled || manager?.connection.status == .connected || manager?.connection.status == .connecting {
+            wantsConnection = needsImport || launchAtLoginEnabled
+                || manager?.connection.status == .connected
+                || manager?.connection.status == .connecting
+                || manager?.connection.status == .reasserting
+            if wantsConnection {
                 // Activation replaces an older extension before using its command service.
                 await connect()
             } else {
@@ -76,6 +92,49 @@ final class TunnelController: ObservableObject {
                 do { try await Task.sleep(nanoseconds: 3_000_000_000) }
                 catch { return }
                 await self?.refresh()
+            }
+        }
+    }
+
+    private func startNetworkMonitoring() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let available = path.status == .satisfied
+            Task { @MainActor [weak self] in
+                self?.networkAvailabilityChanged(available)
+            }
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
+    }
+
+    private func networkAvailabilityChanged(_ available: Bool) {
+        guard networkAvailable != available else { return }
+        networkAvailable = available
+        if available {
+            scheduleReconnect()
+        } else {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+        }
+    }
+
+    private func scheduleReconnect() {
+        guard wantsConnection, networkAvailable, !isQuitting,
+              !isConnected, reconnectTask == nil else { return }
+        reconnectTask = Task { [weak self] in
+            defer { self?.reconnectTask = nil }
+            for delay in [1, 2, 4, 8, 15, 30] {
+                do { try await Task.sleep(for: .seconds(delay)) }
+                catch { return }
+                guard let self, self.wantsConnection, self.networkAvailable,
+                      !self.isQuitting else { return }
+                let current = (try? await TunnelPreferences.load())?.connection.status ?? .disconnected
+                self.connectionStatus = current
+                if current == .connected || current == .connecting || current == .reasserting {
+                    return
+                }
+                RayfishLog.app.info("Network is available, retrying VPN connection")
+                await self.connect()
+                if self.isConnected { return }
             }
         }
     }
@@ -101,6 +160,7 @@ final class TunnelController: ObservableObject {
     }
 
     func connect() async {
+        wantsConnection = true
         guard !isLoading, !isQuitting else { return }
         isLoading = true
         error = nil
@@ -115,13 +175,15 @@ final class TunnelController: ObservableObject {
             guard !isQuitting else { return }
             activity = "Connecting..."
             if let current = try await TunnelPreferences.load(),
-               current.connection.status == .connected || current.connection.status == .connecting,
+               current.connection.status == .connected || current.connection.status == .connecting
+                   || current.connection.status == .reasserting,
                TunnelOwner.uid(in: (current.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration) != getuid() {
                 try await stopTunnel()
             }
             let manager = try await TunnelPreferences.configured()
             guard !isQuitting else { return }
-            if manager.connection.status != .connected && manager.connection.status != .connecting {
+            if manager.connection.status != .connected && manager.connection.status != .connecting
+                && manager.connection.status != .reasserting {
                 try manager.connection.startVPNTunnel()
             }
             var observedConnecting = false
@@ -158,10 +220,14 @@ final class TunnelController: ObservableObject {
         } catch {
             self.error = error.localizedDescription
             connectionStatus = (try? await TunnelPreferences.load())?.connection.status ?? .disconnected
+            scheduleReconnect()
         }
     }
 
     func disconnect() async {
+        wantsConnection = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
@@ -172,7 +238,11 @@ final class TunnelController: ObservableObject {
     }
 
     func prepareToQuit() async -> Bool {
+        let resumeConnection = wantsConnection
         isQuitting = true
+        wantsConnection = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
         RayfishLog.app.info("Disconnecting before quit")
         do {
             try await stopTunnel()
@@ -180,6 +250,8 @@ final class TunnelController: ObservableObject {
             return true
         } catch {
             isQuitting = false
+            wantsConnection = resumeConnection
+            scheduleReconnect()
             self.error = "Could not disconnect before quitting: \(error.localizedDescription)"
             return false
         }
