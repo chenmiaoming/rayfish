@@ -9,6 +9,7 @@ import ServiceManagement
 @MainActor
 final class TunnelController: ObservableObject {
     private static let migrationCompletedKey = "legacyMigrationCompleted"
+    private static let reconnectAfterUpdateKey = "reconnectAfterUpdate"
     private var didStart = false
     private var isRefreshing = false
     private var isQuitting = false
@@ -75,7 +76,9 @@ final class TunnelController: ObservableObject {
             let manager = try await TunnelPreferences.load()
             let needsImport = LegacyDaemon.isInstalled
                 && !UserDefaults.standard.bool(forKey: Self.migrationCompletedKey)
-            wantsConnection = needsImport || launchAtLoginEnabled
+            let reconnectAfterUpdate = UserDefaults.standard.bool(forKey: Self.reconnectAfterUpdateKey)
+            UserDefaults.standard.removeObject(forKey: Self.reconnectAfterUpdateKey)
+            wantsConnection = reconnectAfterUpdate || needsImport || launchAtLoginEnabled
                 || manager?.connection.status == .connected
                 || manager?.connection.status == .connecting
                 || manager?.connection.status == .reasserting
@@ -237,7 +240,7 @@ final class TunnelController: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func prepareToQuit() async -> Bool {
+    func prepareToQuit(forUpdate: Bool = false) async -> Bool {
         let resumeConnection = wantsConnection
         isQuitting = true
         wantsConnection = false
@@ -246,6 +249,9 @@ final class TunnelController: ObservableObject {
         RayfishLog.app.info("Disconnecting before quit")
         do {
             try await stopTunnel()
+            if forUpdate {
+                UserDefaults.standard.set(resumeConnection, forKey: Self.reconnectAfterUpdateKey)
+            }
             pollingTask?.cancel()
             return true
         } catch {

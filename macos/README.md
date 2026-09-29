@@ -41,7 +41,8 @@ Configure these repository secrets before running it:
 | `APPLE_API_ISSUER_ID` | That API key's issuer ID |
 | `SPARKLE_ED_PRIVATE_KEY` | Base64 Ed25519 seed for signing macOS app updates |
 
-The macOS app uses Sparkle to check for stable updates and install them on quit.
+The macOS app uses Sparkle to check for stable updates. A notification offers to
+restart and install a downloaded update; quitting the app also installs it.
 Each versioned release publishes a signed appcast for each architecture after its
 notarized DMG is attached. Keep the Sparkle private key outside Git and back it
 up: every shipped app has the matching public key embedded. A missing key stops

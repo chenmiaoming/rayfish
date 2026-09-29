@@ -26,20 +26,37 @@ struct RayfishApp: App {
 }
 
 @MainActor
-final class RayfishAppDelegate: NSObject, NSApplicationDelegate {
+final class RayfishAppDelegate: NSObject, NSApplicationDelegate, @preconcurrency SPUUpdaterDelegate {
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
               feed.hasPrefix("https://") else { return nil }
-        return SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        return SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
     }()
     private let controller = TunnelController()
     private var mainWindow: RayfishWindow?
     private var statusMenu: RayfishMenu?
     private var isTerminating = false
+    private var updateVersion: String?
+    private var installUpdate: (() -> Void)?
+    private var updateRestartRequested = false
 
     var canCheckForUpdates: Bool { updaterController != nil }
 
     func checkForUpdates() { updaterController?.checkForUpdates(nil) }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
+                 immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
+        updateVersion = item.displayVersionString
+        installUpdate = immediateInstallHandler
+        controller.notifications.showUpdateReady(version: item.displayVersionString)
+        return true
+    }
+
+    private func restartToUpdate() {
+        guard !updateRestartRequested, !isTerminating, let installUpdate else { return }
+        updateRestartRequested = true
+        installUpdate()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = updaterController
@@ -48,7 +65,10 @@ final class RayfishAppDelegate: NSObject, NSApplicationDelegate {
             self?.controller.page = page
             self?.openMainWindow()
         }
-        statusMenu = RayfishMenu(controller: controller) { [weak self] in
+        controller.notifications.onRestartUpdate = { [weak self] in self?.restartToUpdate() }
+        statusMenu = RayfishMenu(controller: controller,
+                                 updateReady: { [weak self] in self?.updateVersion },
+                                 restartUpdate: { [weak self] in self?.restartToUpdate() }) { [weak self] in
             self?.openMainWindow()
         }
         openMainWindow()
@@ -56,7 +76,8 @@ final class RayfishAppDelegate: NSObject, NSApplicationDelegate {
 
     func openMainWindow() {
         if mainWindow == nil {
-            mainWindow = RayfishWindow(content: NSHostingView(rootView: ContentView(controller: controller)))
+            mainWindow = RayfishWindow(content: NSHostingView(rootView: ContentView(
+                controller: controller, updater: updaterController?.updater)))
         }
         mainWindow?.show()
     }
@@ -69,9 +90,12 @@ final class RayfishAppDelegate: NSObject, NSApplicationDelegate {
         guard !isTerminating else { return .terminateLater }
         isTerminating = true
         Task {
-            let stopped = await controller.prepareToQuit()
+            let stopped = await controller.prepareToQuit(forUpdate: updateRestartRequested)
             isTerminating = false
-            if !stopped { openMainWindow() }
+            if !stopped {
+                updateRestartRequested = false
+                openMainWindow()
+            }
             sender.reply(toApplicationShouldTerminate: stopped)
         }
         return .terminateLater
@@ -85,6 +109,7 @@ final class RayfishAppDelegate: NSObject, NSApplicationDelegate {
 
 private struct ContentView: View {
     @ObservedObject var controller: TunnelController
+    let updater: SPUUpdater?
 
     private var connected: Bool { controller.isConnected }
 
@@ -140,7 +165,7 @@ private struct ContentView: View {
                 case .files:
                     FilesView(controller: controller)
                 case .settings:
-                    SettingsView(controller: controller)
+                    SettingsView(controller: controller, updater: updater)
                 }
                 Spacer(minLength: 24)
             }
@@ -539,10 +564,44 @@ private struct EmptyState: View {
 
 private struct SettingsView: View {
     @ObservedObject var controller: TunnelController
+    let updater: SPUUpdater?
     @State private var shellCommandMessage: String?
+    @State private var automaticUpdatesEnabled = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Settings").font(RayfishTheme.heading()).foregroundColor(RayfishTheme.ink)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Rayfish version")
+                    Spacer()
+                    Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown")
+                        .font(RayfishTheme.mono(12)).foregroundColor(RayfishTheme.muted)
+                }
+                if let updater {
+                    Rectangle().fill(RayfishTheme.line).frame(height: 1)
+                    HStack {
+                        Text("Automatically update Rayfish")
+                        Spacer()
+                        Toggle("Automatically update Rayfish", isOn: Binding(
+                            get: { automaticUpdatesEnabled },
+                            set: { enabled in
+                                updater.automaticallyChecksForUpdates = enabled
+                                updater.automaticallyDownloadsUpdates = enabled
+                                automaticUpdatesEnabled = enabled
+                            }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                    }
+                    Text("Updates download in the background. Restart when notified, or they install when you quit.")
+                        .foregroundColor(RayfishTheme.muted)
+                }
+            }
+            .padding(18).rayfishCard()
+            .onAppear {
+                automaticUpdatesEnabled = updater?.automaticallyChecksForUpdates == true
+                    && updater?.automaticallyDownloadsUpdates == true
+            }
             SSHSettingsView(controller: controller)
             FirewallSettingsView(controller: controller)
             VStack(alignment: .leading, spacing: 14) {

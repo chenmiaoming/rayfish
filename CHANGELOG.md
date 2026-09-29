@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The macOS Settings page shows the app version and lets you turn automatic
+  updates on or off.
+- When a macOS update is ready, a notification offers to restart Rayfish and
+  install it. The VPN reconnects if it was connected before the restart.
+
 - Paired devices pick up networks added to their primary while they were offline.
   New networks are joined when the device reconnects.
 

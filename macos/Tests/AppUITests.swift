@@ -24,9 +24,22 @@ struct AppUITests {
         _ = NSApplication.shared
         let controller = TunnelController()
         let menu = NSMenu()
-        let owner = RayfishMenu(controller: controller, menu: menu) {}
+        var updateVersion: String?
+        var restartCount = 0
+        let owner = RayfishMenu(controller: controller, menu: menu,
+                                updateReady: { updateVersion },
+                                restartUpdate: { restartCount += 1 }) {}
         defer { withExtendedLifetime(owner) {} }
         precondition(row("activity", in: menu)?.title == "Connecting...")
+        updateVersion = "0.5.6"
+        owner.menuNeedsUpdate(menu)
+        let update = row("restart-update", in: menu)!
+        precondition(update.toolTip == "Install Rayfish 0.5.6")
+        precondition(NSApp.sendAction(update.action!, to: update.target, from: update))
+        precondition(restartCount == 1)
+        updateVersion = nil
+        owner.menuNeedsUpdate(menu)
+        precondition(row("restart-update", in: menu) == nil)
         let header = row("connection", in: menu)
         controller.status = ProviderStatus(active: true, ipv6: "287::1", networks: [
             ProviderNetwork(name: "testnet", hostname: "local-device", ipv6: "287::1", role: "coordinator", peers: [

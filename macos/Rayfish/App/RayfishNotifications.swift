@@ -61,13 +61,35 @@ struct RayfishNoticeTracker {
 @MainActor
 final class RayfishNotifications: NSObject, UNUserNotificationCenterDelegate {
     var onOpen: ((RayfishPage) -> Void)?
+    var onRestartUpdate: (() -> Void)?
     private var tracker = RayfishNoticeTracker()
     private var deliveryTask: Task<Void, Never>?
     private var authorizationReady = false
     private var latestStatus: ProviderStatus?
 
     func install() {
-        UNUserNotificationCenter.current().delegate = self
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        let restart = UNNotificationAction(identifier: "rayfish.restart-update", title: "Restart and Update")
+        center.setNotificationCategories([
+            UNNotificationCategory(identifier: "rayfish.update", actions: [restart], intentIdentifiers: [], options: [])
+        ])
+    }
+
+    func showUpdateReady(version: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Rayfish \(version) is ready"
+        content.body = "Restart to install the update. The VPN will briefly disconnect."
+        content.sound = .default
+        content.categoryIdentifier = "rayfish.update"
+        Task {
+            do {
+                try await UNUserNotificationCenter.current().add(
+                    UNNotificationRequest(identifier: "rayfish:update", content: content, trigger: nil))
+            } catch {
+                RayfishLog.app.error("Update notification failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     func requestAuthorization() async {
@@ -118,10 +140,18 @@ final class RayfishNotifications: NSObject, UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        let isUpdate = response.notification.request.content.categoryIdentifier == "rayfish.update"
         let page = (response.notification.request.content.userInfo["page"] as? String)
             .flatMap(RayfishPage.init(rawValue:)) ?? .networks
         Task { @MainActor in
-            if response.actionIdentifier == UNNotificationDefaultActionIdentifier { self.onOpen?(page) }
+            if isUpdate {
+                if response.actionIdentifier == UNNotificationDefaultActionIdentifier
+                    || response.actionIdentifier == "rayfish.restart-update" {
+                    self.onRestartUpdate?()
+                }
+            } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+                self.onOpen?(page)
+            }
             completionHandler()
         }
     }
