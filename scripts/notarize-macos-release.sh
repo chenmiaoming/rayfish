@@ -9,6 +9,7 @@ set -euo pipefail
 : "${RUNNER_TEMP:?Run this script through the macOS app release workflow}"
 
 output="$PWD/target/macos-release"
+source_root=$PWD
 app="$output/build/Build/Products/Release/Rayfish.app"
 key="$RUNNER_TEMP/notary-key.p8"
 umask 077
@@ -52,3 +53,17 @@ codesign --verify --strict "$dmg"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 cd "$output/dist"
 shasum -a 256 "${dmg##*/}" > "${dmg##*/}.sha256"
+
+if [[ -n "${RELEASE_TAG:-}" ]]; then
+    : "${SPARKLE_ED_PRIVATE_KEY:?Set the Sparkle signing key for published releases}"
+    signing_key="$RUNNER_TEMP/sparkle-ed25519.key"
+    umask 077
+    printf '%s\n' "$SPARKLE_ED_PRIVATE_KEY" > "$signing_key"
+    trap 'rm -f "$key" "$signing_key"' EXIT
+    sign_update="$output/build/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update"
+    [[ -x "$sign_update" ]] || { echo 'Sparkle sign_update is missing.' >&2; exit 1; }
+    python3 "$source_root/scripts/write-macos-appcast.py" \
+        --sign-update "$sign_update" --key "$signing_key" --app "$app" --dmg "$dmg" \
+        --tag "$RELEASE_TAG" --arch "$MACOS_ARCH" \
+        --output "$output/dist/Rayfish-appcast-$MACOS_ARCH.xml"
+fi

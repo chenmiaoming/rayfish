@@ -3,6 +3,10 @@ options:
   minimumXcodeGenVersion: 2.38.0
   deploymentTarget:
     macOS: "13.0"
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
 configs:
   Debug: debug
   LocalRelease: release
@@ -15,6 +19,7 @@ settings:
     CURRENT_PROJECT_VERSION: "14"
     RAYFISH_APP_PROFILE: Rayfish
     RAYFISH_TUNNEL_PROFILE: "Rayfish tunnel"
+    RAYFISH_UPDATE_FEED: ""
   configs:
     Debug:
       CODE_SIGN_STYLE: Automatic
@@ -35,6 +40,7 @@ targets:
     sources:
       - path: Rayfish/App
       - path: Rayfish/Assets.xcassets
+      - path: Rayfish/Sparkle-LICENSE.txt
       - path: Rayfish/Fonts
         type: folder
       - path: Shared
@@ -52,6 +58,8 @@ targets:
         Release:
           PROVISIONING_PROFILE_SPECIFIER: "$(RAYFISH_APP_PROFILE)"
     dependencies:
+      - package: Sparkle
+        embed: true
       - sdk: UserNotifications.framework
       - target: RayfishTunnelExtension
         embed: true

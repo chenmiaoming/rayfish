@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 import SwiftUI
 
 @main
@@ -15,18 +16,33 @@ struct RayfishApp: App {
                 Button("Open Rayfish") { appDelegate.openMainWindow() }
                     .keyboardShortcut("o", modifiers: .command)
             }
+            CommandGroup(after: .appInfo) {
+                if appDelegate.canCheckForUpdates {
+                    Button("Check for Updates…") { appDelegate.checkForUpdates() }
+                }
+            }
         }
     }
 }
 
 @MainActor
 final class RayfishAppDelegate: NSObject, NSApplicationDelegate {
+    private lazy var updaterController: SPUStandardUpdaterController? = {
+        guard let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+              feed.hasPrefix("https://") else { return nil }
+        return SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    }()
     private let controller = TunnelController()
     private var mainWindow: RayfishWindow?
     private var statusMenu: RayfishMenu?
     private var isTerminating = false
 
+    var canCheckForUpdates: Bool { updaterController != nil }
+
+    func checkForUpdates() { updaterController?.checkForUpdates(nil) }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        _ = updaterController
         controller.notifications.install()
         controller.notifications.onOpen = { [weak self] page in
             self?.controller.page = page

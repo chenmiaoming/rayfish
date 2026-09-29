@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The macOS app checks for stable updates and installs them when it quits. Use
+  "Check for Updates" in the app menu to check at any time.
+
 - macOS developers can build an optimized, locally signed app with
   `just macos-release` and install it with `just macos-release-install`.
 
