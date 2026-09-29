@@ -745,6 +745,7 @@ async fn build_daemon_inner(
         v4_bridge_token: Mutex::new(None),
     });
     daemon.management.bind_daemon(&daemon);
+    tokio::spawn(Arc::clone(&daemon.registry).republish_destructions());
 
     // File auto-accept is evaluated inline by `FileService::accept_file_offer`
     // (no worker channel), so nothing to spawn here.

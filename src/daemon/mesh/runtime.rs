@@ -231,6 +231,8 @@ impl NetworkRegistry {
             .clone()
             .context("no network secret key in config — cannot restore as coordinator")?;
         let net_public_key = net_secret_key.public();
+        self.check_destruction(name, net_public_key, Some(&net_secret_key))
+            .await?;
         let persisted_hostname = net_config.my_hostname.clone();
 
         // Restore membership from the authoritative published GroupBlob. The blob
@@ -262,6 +264,7 @@ impl NetworkRegistry {
             approved: approved_list,
             snapshot: None,
             snapshot_commit: Arc::new(AsyncMutex::new(())),
+            destroyed: false,
             converged_hash: None,
             unconfirmed_durable_hash: None,
             network_secret_key: Some(net_secret_key.clone()),
@@ -452,31 +455,24 @@ impl NetworkRegistry {
             );
         }
 
-        // Publish empty pkarr record
-        let net_secret_key = {
-            let handle = self.networks.get(name).unwrap();
-            let state = handle.state.read().unwrap();
-            state.network_secret_key.clone()
+        let key = self
+            .networks
+            .get(name)
+            .and_then(|h| h.state.read().ok()?.network_secret_key.clone());
+        let Some(key) = key else {
+            return ipc_err("only a network key holder can nuke a network".to_string());
         };
-        if let Some(key) = net_secret_key
-            && let Ok(client) =
-                dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-        {
-            let empty_hash = group_blob_hash(
-                &MemberList::new(),
-                &ApprovedList::new(),
-                &SuggestedFirewall::default(),
-                None,
-                &BTreeMap::new(),
-                &BTreeSet::new(),
-            );
-            if let Err(e) = dht::publish_network(&client, &key, &empty_hash, &[]).await {
-                tracing::warn!(error = %e, "failed to publish empty network record on nuke");
-            }
+        let result = async {
+            let packet = dht::destruction::encode(&key)?;
+            self.destroy_network(name, packet).await
         }
-
-        // Leave the network (handles cleanup, config removal, etc.)
-        self.leave_network(name).await
+        .await;
+        match result {
+            Ok(()) => IpcMessage::Ok {
+                message: format!("destroyed network '{name}'"),
+            },
+            Err(error) => ipc_err(format!("{error:#}")),
+        }
     }
 
     /// Remove a member from a closed network. Coordinator-only (any network-key

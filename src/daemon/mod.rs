@@ -465,6 +465,8 @@ pub(crate) struct NetworkState {
     /// Serializes durable snapshot-pointer updates with DHT publication for this
     /// network. Clone the Arc under the state read lock, then await it separately.
     snapshot_commit: Arc<AsyncMutex<()>>,
+    /// Terminal even if an older snapshot commit is still in flight.
+    destroyed: bool,
     /// The hash of the signed record this state is converged on, which is not
     /// always the hash of [`Self::snapshot`].
     ///
@@ -1831,6 +1833,7 @@ mod accept_handler_tests {
             approved: ApprovedList::new(),
             snapshot: None,
             snapshot_commit: Arc::new(AsyncMutex::new(())),
+            destroyed: false,
             converged_hash: None,
             unconfirmed_durable_hash: None,
             network_secret_key: None,
