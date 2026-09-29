@@ -278,6 +278,7 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// version - **bump it on any breaking change to the `PairMsg` handshake**;
 /// peers on different versions can't negotiate a connection (transport-enforced).
 const PAIR_ALPN: &[u8] = b"rayfish/pair/2";
+const PAIRED_NETWORK_ALPN: &[u8] = b"rayfish/paired-networks/1";
 
 /// Node-wide shared handles, cloned into every per-network accept handler and
 /// background task. Every field is a cheap `Clone` (an `Arc`-backed handle, a
@@ -765,6 +766,7 @@ pub struct Daemon {
     /// clones to services (FileService) and control readers (MemberAcceptState)
     /// so they call it directly instead of signalling the daemon over a channel.
     registry: Arc<NetworkRegistry>,
+    paired_network_joins: Arc<DashSet<EndpointId>>,
     shutdown_token: CancellationToken,
     protocol_router: Arc<ProtocolRouter>,
     /// Magic DNS leaf service: naming tables, resolver, and OS-DNS configurator

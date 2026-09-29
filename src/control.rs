@@ -90,6 +90,14 @@ pub enum PairMsg {
     },
 }
 
+/// Network discovery for a device already paired to its primary. This uses a
+/// separate ALPN so the original pairing wire format stays compatible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PairedNetworkMsg {
+    Request { cert: DeviceCert },
+    Response { networks: Vec<PairNetwork> },
+}
+
 /// Messages for the `ray connect` friend-request handshake (ALPN
 /// `rayfish/connect/2`). The initiator (A) dials the recipient's (B) contact
 /// key, sends `Request`, and polls until `Approved`. Approval is recipient-only:

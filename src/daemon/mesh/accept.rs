@@ -1841,6 +1841,9 @@ struct FilesProtocol(Arc<FileService>);
 struct PairProtocol(Arc<FileService>);
 
 #[derive(Clone)]
+struct PairedNetworkProtocol(Arc<FileService>);
+
+#[derive(Clone)]
 struct ConnectProtocol(Arc<ConnectService>);
 
 struct ManagementProtocol(Arc<ManagementService>);
@@ -1860,6 +1863,12 @@ impl std::fmt::Debug for FilesProtocol {
 impl std::fmt::Debug for PairProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PairProtocol")
+    }
+}
+
+impl std::fmt::Debug for PairedNetworkProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PairedNetworkProtocol")
     }
 }
 
@@ -1892,6 +1901,13 @@ impl iroh::protocol::ProtocolHandler for PairProtocol {
     }
 }
 
+impl iroh::protocol::ProtocolHandler for PairedNetworkProtocol {
+    async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
+        self.0.accept_paired_network_request(conn).await;
+        Ok(())
+    }
+}
+
 impl iroh::protocol::ProtocolHandler for ConnectProtocol {
     async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
         self.0.accept_connect_request(conn).await;
@@ -1915,7 +1931,7 @@ impl iroh::protocol::ProtocolHandler for ManagementProtocol {
 pub(crate) struct ProtocolRouter {
     blobs: Arc<BlobsProtocol>,
     /// File-transfer + pairing state and their ALPN accept arms. The accept loop
-    /// delegates the `FILES_ALPN`/`PAIR_ALPN` arms to this; `Daemon` holds
+    /// delegates the file, pairing, and paired-network arms to this; `Daemon` holds
     /// the same handle for the IPC-side file/pairing commands.
     files: Arc<FileService>,
     /// `ray connect` state (pending/approved/outgoing maps) and the `CONNECT_ALPN`
@@ -1981,6 +1997,10 @@ impl ProtocolRouter {
                 FilesProtocol(Arc::clone(&self.files)),
             )
             .accept(daemon::PAIR_ALPN, PairProtocol(Arc::clone(&self.files)))
+            .accept(
+                daemon::PAIRED_NETWORK_ALPN,
+                PairedNetworkProtocol(Arc::clone(&self.files)),
+            )
             .accept(
                 transport::CONNECT_ALPN,
                 ConnectProtocol(Arc::clone(&self.connect)),

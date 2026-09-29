@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Paired devices pick up networks added to their primary while they were offline.
+  New networks are joined when the device reconnects.
+
 - `ray apply` accepts `*-host-a,host-b` as a target, including aliases and
   groups, to skip firewall suggestions and SSH grants on those devices without
   removing them from the network. Targets expand at apply time; reapply after
