@@ -38,11 +38,17 @@ xcodebuild -quiet \
     DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
     RAYFISH_APP_PROFILE="$RAYFISH_APP_PROFILE" \
     RAYFISH_TUNNEL_PROFILE="$RAYFISH_TUNNEL_PROFILE" \
+    RAYFISH_UPDATE_FEED="https://github.com/rayfish/rayfish/releases/latest/download/Rayfish-appcast-$MACOS_ARCH.xml" \
     MARKETING_VERSION="$marketing_version" \
     CURRENT_PROJECT_VERSION="$((1000 + GITHUB_RUN_NUMBER))" \
     build 2>&1 | tee "$output/build.log"
 
 app="$output/build/Build/Products/Release/Rayfish.app"
+[[ -d "$app/Contents/Frameworks/Sparkle.framework" ]] || {
+    echo 'Sparkle framework is missing from the release app.' >&2
+    exit 1
+}
+codesign --verify --strict "$app/Contents/Frameworks/Sparkle.framework"
 for binary in "$app/Contents/MacOS/Rayfish" "$app/Contents/MacOS/ray" \
     "$app/Contents/Library/SystemExtensions/com.rayfish.app.tunnel.systemextension/Contents/MacOS/com.rayfish.app.tunnel"; do
     lipo "$binary" -verify_arch "$MACOS_ARCH"

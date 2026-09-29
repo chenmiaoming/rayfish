@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The macOS app checks for stable updates and installs them when it quits. Use
+  "Check for Updates" in the app menu to check at any time.
+
 - `ray apply` accepts per-host `ssh` grants. Applying them to controlled
   machines enables mesh SSH and permits the named peers to log in as the listed
   local accounts. Removing a grant from the spec removes that managed grant.
