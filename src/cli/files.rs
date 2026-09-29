@@ -230,29 +230,30 @@ pub(crate) async fn ipc_files(action: Option<FilesAction>) -> Result<()> {
                     outbox,
                     transfers,
                 } => {
-                    if json_enabled() {
-                        let inbound: Vec<_> = files
-                            .iter()
-                            .map(|f| {
-                                serde_json::json!({
-                                    "id": f.id, "from": f.from, "filename": f.filename,
-                                    "size": f.size, "mime_type": f.mime_type,
-                                })
+                    let inbound: Vec<_> = files
+                        .iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "id": f.id, "from": f.from, "filename": f.filename,
+                                "size": f.size, "mime_type": f.mime_type,
                             })
-                            .collect();
-                        let queued: Vec<_> = outbox
-                            .iter()
-                            .map(|f| {
-                                serde_json::json!({
-                                    "id": f.id, "to": f.peer, "filename": f.filename,
-                                    "size": f.size,
-                                })
+                        })
+                        .collect();
+                    let queued: Vec<_> = outbox
+                        .iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "id": f.id, "to": f.peer, "filename": f.filename,
+                                "size": f.size,
                             })
-                            .collect();
-                        print_json(&serde_json::json!({"pending": inbound, "queued": queued}));
-                    } else if files.is_empty() && outbox.is_empty() && transfers.is_empty() {
-                        println!("\n  {}\n", style::faint("no pending file transfers"));
-                    } else {
+                        })
+                        .collect();
+                    let data = serde_json::json!({"pending": inbound, "queued": queued});
+                    printout(&data, || {
+                        if files.is_empty() && outbox.is_empty() && transfers.is_empty() {
+                            println!("\n  {}\n", style::faint("no pending file transfers"));
+                            return;
+                        }
                         if !files.is_empty() {
                             let rows = files
                                 .iter()
@@ -354,7 +355,7 @@ pub(crate) async fn ipc_files(action: Option<FilesAction>) -> Result<()> {
                             );
                         }
                         println!();
-                    }
+                    })?;
                 }
                 ipc::IpcMessage::Error { message } => fail_with("error", &message),
                 other => fail_unexpected(&other),

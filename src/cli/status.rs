@@ -276,150 +276,150 @@ pub(crate) async fn ipc_status(show_machines: bool, with_ips: bool) -> Result<()
             ..
         } => {
             let (controllers, managed_machines) = ipc_management_overview(show_machines).await;
-            if json_enabled() {
-                let mut output = serde_json::json!({
-                    "endpoint": endpoint_id.to_string(),
-                    "mdns": mdns_enabled,
-                    "lan_peers": lan_peers
-                        .iter()
-                        .map(|p| serde_json::json!({
-                            "endpoint_id": p.endpoint_id.to_string(),
-                            "short_id": p.short_id,
-                            "addrs": p.addrs,
-                            "last_seen_secs": p.last_seen_secs,
-                        }))
-                        .collect::<Vec<_>>(),
-                    "auto_update": auto_update,
-                    "active": active,
-                    "contact_id": contact_id,
-                    "daemon_version": daemon_version,
-                    "networks": networks,
-                    "inactive_networks": inactive_networks,
-                    "controllers": controllers,
-                    "traffic": {
-                        "packets_rx": packets_rx, "packets_tx": packets_tx,
-                        "bytes_rx": bytes_rx, "bytes_tx": bytes_tx,
-                    },
-                    "pending": {
-                        "files": pending_files,
-                        "connects": pending_connects,
-                    },
-                });
-                if show_machines {
-                    output["managed_machines"] = serde_json::json!(managed_machines);
-                }
-                print_json(&output);
-                return Ok(());
+            let mut output = serde_json::json!({
+                "endpoint": endpoint_id.to_string(),
+                "mdns": mdns_enabled,
+                "lan_peers": lan_peers
+                    .iter()
+                    .map(|p| serde_json::json!({
+                        "endpoint_id": p.endpoint_id.to_string(),
+                        "short_id": p.short_id,
+                        "addrs": p.addrs,
+                        "last_seen_secs": p.last_seen_secs,
+                    }))
+                    .collect::<Vec<_>>(),
+                "auto_update": auto_update,
+                "active": active,
+                "contact_id": contact_id,
+                "daemon_version": daemon_version,
+                "networks": networks,
+                "inactive_networks": inactive_networks,
+                "controllers": controllers,
+                "traffic": {
+                    "packets_rx": packets_rx, "packets_tx": packets_tx,
+                    "bytes_rx": bytes_rx, "bytes_tx": bytes_tx,
+                },
+                "pending": {
+                    "files": pending_files,
+                    "connects": pending_connects,
+                },
+            });
+            if show_machines {
+                output["managed_machines"] = serde_json::json!(managed_machines);
             }
-            let _ = (packets_rx, packets_tx, bytes_rx, bytes_tx);
-            // Header: rayfish ● up    mDNS on    endpoint k7f2…9qx4
-            let state = if active {
-                format!("{} {}", style::dot_online(), style::value("up"))
-            } else {
-                format!("{} {}", style::dot_offline(), style::faint("standby"))
-            };
-            let mdns = if mdns_enabled {
-                format!("{} {}", style::label("mDNS"), style::green("on"))
-            } else {
-                format!("{} {}", style::label("mDNS"), style::faint("off"))
-            };
-            // Only surface auto-update in the header when it is on (opt-in), so the
-            // default line stays uncluttered.
-            let auto = if auto_update {
-                format!(
-                    "      {} {}",
-                    style::label("auto-update"),
-                    style::green("on")
-                )
-            } else {
-                String::new()
-            };
-            println!();
-            println!(
-                "  {}  {}      {}{}      {} {}",
-                style::bold("rayfish"),
-                state,
-                mdns,
-                auto,
-                style::label("endpoint"),
-                style::value(&endpoint_id.fmt_short().to_string()),
-            );
-            if !active {
-                println!("  {}", style::faint("run `ray up` to activate"));
-            }
-            if let Some(ref cid) = contact_id {
-                println!("  {} {}", style::label("contact"), style::rose(cid),);
-            }
-
-            if networks.is_empty() {
-                println!();
-                println!("  {}", style::faint("no active networks"));
-            } else {
-                for net in &networks {
-                    print_network(net, with_ips);
-                }
-            }
-
-            // Saved networks the daemon never registered. The list comes from the
-            // daemon: reading config here resolves the *calling user's* config
-            // directory, which is empty (and gets created) wherever the daemon's
-            // is root-owned, so every failed restore rendered as no mention at all.
-            for net in &inactive_networks {
-                println!();
-                print!("{}", inactive_network_block(net, with_ips));
-            }
-
-            print_nearby(&lan_peers, with_ips);
-
-            if !controllers.is_empty() {
-                println!();
-                println!("  {}", style::faint("controlled by:"));
-                for controller in &controllers {
-                    let short_id = controller.identity.fmt_short().to_string();
-                    println!(
-                        "    {}  {}",
-                        style::rose(&short_id),
-                        style::faint(&controller.identity.to_string())
-                    );
-                }
-            }
-
-            if show_machines && !managed_machines.is_empty() {
-                println!();
-                println!("  {}", style::faint("managed machines:"));
-                for machine in &managed_machines {
-                    let short_id = machine.identity.fmt_short().to_string();
-                    let state = machine.state.display_terminal();
-                    println!(
-                        "    {}  {}  {}",
-                        style::value(machine.hostname.as_ref()),
-                        style::rose(&short_id),
-                        state
-                    );
-                }
-            }
-
-            print_pending_summary(&networks, pending_files, pending_connects);
-
-            // Daemon/CLI version skew: after a self-update the CLI binary is new
-            // but the long-running daemon may still be the old one (e.g. its
-            // restart failed). Empty `daemon_version` means the daemon predates
-            // this field: say nothing rather than guess.
-            let cli_version = env!("CARGO_PKG_VERSION");
-            if !daemon_version.is_empty() && daemon_version != cli_version {
+            printout(&output, || {
+                let _ = (packets_rx, packets_tx, bytes_rx, bytes_tx);
+                // Header: rayfish ● up    mDNS on    endpoint k7f2…9qx4
+                let state = if active {
+                    format!("{} {}", style::dot_online(), style::value("up"))
+                } else {
+                    format!("{} {}", style::dot_offline(), style::faint("standby"))
+                };
+                let mdns = if mdns_enabled {
+                    format!("{} {}", style::label("mDNS"), style::green("on"))
+                } else {
+                    format!("{} {}", style::label("mDNS"), style::faint("off"))
+                };
+                // Only surface auto-update in the header when it is on (opt-in), so the
+                // default line stays uncluttered.
+                let auto = if auto_update {
+                    format!(
+                        "      {} {}",
+                        style::label("auto-update"),
+                        style::green("on")
+                    )
+                } else {
+                    String::new()
+                };
                 println!();
                 println!(
-                    "  {} daemon is v{} but CLI is v{}",
-                    style::red("!"),
-                    daemon_version,
-                    cli_version,
+                    "  {}  {}      {}{}      {} {}",
+                    style::bold("rayfish"),
+                    state,
+                    mdns,
+                    auto,
+                    style::label("endpoint"),
+                    style::value(&endpoint_id.fmt_short().to_string()),
                 );
-                println!(
-                    "  {}",
-                    style::faint("run `sudo ray update` to restart the daemon onto the new binary"),
-                );
-            }
-            println!();
+                if !active {
+                    println!("  {}", style::faint("run `ray up` to activate"));
+                }
+                if let Some(ref cid) = contact_id {
+                    println!("  {} {}", style::label("contact"), style::rose(cid),);
+                }
+
+                if networks.is_empty() {
+                    println!();
+                    println!("  {}", style::faint("no active networks"));
+                } else {
+                    for net in &networks {
+                        print_network(net, with_ips);
+                    }
+                }
+
+                // Saved networks the daemon never registered. The list comes from the
+                // daemon: reading config here resolves the *calling user's* config
+                // directory, which is empty (and gets created) wherever the daemon's
+                // is root-owned, so every failed restore rendered as no mention at all.
+                for net in &inactive_networks {
+                    println!();
+                    print!("{}", inactive_network_block(net, with_ips));
+                }
+
+                print_nearby(&lan_peers, with_ips);
+
+                if !controllers.is_empty() {
+                    println!();
+                    println!("  {}", style::faint("controlled by:"));
+                    for controller in &controllers {
+                        let short_id = controller.identity.fmt_short().to_string();
+                        println!(
+                            "    {}  {}",
+                            style::rose(&short_id),
+                            style::faint(&controller.identity.to_string())
+                        );
+                    }
+                }
+
+                if show_machines && !managed_machines.is_empty() {
+                    println!();
+                    println!("  {}", style::faint("managed machines:"));
+                    for machine in &managed_machines {
+                        let short_id = machine.identity.fmt_short().to_string();
+                        let state = machine.state.display_terminal();
+                        println!(
+                            "    {}  {}  {}",
+                            style::value(machine.hostname.as_ref()),
+                            style::rose(&short_id),
+                            state
+                        );
+                    }
+                }
+
+                print_pending_summary(&networks, pending_files, pending_connects);
+
+                // Daemon/CLI version skew: after a self-update the CLI binary is new
+                // but the long-running daemon may still be the old one (e.g. its
+                // restart failed). Empty `daemon_version` means the daemon predates
+                // this field: say nothing rather than guess.
+                let cli_version = env!("CARGO_PKG_VERSION");
+                if !daemon_version.is_empty() && daemon_version != cli_version {
+                    println!();
+                    println!(
+                        "  {} daemon is v{} but CLI is v{}",
+                        style::red("!"),
+                        daemon_version,
+                        cli_version,
+                    );
+                    println!(
+                        "  {}",
+                        style::faint(
+                            "run `sudo ray update` to restart the daemon onto the new binary"
+                        ),
+                    );
+                }
+                println!();
+            })?;
         }
         ipc::IpcMessage::Error { message } => fail_with("status failed", &message),
         other => fail_unexpected(&other),

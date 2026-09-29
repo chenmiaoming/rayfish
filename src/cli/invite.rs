@@ -80,7 +80,7 @@ pub(crate) async fn ipc_invite(network: &str, action: Option<InviteAction>) -> R
             reusable_requested,
             &hostname_opt,
         ),
-        ipc::IpcMessage::InviteListResponse { invites } => print_invite_list(&invites),
+        ipc::IpcMessage::InviteListResponse { invites } => print_invite_list(&invites)?,
         ipc::IpcMessage::Ok { message } => println!("{}", message),
         ipc::IpcMessage::Error { message } => fail_with("error", &message),
         other => fail_unexpected(&other),
@@ -141,22 +141,23 @@ fn print_invite_created(
     }
 }
 
-/// Render the invite ledger as JSON (when `--json`) or an aligned table.
-fn print_invite_list(invites: &[ipc::InviteInfo]) {
-    if json_enabled() {
-        print_json(&serde_json::json!(
-            invites
-                .iter()
-                .map(|i| serde_json::json!({
-                    "id": i.id, "status": i.status, "redeemer": i.redeemer,
-                    "hostname": i.hostname, "reusable": i.reusable,
-                    "created": i.created, "expires": i.expires,
-                }))
-                .collect::<Vec<_>>()
-        ));
-    } else if invites.is_empty() {
-        println!("\n  {}\n", style::faint("no invites"));
-    } else {
+/// Render the invite ledger as JSON or an aligned table.
+fn print_invite_list(invites: &[ipc::InviteInfo]) -> Result<()> {
+    let data: Vec<_> = invites
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "id": i.id, "status": i.status, "redeemer": i.redeemer,
+                "hostname": i.hostname, "reusable": i.reusable,
+                "created": i.created, "expires": i.expires,
+            })
+        })
+        .collect();
+    printout(&data, || {
+        if invites.is_empty() {
+            println!("\n  {}\n", style::faint("no invites"));
+            return;
+        }
         let rows = invites
             .iter()
             .map(|inv| {
@@ -182,7 +183,7 @@ fn print_invite_list(invites: &[ipc::InviteInfo]) {
             table(&["id", "status", "kind", "host", "redeemer"], rows, 2)
         );
         println!();
-    }
+    })
 }
 
 pub(crate) async fn ipc_requests(network: &str) -> Result<()> {
@@ -199,7 +200,7 @@ pub(crate) async fn ipc_requests(network: &str) -> Result<()> {
             &requests,
             "no pending join requests",
             &format!("admit with: ray requests {network} accept <name>"),
-        ),
+        )?,
         ipc::IpcMessage::Error { message } => fail_with("error", &message),
         other => fail_unexpected(&other),
     }

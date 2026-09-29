@@ -55,20 +55,35 @@ fn json_enabled() -> bool {
     JSON_FLAG.load(atomic::Ordering::Relaxed)
 }
 
-/// Render pending requests in JSON or the shared connection table.
-fn print_pending_requests(requests: &[ipc::PendingRequestInfo], empty_message: &str, footer: &str) {
+/// Render structured CLI data as compact JSON or its terminal presentation.
+fn printout<T: serde::Serialize>(data: &T, human: impl FnOnce()) -> Result<()> {
     if json_enabled() {
-        print_json(&serde_json::json!(
-            requests
-                .iter()
-                .map(|r| serde_json::json!({
-                    "id": r.short_id, "hostname": r.hostname, "waiting_secs": r.waiting_secs,
-                }))
-                .collect::<Vec<_>>()
-        ));
-    } else if requests.is_empty() {
-        println!("\n  {}\n", style::faint(empty_message));
+        println!("{}", serde_json::to_value(data)?);
     } else {
+        human();
+    }
+    Ok(())
+}
+
+/// Render pending requests in JSON or the shared connection table.
+fn print_pending_requests(
+    requests: &[ipc::PendingRequestInfo],
+    empty_message: &str,
+    footer: &str,
+) -> Result<()> {
+    let data: Vec<_> = requests
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.short_id, "hostname": r.hostname, "waiting_secs": r.waiting_secs,
+            })
+        })
+        .collect();
+    printout(&data, || {
+        if requests.is_empty() {
+            println!("\n  {}\n", style::faint(empty_message));
+            return;
+        }
         let rows = requests
             .iter()
             .map(|r| {
@@ -84,7 +99,7 @@ fn print_pending_requests(requests: &[ipc::PendingRequestInfo], empty_message: &
         println!();
         print!("{}", table(&["id", "host", "waiting"], rows, 2));
         println!("\n  {}", style::faint(footer));
-    }
+    })
 }
 
 /// Whether the parsed command carried `--json`.
@@ -93,9 +108,8 @@ fn print_pending_requests(requests: &[ipc::PendingRequestInfo], empty_message: &
 /// the 44 commands accepted it and the 30-odd that render no JSON ignored it in
 /// silence (`ray version --json` printed the same plain text). It is now declared
 /// only on the commands that honour it, so the parser rejects it elsewhere. This
-/// funnels those per-command flags back into the one `JSON_FLAG` the renderers
-/// already read, keeping the change to the enum and this function rather than
-/// the seven `cli` modules that call `json_enabled`.
+/// funnels those per-command flags into the one `JSON_FLAG` read by `printout`
+/// and the interactive firewall pending command.
 fn json_requested(command: &Command) -> bool {
     match command {
         Command::Status { json, .. }
@@ -1705,20 +1719,16 @@ async fn run() -> Result<()> {
             example,
         } => ipc_apply(spec, prune, dry_run, invite_missing, example).await,
         Command::Hostname { network, name } => ipc_set_hostname(&network, &name).await,
-        Command::Identityof {
-            peer,
-            hostname,
-            json,
-        } => cmd_identityof(&peer, hostname.as_deref(), json).await,
+        Command::Identityof { peer, hostname, .. } => {
+            cmd_identityof(&peer, hostname.as_deref()).await
+        }
         Command::Alias {
-            network,
-            action,
-            json,
-        } => cmd_alias(&network, action, json).await,
+            network, action, ..
+        } => cmd_alias(&network, action).await,
         Command::Mdns { action, json: _ } => cmd_mdns(action).await,
         Command::Dns { action, json: _ } => cmd_dns(action).await,
         Command::AutoUpdate { state } => cmd_auto_update(&state).await,
-        Command::Config { action, json } => cmd_config(action, json).await,
+        Command::Config { action, .. } => cmd_config(action).await,
         #[cfg(not(all(target_os = "macos", feature = "macos-app")))]
         Command::SetOperator { user } => cmd_set_operator(&user).await,
         Command::Send { peer, files } => ipc_send_files(&files, &peer).await,
@@ -1824,7 +1834,7 @@ async fn cmd_auto_update(state: &str) -> Result<()> {
 /// `ray config get/set/unset`: view or change global daemon settings via the
 /// daemon (see the module note above on why writes are not client-side). Changes
 /// to relay/discovery/dns-upstreams all take effect on the next daemon restart.
-async fn cmd_config(action: Option<ConfigAction>, json: bool) -> Result<()> {
+async fn cmd_config(action: Option<ConfigAction>) -> Result<()> {
     match action.unwrap_or(ConfigAction::Get { key: None }) {
         ConfigAction::Get { key } => {
             // Before the connect, so a bad key reads the same whether or not the
@@ -1836,17 +1846,15 @@ async fn cmd_config(action: Option<ConfigAction>, json: bool) -> Result<()> {
             ipc::send(&mut stream, ipc::IpcMessage::ConfigGet { key }).await?;
             match ipc::recv(&mut stream).await? {
                 ipc::IpcMessage::ConfigValues { rows } => {
-                    if json {
-                        let map: serde_json::Map<String, serde_json::Value> = rows
-                            .into_iter()
-                            .map(|(k, v)| (k, serde_json::Value::String(v)))
-                            .collect();
-                        print_json(&serde_json::Value::Object(map));
-                    } else {
+                    let map: serde_json::Map<String, serde_json::Value> = rows
+                        .iter()
+                        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                        .collect();
+                    printout(&map, || {
                         for (k, v) in rows {
                             println!("{k} = {v}");
                         }
-                    }
+                    })?;
                 }
                 ipc::IpcMessage::Error { message } => fail_with("error", &message),
                 other => fail_unexpected(&other),
