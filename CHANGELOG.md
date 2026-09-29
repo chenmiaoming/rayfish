@@ -55,6 +55,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `ray status` hides IP addresses in text output unless `--with-ips` (or `--ips`)
+  is given. JSON output keeps its address fields.
+
 - Mesh SSH no longer prints an authorization banner on successful connections.
 
 - `ray status` shows managed machines only with `--machines`.

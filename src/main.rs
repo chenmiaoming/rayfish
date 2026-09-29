@@ -230,6 +230,9 @@ pub(crate) enum Command {
         /// Include managed machines in the status output
         #[arg(long)]
         machines: bool,
+        /// Include IP addresses in the text output
+        #[arg(long, visible_alias = "ips")]
+        with_ips: bool,
     },
     /// Collect diagnostics and open a pre-filled GitHub issue
     ///
@@ -1608,7 +1611,9 @@ async fn run() -> Result<()> {
         Command::Nuke { name, force } => ipc_nuke(&name, force).await,
         Command::Kick { network, peer, yes } => ipc_kick(&network, &peer, yes).await,
         Command::Ephemeral { network, arg } => ipc_ephemeral(&network, &arg).await,
-        Command::Status { machines, .. } => ipc_status(machines).await,
+        Command::Status {
+            machines, with_ips, ..
+        } => ipc_status(machines, with_ips).await,
         Command::Report => ipc_report().await,
         Command::Logs { since, follow } => ipc_logs(since, follow).await,
         Command::Daemon => {
@@ -1964,6 +1969,29 @@ mod tests {
     use rayfish::update::{
         nightly_asset_name, normalize_version, release_asset_name, version_is_newer,
     };
+
+    #[test]
+    fn status_ip_flags_are_opt_in_and_accept_both_spellings() {
+        let cli = Cli::try_parse_from(["ray", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Status {
+                with_ips: false,
+                ..
+            }
+        ));
+        for flag in ["--with-ips", "--ips"] {
+            let cli = Cli::try_parse_from(["ray", "status", flag, "--machines", "--json"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Status {
+                    with_ips: true,
+                    machines: true,
+                    json: true,
+                }
+            ));
+        }
+    }
 
     #[test]
     fn pair_backup_accepts_the_1password_flag_spellings() {
