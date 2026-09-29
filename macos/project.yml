@@ -3,6 +3,10 @@ options:
   minimumXcodeGenVersion: 2.38.0
   deploymentTarget:
     macOS: "13.0"
+configs:
+  Debug: debug
+  LocalRelease: release
+  Release: release
 settings:
   base:
     DEVELOPMENT_TEAM: ""
@@ -13,6 +17,9 @@ settings:
     RAYFISH_TUNNEL_PROFILE: "Rayfish tunnel"
   configs:
     Debug:
+      CODE_SIGN_STYLE: Automatic
+      CODE_SIGN_IDENTITY: "Apple Development"
+    LocalRelease:
       CODE_SIGN_STYLE: Automatic
       CODE_SIGN_IDENTITY: "Apple Development"
     Release:
@@ -39,6 +46,8 @@ targets:
         INFOPLIST_FILE: Rayfish/Info.plist
       configs:
         Debug:
+          CODE_SIGN_ENTITLEMENTS: Rayfish/RayfishDevelopment.entitlements
+        LocalRelease:
           CODE_SIGN_ENTITLEMENTS: Rayfish/RayfishDevelopment.entitlements
         Release:
           PROVISIONING_PROFILE_SPECIFIER: "$(RAYFISH_APP_PROFILE)"
@@ -89,6 +98,8 @@ targets:
           - "-fmodule-map-file=$(SRCROOT)/Generated/ray_appleFFI.modulemap"
       configs:
         Debug:
+          CODE_SIGN_ENTITLEMENTS: RayfishTunnelExtension/RayfishTunnelDevelopment.entitlements
+        LocalRelease:
           CODE_SIGN_ENTITLEMENTS: RayfishTunnelExtension/RayfishTunnelDevelopment.entitlements
         Release:
           PROVISIONING_PROFILE_SPECIFIER: "$(RAYFISH_TUNNEL_PROFILE)"

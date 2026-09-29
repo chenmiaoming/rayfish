@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- macOS developers can build an optimized, locally signed app with
+  `just macos-release` and install it with `just macos-release-install`.
+
 - `ray apply` accepts per-host `ssh` grants. Applying them to controlled
   machines enables mesh SSH and permits the named peers to log in as the listed
   local accounts. Removing a grant from the spec removes that managed grant.
