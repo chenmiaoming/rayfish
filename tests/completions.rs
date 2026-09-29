@@ -139,6 +139,10 @@ fn a_settings_value_completes_when_the_key_has_a_fixed_domain() {
         ["on".to_string(), "off".to_string()]
     );
     assert_eq!(
+        complete(&["config", "set", "dns", ""])[..3],
+        ["on".to_string(), "partial".to_string(), "off".to_string()]
+    );
+    assert_eq!(
         complete(&["config", "set", "firewall.default-in", ""])[..2],
         ["allow".to_string(), "deny".to_string()]
     );

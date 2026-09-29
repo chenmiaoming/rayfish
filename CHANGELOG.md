@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The macOS app checks for stable updates and installs them when it quits. Use
   "Check for Updates" in the app menu to check at any time.
 
+- macOS developers can build an optimized, locally signed app with
+  `just macos-release` and install it with `just macos-release-install`.
+
 - `ray apply` accepts per-host `ssh` grants. Applying them to controlled
   machines enables mesh SSH and permits the named peers to log in as the listed
   local accounts. Removing a grant from the spec removes that managed grant.
@@ -54,6 +57,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Explicitly forgotten machines stay forgotten until confirmed or enrolled again.
 
 ### Changed
+
+- Mesh SSH no longer prints an authorization banner on successful connections.
 
 - `ray status` shows managed machines only with `--machines`.
 

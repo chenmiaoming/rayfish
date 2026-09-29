@@ -1,5 +1,18 @@
 # macOS releases
 
+For an optimized app signed for local use, install an Apple Development signing
+identity and matching profiles for `com.rayfish.app` and
+`com.rayfish.app.tunnel`, then run `just macos-release`. An Xcode account can
+create the profiles when needed. Run `just macos-release-install` to build,
+quit Rayfish, copy the app to `/Applications`, and reopen it.
+`just macos-install` installs a build you already made. Set
+`RAYFISH_LOCAL_BUILD_NUMBER` if you need a specific bundle build number. The
+recipe uses the installed Rayfish app's signing team, or the release team if no
+app is installed. Set `RAYFISH_DEVELOPMENT_TEAM` to choose another team.
+
+This local build uses development entitlements. The `Release` configuration below
+uses Developer ID signing and notarization for distribution.
+
 macOS releases support Apple Silicon (arm64) and Intel (x86_64). Users can choose either:
 
 - The signed, notarized DMG for their architecture, with the native app and packet

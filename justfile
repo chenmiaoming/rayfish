@@ -76,6 +76,78 @@ macos-notification-test:
 macos-dev:
     env CARGO_PROFILE_RELEASE_STRIP=none xcodebuild -quiet -project macos/Rayfish.xcodeproj -scheme Rayfish -configuration Debug -destination platform=macOS,arch=arm64 ARCHS=arm64 -derivedDataPath target/macos-development -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
 
+# Build an optimized app for this Mac with automatic Apple Development signing.
+macos-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname)" != Darwin ]]; then
+        echo "just macos-release must run on macOS" >&2
+        exit 1
+    fi
+    arch=$(uname -m)
+    team=${RAYFISH_DEVELOPMENT_TEAM:-}
+    if [[ -z "$team" ]]; then
+        installed_signature=$(codesign -dv --verbose=4 /Applications/Rayfish.app 2>&1 || true)
+        if [[ "$installed_signature" =~ TeamIdentifier=([A-Z0-9]{10}) ]]; then
+            team=${BASH_REMATCH[1]}
+        else
+            team=3D9W8F63CL
+        fi
+    fi
+    if ! [[ "$team" =~ ^[A-Z0-9]{10}$ ]]; then
+        echo "No signing team found; set RAYFISH_DEVELOPMENT_TEAM" >&2
+        exit 1
+    fi
+    build_number=${RAYFISH_LOCAL_BUILD_NUMBER:-}
+    if [[ -z "$build_number" ]]; then
+        installed_build=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' /Applications/Rayfish.app/Contents/Info.plist 2>/dev/null || true)
+        if [[ "$installed_build" =~ ^[0-9]+$ ]]; then
+            build_number=$((installed_build + 1))
+        else
+            build_number=15
+        fi
+    fi
+    if ! [[ "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+        echo "RAYFISH_LOCAL_BUILD_NUMBER must be a positive integer" >&2
+        exit 1
+    fi
+    env CARGO_PROFILE_RELEASE_STRIP=none xcodebuild -quiet -project macos/Rayfish.xcodeproj -scheme Rayfish -configuration LocalRelease -destination "platform=macOS,arch=$arch" ARCHS="$arch" ONLY_ACTIVE_ARCH=YES DEVELOPMENT_TEAM="$team" CURRENT_PROJECT_VERSION="$build_number" -derivedDataPath target/macos-local-release -allowProvisioningUpdates -allowProvisioningDeviceRegistration build
+    app=target/macos-local-release/Build/Products/LocalRelease/Rayfish.app
+    codesign --verify --strict "$app"
+    codesign --verify --strict "$app/Contents/Library/SystemExtensions/com.rayfish.app.tunnel.systemextension"
+    echo "Built $app (build $build_number)"
+
+# Build, install, and open the local Release app.
+macos-release-install:
+    just macos-release
+    just macos-install
+
+# Install an already-built local Release app.
+macos-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if pgrep -x Rayfish >/dev/null; then
+        osascript -e 'tell application id "com.rayfish.app" to quit'
+        for attempt in {1..20}; do
+            if ! pgrep -x Rayfish >/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        if pgrep -x Rayfish >/dev/null; then
+            echo "Rayfish did not quit; close it before installing" >&2
+            exit 1
+        fi
+    fi
+    app=target/macos-local-release/Build/Products/LocalRelease/Rayfish.app
+    codesign --verify --strict "$app"
+    if [[ -w /Applications ]]; then
+        ditto "$app" /Applications/Rayfish.app
+    else
+        sudo ditto "$app" /Applications/Rayfish.app
+    fi
+    open /Applications/Rayfish.app
+
 # Check the actual signed release before installing it.
 macos-validate app="target/macos/Build/Products/Release/Rayfish.app":
     xcrun swift macos/Tests/ValidateBundle.swift "{{app}}"
