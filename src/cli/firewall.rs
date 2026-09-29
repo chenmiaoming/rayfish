@@ -1360,6 +1360,7 @@ mod tests {
             is_own_device: false,
             incompatible: false,
             connection: None,
+            rtt_high: false,
             state: ipc::PeerState::Idle,
             exit_node: false,
             exit_in_use: false,

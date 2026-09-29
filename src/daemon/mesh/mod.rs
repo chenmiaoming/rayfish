@@ -15,7 +15,7 @@ mod alias;
 mod bootstrap;
 mod coordinator;
 mod create_join;
-mod diagnostics;
+pub(super) mod diagnostics;
 mod exit_node;
 mod files;
 mod firewall;

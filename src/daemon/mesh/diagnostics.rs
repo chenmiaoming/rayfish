@@ -1,6 +1,7 @@
-//! Read-only diagnostics for `Daemon`: `status`, `build_report`, `ping`,
+//! Diagnostics for `Daemon`: `status`, `build_report`, `ping`,
 //! `netcheck`, and connection-info helpers. Split out of `daemon/mod.rs`.
 
+use std::collections::VecDeque;
 use std::io::SeekFrom;
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +25,81 @@ type ServedFramed<S> = Framed<S, MsgpackCodec<IpcMessage>>;
 /// briefly unreachable doesn't stay flagged offline forever without a re-probe.
 const STATUS_OFFLINE_WINDOW: Duration = Duration::from_secs(300);
 
+const RTT_WINDOW: usize = 32;
+const RTT_MIN_SAMPLES: usize = 8;
+
+#[derive(Clone, Default)]
+pub(crate) struct RttHistory(HashMap<EndpointId, VecDeque<f64>>);
+
+impl RttHistory {
+    fn observe(&mut self, peer: EndpointId, current: f64) -> bool {
+        if !current.is_finite() || current < 0.0 {
+            return false;
+        }
+        let samples = self.0.entry(peer).or_default();
+        let high = if samples.len() >= RTT_MIN_SAMPLES {
+            let mut sorted: Vec<f64> = samples.iter().copied().collect();
+            sorted.sort_by(f64::total_cmp);
+            let mid = sorted.len() / 2;
+            let median = if sorted.len().is_multiple_of(2) {
+                (sorted[mid - 1] + sorted[mid]) / 2.0
+            } else {
+                sorted[mid]
+            };
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance =
+                samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+            current > median + variance.sqrt()
+        } else {
+            false
+        };
+        if samples.len() == RTT_WINDOW {
+            samples.pop_front();
+        }
+        samples.push_back(current);
+        high
+    }
+}
+
+#[cfg(test)]
+mod rtt_history_tests {
+    use super::*;
+
+    #[test]
+    fn compares_against_preceding_peer_samples() {
+        let peer = SecretKey::generate().public();
+        let other = SecretKey::generate().public();
+        let mut history = RttHistory::default();
+        for i in 0..RTT_MIN_SAMPLES {
+            assert!(!history.observe(peer, if i % 2 == 0 { 165.0 } else { 185.0 }));
+            assert!(!history.observe(other, 300.0));
+        }
+        let mut above = history.clone();
+        assert!(!history.observe(peer, 185.0));
+        assert!(above.observe(peer, 186.0));
+        assert!(!history.observe(other, 300.0));
+    }
+
+    #[test]
+    fn ignores_invalid_samples_and_adapts_with_bounded_history() {
+        let peer = SecretKey::generate().public();
+        let mut history = RttHistory::default();
+        assert!(!history.observe(peer, f64::NAN));
+        assert!(!history.observe(peer, f64::INFINITY));
+        assert!(!history.observe(peer, -1.0));
+        assert!(!history.0.contains_key(&peer));
+        for _ in 0..RTT_WINDOW {
+            assert!(!history.observe(peer, 175.0));
+        }
+        assert!(history.observe(peer, 225.0));
+        for _ in 0..RTT_WINDOW {
+            history.observe(peer, 225.0);
+        }
+        assert_eq!(history.0[&peer].len(), RTT_WINDOW);
+        assert!(!history.observe(peer, 225.0));
+    }
+}
+
 impl Daemon {
     /// Part of the embedding API (used by `ray-mobile` and future embedders):
     /// snapshot the daemon's status (identity, networks, peers).
@@ -43,12 +119,24 @@ impl Daemon {
                     .collect()
             })
             .unwrap_or_default();
-        let statuses: Vec<NetworkStatus> = self
+        let mut statuses: Vec<NetworkStatus> = self
             .registry
             .networks
             .iter()
             .map(|h| self.network_status(&h, my_id, hostname_snapshot.as_deref(), &direct_names))
             .collect();
+        if let Ok(mut history) = self.rtt_history.lock() {
+            // A peer can belong to several networks. One status request still
+            // contributes only one sample for that peer.
+            let mut observed = HashMap::new();
+            for peer in statuses.iter_mut().flat_map(|network| &mut network.peers) {
+                if let Some(ms) = peer.connection.as_ref().and_then(|conn| conn.rtt_ms) {
+                    peer.rtt_high = *observed
+                        .entry(peer.endpoint_id)
+                        .or_insert_with(|| history.observe(peer.endpoint_id, ms));
+                }
+            }
+        }
         // Persisted pending-join markers, minus any network that has since
         // become active (admitted while we were retrying in the background).
         let pending_networks: Vec<String> = saved
@@ -242,6 +330,7 @@ impl Daemon {
                         PeerState::Idle
                     },
                     connection,
+                    rtt_high: false,
                     exit_node: m.exit_node,
                     exit_in_use: is_my_exit(m),
                     is_coordinator: m.is_coordinator,
@@ -1035,6 +1124,7 @@ pub(crate) fn saved_network_status(
             is_own_device: false,
             incompatible: false,
             connection: None,
+            rtt_high: false,
             // Not `Idle`: idle means "no link, but nothing says it failed", which
             // is the optimistic default for a *registered* network. Nothing on
             // this one is reachable at all until the restore lands.
