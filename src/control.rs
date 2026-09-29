@@ -78,7 +78,6 @@ pub struct PairNetwork {
 
 /// Messages for device pairing and paired-device network discovery (ALPN
 /// `rayfish/pair/2`). The original variants keep their wire representation.
-/// Add future commands through `Extension` so peers can skip optional tags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PairMsg {
     Request {
@@ -90,41 +89,12 @@ pub enum PairMsg {
         #[serde(default)]
         networks: Vec<PairNetwork>,
     },
-    /// A tagged msgpack payload. Unknown optional tags can be skipped on the
-    /// same stream; unknown required tags end the exchange.
-    Extension {
-        kind: u16,
-        required: bool,
-        payload: Vec<u8>,
+    NetworkListRequest {
+        cert: DeviceCert,
     },
-}
-
-pub const PAIR_NETWORK_LIST_REQUEST: u16 = 1;
-pub const PAIR_NETWORK_LIST_RESPONSE: u16 = 2;
-
-fn pair_extension_supported(kind: u16, required: bool) -> Result<bool> {
-    if matches!(kind, PAIR_NETWORK_LIST_REQUEST | PAIR_NETWORK_LIST_RESPONSE) {
-        Ok(true)
-    } else if required {
-        anyhow::bail!("unsupported required pairing message: {kind}")
-    } else {
-        Ok(false)
-    }
-}
-
-/// Read the next understood pairing message, skipping optional extension tags.
-/// The bound prevents a peer from keeping one handler busy with endless skips.
-pub async fn recv_pair_msg(stream: &mut RecvStream) -> Result<PairMsg> {
-    for _ in 0..16 {
-        let msg: PairMsg = recv_framed(stream).await?;
-        if let PairMsg::Extension { kind, required, .. } = &msg
-            && !pair_extension_supported(*kind, *required)?
-        {
-            continue;
-        }
-        return Ok(msg);
-    }
-    anyhow::bail!("too many unsupported optional pairing messages")
+    NetworkListResponse {
+        networks: Vec<PairNetwork>,
+    },
 }
 
 /// Messages for the `ray connect` friend-request handshake (ALPN
@@ -1089,13 +1059,6 @@ mod tests {
             PairMsg::Response { networks, .. } => assert!(networks.is_empty()),
             _ => panic!("expected Response"),
         }
-    }
-
-    #[test]
-    fn unknown_pair_extensions_are_skippable_only_when_optional() {
-        assert!(pair_extension_supported(PAIR_NETWORK_LIST_REQUEST, false).unwrap());
-        assert!(!pair_extension_supported(99, false).unwrap());
-        assert!(pair_extension_supported(99, true).is_err());
     }
 
     /// An `ExitNodeOffer` that stops before `exit_families` reads as *no claim*

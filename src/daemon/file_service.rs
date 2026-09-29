@@ -1095,8 +1095,8 @@ impl FileService {
         match conn.accept_bi().await {
             Ok((mut send, mut recv)) => {
                 // Read one length-prefixed pairing protocol message.
-                let request: control::PairMsg = match control::recv_pair_msg(&mut recv).await {
-                    Ok(r) => r,
+                let request: control::PairMsg = match control::recv_framed(&mut recv).await {
+                    Ok(request) => request,
                     Err(e) => {
                         tracing::warn!(error = %e, peer = %remote_id.fmt_short(), "failed to read pair request");
                         return;
@@ -1204,15 +1204,7 @@ impl FileService {
                             }
                         }
                     }
-                    control::PairMsg::Extension {
-                        kind: control::PAIR_NETWORK_LIST_REQUEST,
-                        payload,
-                        ..
-                    } => {
-                        let Ok(cert) = rmp_serde::from_slice::<control::DeviceCert>(&payload)
-                        else {
-                            return;
-                        };
+                    control::PairMsg::NetworkListRequest { cert } => {
                         let Ok(cfg) = config::load() else {
                             return;
                         };
@@ -1228,14 +1220,7 @@ impl FileService {
                         let Ok(networks) = saved_pair_networks() else {
                             return;
                         };
-                        let Ok(payload) = rmp_serde::to_vec(&networks) else {
-                            return;
-                        };
-                        let response = control::PairMsg::Extension {
-                            kind: control::PAIR_NETWORK_LIST_RESPONSE,
-                            required: true,
-                            payload,
-                        };
+                        let response = control::PairMsg::NetworkListResponse { networks };
                         if control::send_framed(&mut send, &response).await.is_ok() {
                             let _ = send.finish();
                             let _ =

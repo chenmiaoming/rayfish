@@ -119,8 +119,8 @@ impl Daemon {
             return ipc_err(format!("failed to send pair request: {e}"));
         }
 
-        let response: control::PairMsg = match control::recv_pair_msg(&mut recv).await {
-            Ok(r) => r,
+        let response: control::PairMsg = match control::recv_framed(&mut recv).await {
+            Ok(response) => response,
             Err(e) => {
                 return ipc_err(format!("failed to read pair response: {e}"));
             }
@@ -234,19 +234,11 @@ impl Daemon {
                 anyhow::bail!("connected to an unexpected primary");
             }
             let (mut send, mut recv) = conn.open_bi().await?;
-            let request = control::PairMsg::Extension {
-                kind: control::PAIR_NETWORK_LIST_REQUEST,
-                required: false,
-                payload: rmp_serde::to_vec(&request_cert)?,
-            };
+            let request = control::PairMsg::NetworkListRequest { cert: request_cert };
             control::send_framed(&mut send, &request).await?;
-            let response = control::recv_pair_msg(&mut recv).await?;
+            let response: control::PairMsg = control::recv_framed(&mut recv).await?;
             match response {
-                control::PairMsg::Extension {
-                    kind: control::PAIR_NETWORK_LIST_RESPONSE,
-                    payload,
-                    ..
-                } => Ok(rmp_serde::from_slice(&payload)?),
+                control::PairMsg::NetworkListResponse { networks } => Ok(networks),
                 _ => anyhow::bail!("unexpected paired network response"),
             }
         };
