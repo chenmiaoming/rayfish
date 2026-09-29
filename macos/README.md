@@ -76,6 +76,10 @@ their DMGs are attached to the existing release. Missing credentials or failed n
 fail the job; there is no unsigned fallback. Other platform release jobs remain
 independent.
 
+To attach DMGs built from newer master to an existing release of the same version,
+run **macOS app release** on master with `release_tag` set and
+`release_from_master` enabled. The appcast embeds that version's CHANGELOG notes.
+
 Notarization first covers the app, then the final DMG. Tickets are stapled to both
 so installation does not depend on fetching the ticket from Apple. Users drag
 Rayfish into Applications and approve its network extension on first connection.

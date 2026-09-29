@@ -15,6 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- macOS release builds sign Sparkle's update helpers so Apple accepts the app
+  for notarization.
+
 - `ray status` highlights a peer's RTT only when it exceeds that peer's recent
   baseline, so normal long-distance connections stay neutral.
 
