@@ -1,6 +1,6 @@
 //! CLI firewall + declarative-apply handlers and their parsers/renderers.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::*;
 use ipc::{FirewallKey, GlobalKey, NetworkKey, NodeKey};
@@ -32,7 +32,7 @@ pub(crate) async fn ipc_firewall(action: FirewallAction) -> Result<()> {
             default_outbound,
             reject,
             disabled,
-            rules,
+            mut rules,
         } => {
             if json_enabled() {
                 print_json(&serde_json::json!({
@@ -43,6 +43,11 @@ pub(crate) async fn ipc_firewall(action: FirewallAction) -> Result<()> {
                     "rules": rules,
                 }));
             } else {
+                if let Ok((self_id, networks)) = ipc_status_full().await {
+                    for rule in &mut rules {
+                        rule.peer = firewall_peer_name(rule, &self_id, &networks);
+                    }
+                }
                 print!(
                     "{}",
                     render_firewall_rules(
@@ -263,6 +268,46 @@ fn render_ssh_state(
 /// Print a JSON value as one compact line to stdout (jq-friendly).
 pub(crate) fn print_json(value: &serde_json::Value) {
     println!("{value}");
+}
+
+/// Resolve within the rule's network, including every device for a user grant.
+/// Keep the short identity if it is unknown or matches more than one identity.
+fn firewall_peer_name(
+    rule: &ipc::FirewallRuleView,
+    self_id: &EndpointId,
+    networks: &[ipc::NetworkStatus],
+) -> String {
+    let mut identities = HashSet::new();
+    let mut names = BTreeSet::new();
+    for network in networks {
+        if rule.network != "any" && rule.network != network.name {
+            continue;
+        }
+        if rule.peer == self_id.fmt_short().to_string() {
+            identities.insert(*self_id);
+            if let Some(hostname) = &network.my_hostname {
+                names.insert(hostname.as_str());
+            }
+        }
+        for peer in &network.peers {
+            for identity in [Some(peer.endpoint_id), peer.user_identity]
+                .into_iter()
+                .flatten()
+            {
+                if rule.peer == identity.fmt_short().to_string() {
+                    identities.insert(identity);
+                    if let Some(hostname) = &peer.hostname {
+                        names.insert(hostname.as_str());
+                    }
+                }
+            }
+        }
+    }
+    if identities.len() == 1 && !names.is_empty() {
+        names.into_iter().collect::<Vec<_>>().join(", ")
+    } else {
+        rule.peer.clone()
+    }
 }
 
 /// Render a firewall rule table as aligned columns. `default` is the catch-all
@@ -1292,6 +1337,53 @@ mod tests {
             my_exit_node: None,
             exit_offering: false,
             incompatible: None,
+        }
+    }
+
+    #[test]
+    fn firewall_peer_names_respect_network_scope_and_shared_users() {
+        let self_id = iroh::SecretKey::generate().public();
+        let user_id = iroh::SecretKey::generate().public();
+        let first = peer("build-box", Some(user_id));
+        let mut other = first.clone();
+        other.hostname = Some("other-name".into());
+        let mut other_network = net(None, vec![other]);
+        other_network.name = "other-network".into();
+        let networks = [
+            net(
+                Some("coordinator"),
+                vec![first.clone(), peer("gpu-box", Some(user_id))],
+            ),
+            other_network,
+        ];
+        let mut rule = ipc::FirewallRuleView {
+            direction: firewall::Direction::In,
+            action: firewall::Action::Allow,
+            protocol: firewall::Protocol::Any,
+            port: "*".into(),
+            peer: first.endpoint_id.fmt_short().to_string(),
+            network: "n".into(),
+            suggested_by: None,
+        };
+        assert_eq!(firewall_peer_name(&rule, &self_id, &networks), "build-box");
+        rule.network = "other-network".into();
+        assert_eq!(firewall_peer_name(&rule, &self_id, &networks), "other-name");
+        rule.network = "missing-network".into();
+        assert_eq!(firewall_peer_name(&rule, &self_id, &networks), rule.peer);
+        rule.network = "n".into();
+        rule.peer = user_id.fmt_short().to_string();
+        assert_eq!(
+            firewall_peer_name(&rule, &self_id, &networks),
+            "build-box, gpu-box"
+        );
+        rule.peer = self_id.fmt_short().to_string();
+        assert_eq!(
+            firewall_peer_name(&rule, &self_id, &networks),
+            "coordinator"
+        );
+        for peer in ["any", "any except build-box", "unknown-id"] {
+            rule.peer = peer.into();
+            assert_eq!(firewall_peer_name(&rule, &self_id, &networks), peer);
         }
     }
 

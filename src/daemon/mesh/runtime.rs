@@ -1261,10 +1261,10 @@ impl Daemon {
             self.start_ssh();
             // Mesh SSH listens on a NAT'd port, so a host firewall allowing
             // "22/tcp" still drops it and the failure looks like a dead network
-            // rather than a firewall rule. Surface it with the other `ray up`
-            // warnings; we only read the ruleset, never edit it.
+            // rather than a firewall rule. Permit it through UFW or ip6tables on the mesh
+            // interface and surface any remaining block with the `ray up` warnings.
             if let Some(w) =
-                crate::hostfw::check_inbound_tcp(&dns_tun_name, crate::ssh::SSH_LISTEN_PORT)
+                crate::hostfw::ensure_inbound_tcp(&dns_tun_name, crate::ssh::SSH_LISTEN_PORT)
                     .warning(crate::ssh::SSH_LISTEN_PORT)
             {
                 tracing::warn!("{w}");

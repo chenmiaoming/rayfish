@@ -463,6 +463,7 @@ pub(crate) enum Command {
         json: bool,
     },
     /// Manage local device firewall rules
+    #[command(visible_alias = "fw")]
     Firewall {
         #[command(subcommand)]
         action: FirewallAction,

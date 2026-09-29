@@ -8,16 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray fw` is an alias for `ray firewall`.
+
 - The macOS app checks for stable updates and installs them when it quits. Use
   "Check for Updates" in the app menu to check at any time.
 
 ### Changed
+
+- `ray firewall show` displays peer hostnames when known, falling back to short
+  identities for unresolved peers. JSON output keeps identities.
 
 - `ray identityof <peer>` searches all networks. If the name has different
   identities, it lists the network, name, and full identity in a table.
   The existing `ray identityof <network> <host>` form still works.
 
 ### Fixed
+
+- Enabling mesh SSH automatically allows its internal TCP listener on the mesh
+  interface when blocked, using active UFW or falling back to ip6tables when no
+  firewall manager is active. Startup also checks the rule.
 
 - Android release and nightly APKs use a permanent signing key so future updates
   preserve app data. Existing debug installs need a one-time backup and restore

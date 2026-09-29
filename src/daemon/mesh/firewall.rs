@@ -501,13 +501,13 @@ impl Daemon {
         };
         // A host firewall that allows "22/tcp" does not allow the port mesh SSH
         // actually listens on, and the resulting failure looks like a network
-        // problem rather than a firewall one. Say so here, where the operator is
-        // already thinking about SSH access. The check only reads the ruleset.
+        // problem rather than a firewall one. Permit it on the mesh interface
+        // through UFW or ip6tables, or report the remaining host firewall block.
         // Desktop-only: the embedded SSH server (and the port NAT it needs) is
         // not part of the Android library, so there is nothing to warn about.
         #[cfg(feature = "desktop")]
         if enabled
-            && let Some(warning) = crate::hostfw::check_inbound_tcp(
+            && let Some(warning) = crate::hostfw::ensure_inbound_tcp(
                 self.tun_name.load().as_str(),
                 crate::forward::SSH_LISTEN_PORT,
             )
