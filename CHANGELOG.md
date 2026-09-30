@@ -15,6 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Peers reconnect after a dial stalls during a network outage instead of
+  remaining unreachable until Rayfish restarts.
+
 - macOS release builds sign Sparkle's update helpers so Apple accepts the app
   for notarization.
 
