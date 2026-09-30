@@ -57,7 +57,7 @@ impl NetworkRegistry {
             None => None,
         };
         let saved = config::load_network(name)?;
-        if let Some(state) = &state {
+        let live_key = if let Some(state) = &state {
             let s = state
                 .read()
                 .map_err(|_| anyhow::anyhow!("network state lock poisoned"))?;
@@ -68,6 +68,7 @@ impl NetworkRegistry {
             if s.destroyed {
                 return Ok(());
             }
+            s.network_secret_key.clone()
         } else if let Some(saved) = &saved {
             anyhow::ensure!(
                 saved
@@ -76,16 +77,9 @@ impl NetworkRegistry {
                     == Some(network),
                 "destruction is for a different network"
             );
+            None
         } else {
             return Ok(());
-        }
-        let live_key = match &state {
-            Some(state) => state
-                .read()
-                .map_err(|_| anyhow::anyhow!("network state lock poisoned"))?
-                .network_secret_key
-                .clone(),
-            None => None,
         };
         let key = live_key.or_else(|| saved.as_ref().and_then(|s| s.network_secret_key.clone()));
         config::destruction::save(&packet, key.as_ref())?;
@@ -100,28 +94,26 @@ impl NetworkRegistry {
 
         // Notify every connected peer before closing any links. Wait for stream
         // delivery; enqueueing a FIN alone does not survive connection teardown.
-        let mut targets: Vec<_> = if key.is_some() {
-            self.peers
-                .peers_for_network_with_conn(name)
-                .into_iter()
-                .map(|(id, _, conn)| (id, Some(conn)))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if key.is_some()
-            && let Some(state) = &state
-        {
-            for member in state
-                .read()
-                .map_err(|_| anyhow::anyhow!("network state lock poisoned"))?
-                .members
-                .all()
-            {
-                if member.identity != self.transport.endpoint.id()
-                    && !targets.iter().any(|(id, _)| *id == member.identity)
+        let mut targets = Vec::new();
+        if key.is_some() {
+            targets.extend(
+                self.peers
+                    .peers_for_network_with_conn(name)
+                    .into_iter()
+                    .map(|(id, _, conn)| (id, Some(conn))),
+            );
+            if let Some(state) = &state {
+                for member in state
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("network state lock poisoned"))?
+                    .members
+                    .all()
                 {
-                    targets.push((member.identity, None));
+                    if member.identity != self.transport.endpoint.id()
+                        && !targets.iter().any(|(id, _)| *id == member.identity)
+                    {
+                        targets.push((member.identity, None));
+                    }
                 }
             }
         }
