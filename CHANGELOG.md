@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The macOS app reports version 0.5.5 instead of the stale 0.4.2 value.
+
 - Peers reconnect after a dial stalls during a network outage instead of
   remaining unreachable until Rayfish restarts.
 
