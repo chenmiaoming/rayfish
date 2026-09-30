@@ -15,7 +15,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: ""
     PRODUCT_BUNDLE_IDENTIFIER: com.rayfish.app
-    MARKETING_VERSION: "0.4.2"
+    MARKETING_VERSION: "0.5.5"
     CURRENT_PROJECT_VERSION: "14"
     RAYFISH_APP_PROFILE: Rayfish
     RAYFISH_TUNNEL_PROFILE: "Rayfish tunnel"
@@ -59,7 +59,6 @@ targets:
           PROVISIONING_PROFILE_SPECIFIER: "$(RAYFISH_APP_PROFILE)"
     dependencies:
       - package: Sparkle
-        embed: true
       - sdk: UserNotifications.framework
       - target: RayfishTunnelExtension
         embed: true

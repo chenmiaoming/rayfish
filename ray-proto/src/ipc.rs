@@ -1435,6 +1435,9 @@ pub struct InactiveNetwork {
 pub struct NetworkStatus {
     pub name: String,
     pub role: NetworkRole,
+    /// Admission mode, known only to a coordinator. Members do not receive it.
+    #[serde(default)]
+    pub mode: Option<GroupMode>,
     pub my_ipv6: Ipv6Addr,
     pub my_hostname: Option<String>,
     pub network_key: Option<String>,
@@ -1507,6 +1510,10 @@ pub struct PeerStatus {
     #[serde(default)]
     pub incompatible: bool,
     pub connection: Option<ConnectionInfo>,
+    /// Current RTT exceeds the peer's preceding rolling median plus one
+    /// standard deviation. False until enough samples establish a baseline.
+    #[serde(default)]
+    pub rtt_high: bool,
     /// Coarse liveness for the three-state display (Tailscale-style). `Active`
     /// when a live connection exists; `Offline` only after an actual reach attempt
     /// failed and no later success cleared it; `Idle` otherwise (a known roster
@@ -2570,6 +2577,7 @@ mod tests {
             networks: vec![NetworkStatus {
                 name: "gaming".to_string(),
                 role: NetworkRole::Coordinator,
+                mode: Some(GroupMode::Restricted),
                 my_ipv6: Ipv6Addr::new(0x0200, 0, 0, 0, 0, 0, 0, 5),
                 my_hostname: Some("alice".to_string()),
                 network_key: Some("abc123".to_string()),
@@ -2582,6 +2590,7 @@ mod tests {
                     is_own_device: false,
                     incompatible: false,
                     connection: None,
+                    rtt_high: false,
                     state: PeerState::Idle,
                     exit_node: false,
                     exit_in_use: false,

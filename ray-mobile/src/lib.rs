@@ -1642,6 +1642,7 @@ mod network_state_tests {
             is_own_device: false,
             incompatible: false,
             connection: None,
+            rtt_high: false,
             // The daemon projects a saved network's roster with every peer
             // offline: it is not registered, so there is no link to any of them.
             state: PeerState::Offline,
@@ -1655,6 +1656,7 @@ mod network_state_tests {
         NetworkStatus {
             name: name.to_string(),
             role: NetworkRole::Member,
+            mode: None,
             my_ipv6: Ipv6Addr::LOCALHOST,
             my_hostname: Some("phone".to_string()),
             network_key: None,

@@ -660,7 +660,14 @@ async fn build_daemon_inner(
         on_peer_connected: {
             // Deliver queued `ray send` offers the moment their peer connects.
             let files = Arc::clone(&files);
+            let registry = Arc::clone(&registry);
             Arc::new(move |peer| {
+                if registry
+                    .current_device_cert()
+                    .is_some_and(|cert| cert.user_identity == peer)
+                {
+                    registry.poll_nudge.notify_waiters();
+                }
                 let files = Arc::clone(&files);
                 tokio::spawn(async move { files.flush_outbox_for(peer).await });
             })
@@ -715,6 +722,8 @@ async fn build_daemon_inner(
     let daemon = Arc::new(Daemon {
         transport,
         registry,
+        rtt_history: Mutex::new(Default::default()),
+        paired_network_joins: Arc::new(DashSet::new()),
         stats: Arc::clone(&stats),
         start: Instant::now(),
         tun_tx,
@@ -746,6 +755,8 @@ async fn build_daemon_inner(
     });
     daemon.management.bind_daemon(&daemon);
     tokio::spawn(Arc::clone(&daemon.registry).republish_destructions());
+
+    tokio::spawn(Arc::clone(&daemon).run_paired_network_sync());
 
     // File auto-accept is evaluated inline by `FileService::accept_file_offer`
     // (no worker channel), so nothing to spawn here.

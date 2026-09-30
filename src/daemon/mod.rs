@@ -742,6 +742,8 @@ struct TunTasks {
 }
 
 pub struct Daemon {
+    /// Recent RTT samples per peer, shared by successive status requests.
+    rtt_history: Mutex<mesh::diagnostics::RttHistory>,
     /// The process-lifetime foundation (endpoint, identity, blob store, metrics,
     /// contact id), grouped so extracted services can depend on `Arc<Transport>`
     /// instead of the whole daemon. During the service-decomposition transition
@@ -767,6 +769,7 @@ pub struct Daemon {
     /// clones to services (FileService) and control readers (MemberAcceptState)
     /// so they call it directly instead of signalling the daemon over a channel.
     registry: Arc<NetworkRegistry>,
+    paired_network_joins: Arc<DashSet<EndpointId>>,
     shutdown_token: CancellationToken,
     protocol_router: Arc<ProtocolRouter>,
     /// Magic DNS leaf service: naming tables, resolver, and OS-DNS configurator
