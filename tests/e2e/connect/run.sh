@@ -53,13 +53,12 @@ on "$A" 'ray status' | strip | grep -qi "${A_CID:0:16}" && pass "contact id show
 
 # ---------------------------------------------------------------------------
 step "3. srv-a requests a direct connection to srv-b"
-# Give B's contact record time to propagate on the public pkarr DHT.
-sleep 8
+# B publishes its contact record to pkarr; retry until A's request is accepted.
 CONNECT_OUT=""
-for _ in $(seq 1 6); do
+for _ in $(seq 1 8); do
   CONNECT_OUT="$(on "$A" "ray connect $B_CID --hostname laptop" 2>&1 | strip)"
   echo "$CONNECT_OUT" | grep -qiE 'waiting for approval|connected' && break
-  sleep 8
+  sleep 5
 done
 echo "$CONNECT_OUT" | sed 's/^/   a| /'
 if echo "$CONNECT_OUT" | grep -qiE 'waiting for approval|connected'; then
@@ -116,9 +115,6 @@ step "5b. both peers are coordinators of the direct network"
 NET_A="$(status_json "$A" | jq -r '(.networks // [])[] | select((.role|ascii_downcase)=="direct") | .name' | head -1)"
 NET_B="$(status_json "$B" | jq -r '(.networks // [])[] | select((.role|ascii_downcase)=="direct") | .name' | head -1)"
 echo "   net-a=$NET_A  net-b=$NET_B"
-holds_key(){  # <ip> <net> : exit 0 if this node holds the network key
-  on "$1" "ray admin $2 list --json" 2>/dev/null | jq -e 'any(.[]; .self == true)' >/dev/null 2>&1
-}
 if [[ -n "$NET_A" ]] && retry_until 30 "holds_key '$A' '$NET_A'"; then
   pass "srv-a holds the network key (co-coordinator)"
 else
@@ -132,7 +128,7 @@ fi
 
 # ---------------------------------------------------------------------------
 step "6. reachability — ping over the TUN (both directions)"
-A_IP="$(own_ip "$SA")"; B_IP="$(own_ip "$SB")"
+A_IP="$(my_ip "$A" "$NET_A")"; B_IP="$(my_ip "$B" "$NET_B")"
 echo "   A_IP=$A_IP  B_IP=$B_IP"
 if [[ -n "$A_IP" && -n "$B_IP" && "$A_IP" != "$B_IP" ]]; then
   pass "two distinct VPN IPs (srv-a=$A_IP srv-b=$B_IP)"
@@ -146,10 +142,8 @@ fi
 # ---------------------------------------------------------------------------
 step "7. data transfer — ray send / ray files accept (both directions)"
 # `ray send` resolves the destination by hostname (or short id), not by IP.
-# Each side's peer row (● / ○) carries the *other* node's `<host>.<net>.ray`
-# name; peer_host (common.sh) takes its first label as the peer hostname.
-PEER_OF_A="$(peer_host "$SA")"   # srv-b's hostname, as seen from srv-a
-PEER_OF_B="$(peer_host "$SB")"   # srv-a's hostname, as seen from srv-b
+PEER_OF_A="$(status_json "$A" | jq -r --arg n "$NET_A" '(.networks // []) | map(select(.name == $n)) | .[0].peers[0].hostname // empty')"
+PEER_OF_B="$(status_json "$B" | jq -r --arg n "$NET_B" '(.networks // []) | map(select(.name == $n)) | .[0].peers[0].hostname // empty')"
 echo "   peer-of-a=$PEER_OF_A  peer-of-b=$PEER_OF_B"
 # send_recv comes from common.sh (SR_PREFIX=/tmp/c set above).
 [[ -n "$PEER_OF_A" ]] && send_recv "$A" "$B" "$PEER_OF_A" "ray send srv-a -> srv-b" || fail "could not resolve srv-b hostname"
@@ -163,11 +157,19 @@ step "8. firewall — removing the seeded allow-icmp rule denies inbound ICMP"
 # confirm srv-a -> srv-b ping breaks, then re-add it and confirm it recovers.
 if [[ -n "$A_IP" && -n "$B_IP" ]]; then
   on "$B" 'ray firewall remove 0' 2>&1 | strip | sed 's/^/   b| /'
-  BLOCKED="$(ping_loss "$A" "$B_IP")"
-  if [[ "${BLOCKED:-0}" == "100" ]]; then pass "removing the seeded allow-icmp rule blocks ICMP (100% loss)"; else fail "ICMP not blocked after removing seed rule (loss=${BLOCKED:-?}%)"; fi
+  if retry_until 15 "[[ \"\$(ping_loss '$A' '$B_IP')\" == '100' ]]"; then
+    pass "removing the seeded allow-icmp rule blocks ICMP (100% loss)"
+  else
+    BLOCKED="$(ping_loss "$A" "$B_IP")"
+    fail "ICMP not blocked after removing seed rule (loss=${BLOCKED:-?}%)"
+  fi
   on "$B" 'ray firewall add in allow -p icmp' 2>&1 | strip | sed 's/^/   b| /'
-  RECOVERED="$(ping_loss "$A" "$B_IP")"
-  if [[ "${RECOVERED:-100}" == "0" ]]; then pass "re-adding allow-icmp restores ICMP (0% loss)"; else fail "ICMP did not recover after re-adding allow rule (loss=${RECOVERED:-?}%)"; fi
+  if retry_until 15 "[[ \"\$(ping_loss '$A' '$B_IP')\" == '0' ]]"; then
+    pass "re-adding allow-icmp restores ICMP (0% loss)"
+  else
+    RECOVERED="$(ping_loss "$A" "$B_IP")"
+    fail "ICMP did not recover after re-adding allow rule (loss=${RECOVERED:-?}%)"
+  fi
 else
   fail "could not determine IPs for firewall test"
 fi
@@ -200,11 +202,14 @@ step "9. negative — connecting to an offline contact fails cleanly"
 # is unreachable. A fresh connect from A to B's (now stale) contact id should
 # error, not hang.
 on "$B" 'ray down' >/dev/null 2>&1 || true
-sleep 3
+if retry_until 10 "status_json '$B' | jq -e '.active == false' >/dev/null 2>&1"; then
+  pass "srv-b entered standby (inactive)"
+else
+  fail "srv-b did not enter standby after ray down"
+fi
 # Rotate B's contact id so A's lookup of the NEW id can't resolve at all
 # (deterministic "offline/unknown" rather than racing the TTL).
 NEW_B_CID="$(on "$B" 'ray contact rotate' 2>/dev/null | strip | grep -oE '[A-Za-z0-9]{20,}' | head -1)"
-sleep 3
 OFFLINE_OUT="$(on "$A" "ray connect ${NEW_B_CID:-$B_CID}" 2>&1 | strip)"
 echo "$OFFLINE_OUT" | sed 's/^/   a| /'
 if echo "$OFFLINE_OUT" | grep -qiE 'offline|unknown|could not resolve|failed'; then
