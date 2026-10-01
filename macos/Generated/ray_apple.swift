@@ -1206,16 +1206,20 @@ public struct IncomingFile {
     public var peer: String
     public var filename: String
     public var size: UInt64
+    public var transferred: UInt64
     public var state: IncomingFileState
+    public var destination: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: UInt64, peer: String, filename: String, size: UInt64, state: IncomingFileState) {
+    public init(id: UInt64, peer: String, filename: String, size: UInt64, transferred: UInt64, state: IncomingFileState, destination: String?) {
         self.id = id
         self.peer = peer
         self.filename = filename
         self.size = size
+        self.transferred = transferred
         self.state = state
+        self.destination = destination
     }
 }
 
@@ -1238,7 +1242,13 @@ extension IncomingFile: Equatable, Hashable {
         if lhs.size != rhs.size {
             return false
         }
+        if lhs.transferred != rhs.transferred {
+            return false
+        }
         if lhs.state != rhs.state {
+            return false
+        }
+        if lhs.destination != rhs.destination {
             return false
         }
         return true
@@ -1249,7 +1259,9 @@ extension IncomingFile: Equatable, Hashable {
         hasher.combine(peer)
         hasher.combine(filename)
         hasher.combine(size)
+        hasher.combine(transferred)
         hasher.combine(state)
+        hasher.combine(destination)
     }
 }
 
@@ -1266,7 +1278,9 @@ public struct FfiConverterTypeIncomingFile: FfiConverterRustBuffer {
                 peer: FfiConverterString.read(from: &buf),
                 filename: FfiConverterString.read(from: &buf),
                 size: FfiConverterUInt64.read(from: &buf),
-                state: FfiConverterTypeIncomingFileState.read(from: &buf)
+                transferred: FfiConverterUInt64.read(from: &buf),
+                state: FfiConverterTypeIncomingFileState.read(from: &buf),
+                destination: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1275,7 +1289,9 @@ public struct FfiConverterTypeIncomingFile: FfiConverterRustBuffer {
         FfiConverterString.write(value.peer, into: &buf)
         FfiConverterString.write(value.filename, into: &buf)
         FfiConverterUInt64.write(value.size, into: &buf)
+        FfiConverterUInt64.write(value.transferred, into: &buf)
         FfiConverterTypeIncomingFileState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.destination, into: &buf)
     }
 }
 
@@ -2081,6 +2097,7 @@ extension GlobalSetting: Equatable, Hashable {}
 public enum IncomingFileState {
 
     case pending
+    case transferring
     case received
 }
 
@@ -2101,7 +2118,9 @@ public struct FfiConverterTypeIncomingFileState: FfiConverterRustBuffer {
 
         case 1: return .pending
 
-        case 2: return .received
+        case 2: return .transferring
+
+        case 3: return .received
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2115,8 +2134,12 @@ public struct FfiConverterTypeIncomingFileState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
 
 
-        case .received:
+        case .transferring:
             writeInt(&buf, Int32(2))
+
+
+        case .received:
+            writeInt(&buf, Int32(3))
 
         }
     }

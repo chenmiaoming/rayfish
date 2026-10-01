@@ -106,12 +106,14 @@ struct ProviderSSHRule: Codable, Equatable, Identifiable {
 }
 
 struct ProviderFile: Codable, Equatable, Identifiable {
-    enum State: String, Codable { case pending, received }
+    enum State: String, Codable { case pending, transferring, received }
     var transferId: UInt64
     var peer: String
     var filename: String
     var size: UInt64
     var state: State
+    var transferred: UInt64 = 0
+    var destination: String? = nil
 
     var id: String { "\(state.rawValue):\(transferId)" }
 }

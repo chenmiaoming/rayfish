@@ -444,8 +444,16 @@ impl FileService {
             }
         };
 
-        self.transfers.changed();
         let blob_hash = iroh_blobs::Hash::from_bytes(*pending_file.blob_hash.as_bytes());
+        let peer_label = pending_file.from.fmt_short().to_string();
+        let transfer_id = self.transfers.register_receive(
+            peer_label,
+            pending_file.filename.clone(),
+            pending_file.size,
+        );
+        // The offer is gone from the queue, but the receive stays visible
+        // while the connection and fetch are in progress.
+        let finish_guard = transfers::FinishGuard::new(Arc::clone(&self.transfers), transfer_id);
 
         let conn = match transport::connect_to_peer_with_alpn(
             &self.transport.endpoint,
@@ -459,18 +467,6 @@ impl FileService {
                 return ipc_err(format!("cannot reach sender: {e}"));
             }
         };
-
-        let peer_label = pending_file.from.fmt_short().to_string();
-        let transfer_id = self.transfers.register_receive(
-            peer_label,
-            pending_file.filename.clone(),
-            pending_file.size,
-        );
-        // Guards against a cancelled fetch (or an early return below) leaving
-        // the entry stuck in `Transferring`: its `Drop` marks the transfer
-        // failed unless `success()` disarms it first, which only happens once
-        // the file is actually on disk.
-        let finish_guard = transfers::FinishGuard::new(Arc::clone(&self.transfers), transfer_id);
 
         // Claim the blob before fetching it. `fetch` leaves what it downloads
         // untagged, so a GC triggered by some other transfer finishing mid-fetch
@@ -563,7 +559,8 @@ impl FileService {
 
         // The file is fully on disk (chown failures are ignored, by design,
         // and never fail the transfer): only now is the transfer really done.
-        finish_guard.success();
+        let destination = std::fs::canonicalize(&dest).unwrap_or(dest.clone());
+        finish_guard.success(&destination);
 
         IpcMessage::Ok {
             message: format!("saved to {}", dest.display()),
@@ -1016,6 +1013,7 @@ impl FileService {
                     transfers::TransferState::Done => ipc::TransferFileState::Done,
                     transfers::TransferState::Failed => ipc::TransferFileState::Failed,
                 },
+                destination: t.destination,
             })
             .collect();
         IpcMessage::FileList {

@@ -282,7 +282,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             mdnsActive: status.mdnsActive,
             files: status.files.map { file in
                 ProviderFile(transferId: file.id, peer: file.peer, filename: file.filename,
-                             size: file.size, state: file.state == .pending ? .pending : .received)
+                             size: file.size, state: file.state == .pending ? .pending
+                                 : (file.state == .transferring ? .transferring : .received),
+                             transferred: file.transferred,
+                             destination: file.destination)
             },
             sshEnabled: status.sshEnabled,
             sshRules: status.sshRules.map { ProviderSSHRule(network: $0.network, peer: $0.peer, users: $0.users) }

@@ -85,6 +85,7 @@ pub struct ConnectionRequest {
 #[derive(uniffi::Enum)]
 pub enum IncomingFileState {
     Pending,
+    Transferring,
     Received,
 }
 
@@ -94,7 +95,9 @@ pub struct IncomingFile {
     pub peer: String,
     pub filename: String,
     pub size: u64,
+    pub transferred: u64,
     pub state: IncomingFileState,
+    pub destination: Option<String>,
 }
 
 #[derive(uniffi::Enum)]
@@ -746,18 +749,31 @@ fn incoming_files(response: IpcMessage) -> Result<Vec<IncomingFile>, AppleError>
             peer: file.from,
             filename: file.filename,
             size: file.size,
+            transferred: 0,
             state: IncomingFileState::Pending,
+            destination: None,
         })
         .chain(transfers.into_iter().filter_map(|file| {
-            (!file.outgoing && matches!(file.state, TransferFileState::Done)).then_some(
-                IncomingFile {
-                    id: file.id,
-                    peer: file.peer,
-                    filename: file.filename,
-                    size: file.size,
-                    state: IncomingFileState::Received,
+            (!file.outgoing
+                && matches!(
+                    file.state,
+                    TransferFileState::Transferring | TransferFileState::Done
+                ))
+            .then_some(IncomingFile {
+                id: file.id,
+                peer: file.peer,
+                filename: file.filename,
+                size: file.size,
+                transferred: file.transferred,
+                state: if matches!(file.state, TransferFileState::Done) {
+                    IncomingFileState::Received
+                } else {
+                    IncomingFileState::Transferring
                 },
-            )
+                destination: file
+                    .destination
+                    .map(|path| path.to_string_lossy().into_owned()),
+            })
         }))
         .collect())
 }
@@ -800,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn file_notifications_include_offers_and_successful_receives_only() {
+    fn file_status_includes_offers_and_active_or_successful_receives() {
         use rayfish::ipc::{PendingFileInfo, TransferFileInfo};
 
         let files = incoming_files(IpcMessage::FileList {
@@ -822,6 +838,17 @@ mod tests {
                     size: 8,
                     transferred: 8,
                     state: TransferFileState::Done,
+                    destination: Some(PathBuf::from("/path/to/work/received.txt")),
+                },
+                TransferFileInfo {
+                    id: 5,
+                    outgoing: false,
+                    peer: "sender".into(),
+                    filename: "moving.txt".into(),
+                    size: 8,
+                    transferred: 4,
+                    state: TransferFileState::Transferring,
+                    destination: None,
                 },
                 TransferFileInfo {
                     id: 3,
@@ -831,6 +858,7 @@ mod tests {
                     size: 8,
                     transferred: 8,
                     state: TransferFileState::Done,
+                    destination: None,
                 },
                 TransferFileInfo {
                     id: 4,
@@ -840,14 +868,22 @@ mod tests {
                     size: 8,
                     transferred: 0,
                     state: TransferFileState::Failed,
+                    destination: None,
                 },
             ],
         })
         .unwrap();
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
         assert!(matches!(files[0].state, IncomingFileState::Pending));
         assert_eq!(files[1].filename, "received.txt");
         assert!(matches!(files[1].state, IncomingFileState::Received));
+        assert_eq!(
+            files[1].destination.as_deref(),
+            Some("/path/to/work/received.txt")
+        );
+        assert_eq!(files[2].filename, "moving.txt");
+        assert_eq!(files[2].transferred, 4);
+        assert!(matches!(files[2].state, IncomingFileState::Transferring));
     }
 
     #[test]

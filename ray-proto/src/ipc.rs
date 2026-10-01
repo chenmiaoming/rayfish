@@ -1383,6 +1383,8 @@ pub struct TransferFileInfo {
     pub size: u64,
     pub transferred: u64,
     pub state: TransferFileState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

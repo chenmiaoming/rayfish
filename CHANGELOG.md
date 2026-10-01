@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- macOS shows auto-accepted file transfers and their progress in the Files page
+  and notifications. Clicking a completed notification reveals the file in Finder.
 - `ray apply` treats concrete hosts in the spec as the desired network
   membership, joining missing managed machines and removing machines no longer
   named. Firewall wildcards no longer preserve undeclared members.

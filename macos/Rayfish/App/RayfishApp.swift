@@ -65,6 +65,9 @@ final class RayfishAppDelegate: NSObject, NSApplicationDelegate, @preconcurrency
             self?.controller.page = page
             self?.openMainWindow()
         }
+        controller.notifications.onRevealFile = { url in
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
         controller.notifications.onRestartUpdate = { [weak self] in self?.restartToUpdate() }
         statusMenu = RayfishMenu(controller: controller,
                                  updateReady: { [weak self] in self?.updateVersion },
