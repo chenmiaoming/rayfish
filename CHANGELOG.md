@@ -29,6 +29,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   named. Firewall wildcards no longer preserve undeclared members.
 - `ray apply` retries joining an online managed machine when the coordinator's
   roster lists it but the machine does not have that network active.
+- `ray apply` kicks removed hosts from closed networks even after their managed
+  machine record is gone, and reports failed removals as errors.
 
 ## [0.5.6] - 2026-10-01
 

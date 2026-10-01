@@ -830,11 +830,52 @@ pub(crate) async fn ipc_apply(
                     }
                 }
             } else {
-                removal_failures = true;
-                eprintln!(
-                    "{}  {net_name}: host '{host}' is not controlled; cannot request leave",
-                    style::red("  !")
-                );
+                let peer = status_network.and_then(|network| {
+                    network
+                        .peers
+                        .iter()
+                        .find(|peer| peer.hostname.as_deref() == Some(host.as_ref()))
+                });
+                if let Some(peer) = peer {
+                    match ipc_request(ipc::IpcMessage::Kick {
+                        network: net_name.clone(),
+                        peer: peer.endpoint_id.to_string(),
+                        confirm: true,
+                    })
+                    .await
+                    {
+                        Ok(ipc::IpcMessage::Ok { message }) => {
+                            println!("{}  {message}", style::faint("kicked:"));
+                        }
+                        Ok(ipc::IpcMessage::Error { message }) => {
+                            removal_failures = true;
+                            eprintln!(
+                                "{}  {net_name}: failed to kick '{host}': {message}",
+                                style::red("  !")
+                            );
+                        }
+                        Ok(other) => {
+                            removal_failures = true;
+                            eprintln!(
+                                "{}  {net_name}: unexpected kick response for '{host}': {other:?}",
+                                style::red("  !")
+                            );
+                        }
+                        Err(error) => {
+                            removal_failures = true;
+                            eprintln!(
+                                "{}  {net_name}: failed to kick '{host}': {error}",
+                                style::red("  !")
+                            );
+                        }
+                    }
+                } else {
+                    removal_failures = true;
+                    eprintln!(
+                        "{}  {net_name}: host '{host}' is not in the roster and is not controlled",
+                        style::red("  !")
+                    );
+                }
             }
         }
 
@@ -937,6 +978,7 @@ pub(crate) async fn ipc_apply(
             );
         }
     }
+    anyhow::ensure!(!removal_failures, "some members could not be removed");
     anyhow::ensure!(!ssh_failures, "some SSH grants could not be applied");
     Ok(())
 }
