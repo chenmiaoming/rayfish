@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `ray apply` treats concrete hosts in the spec as the desired network
+  membership, joining missing managed machines and removing machines no longer
+  named. Firewall wildcards no longer preserve undeclared members.
+- `ray apply` retries joining an online managed machine when the coordinator's
+  roster lists it but the machine does not have that network active.
+
 ## [0.5.6] - 2026-10-01
 
 ### Added

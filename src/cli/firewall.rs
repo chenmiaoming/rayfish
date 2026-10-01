@@ -624,6 +624,7 @@ pub(crate) async fn ipc_apply(
     // per-peer identities, and joined hostnames.
     let (self_id, status_networks) = ipc_status_full().await?;
     let self_id = self_id.to_string();
+    let managed_machines = ipc_managed_machines_for_apply().await?;
     let active_names: std::collections::HashSet<&str> =
         status_networks.iter().map(|n| n.name.as_str()).collect();
 
@@ -668,7 +669,16 @@ pub(crate) async fn ipc_apply(
                     .into_iter()
                     .map(|hostname| hostname.parse())
                     .collect::<std::result::Result<_, _>>()?;
-            let membership = apply::membership_diff(firewall, &current)?;
+            let status_network = status_networks
+                .iter()
+                .find(|network| network.name == *network_name);
+            let membership = membership_diff_for_apply(
+                firewall,
+                &current,
+                status_network,
+                &managed_machines,
+                network_name,
+            )?;
             for hostname in membership.joins {
                 changes += 1;
                 println!("  join   {hostname} to {network_name}");
@@ -695,8 +705,6 @@ pub(crate) async fn ipc_apply(
     let mut missing_hosts: Vec<(String, String)> = Vec::new(); // (network, hostname)
     let mut removal_failures = false;
     let mut ssh_failures = false;
-    let managed_machines = ipc_managed_machines_for_apply().await.unwrap_or_default();
-
     for (net_name, net_firewall) in &expanded.networks {
         let is_active = active_names.contains(net_name.as_str());
         // Create-if-absent (always a closed network).
@@ -744,22 +752,29 @@ pub(crate) async fn ipc_apply(
             Err(e) => eprintln!("{}   suggest failed: {e}", style::red("  !")),
         }
 
-        // Reconcile this network's desired hostnames against its live roster.
-        // Wildcards preserve the current population; concrete names can still
-        // add controlled machines alongside it.
+        // Reconcile this network's concrete hostnames against both the
+        // coordinator roster and each online managed machine's own state.
         let current: HashSet<ipc::MachineHostname> = joined_hostnames(&status_networks, net_name)
             .into_iter()
             .map(|hostname| hostname.parse())
             .collect::<std::result::Result<_, _>>()?;
-        let membership = apply::membership_diff(net_firewall, &current)?;
+        let status_network = status_networks
+            .iter()
+            .find(|network| network.name == *net_name);
+        let membership = membership_diff_for_apply(
+            net_firewall,
+            &current,
+            status_network,
+            &managed_machines,
+            net_name,
+        )?;
 
         let mut active_hosts = current.clone();
         for host in membership.joins {
-            if managed_machines
-                .iter()
-                .any(|machine| machine.hostname == host)
+            if let Some(managed_machine) =
+                managed_machine_for_hostname(status_network, &host, &managed_machines)
             {
-                let machine = ipc::ManagedMachineSelector::new(host.to_string());
+                let machine = managed_machine.identity.into();
                 let network = ipc::NetworkName::new(net_name.clone());
                 match ipc_delegated_join_request(&machine, &network, Some(host.clone()), true, true)
                     .await
@@ -783,9 +798,6 @@ pub(crate) async fn ipc_apply(
 
         for host in membership.leaves {
             active_hosts.remove(&host);
-            let status_network = status_networks
-                .iter()
-                .find(|network| network.name == *net_name);
             let is_local = status_network.and_then(|network| network.my_hostname.as_deref())
                 == Some(host.as_ref());
             if is_local {
@@ -815,9 +827,6 @@ pub(crate) async fn ipc_apply(
             }
         }
 
-        let status_network = status_networks
-            .iter()
-            .find(|network| network.name == *net_name);
         for host in active_hosts {
             // SSH apply manages remote machines, not the local controller.
             if status_network.and_then(|network| network.my_hostname.as_deref())
@@ -945,11 +954,57 @@ fn managed_machine_for_hostname<'a>(
         .find(|machine| machine.hostname == *hostname)
 }
 
+fn managed_machine_has_network(machine: &ipc::ManagedMachineInfo, network: &str) -> bool {
+    machine
+        .networks
+        .iter()
+        .any(|active| active.as_ref() == network)
+}
+
+fn membership_diff_for_apply(
+    firewall: &apply::DeployNetwork,
+    current: &HashSet<ipc::MachineHostname>,
+    status_network: Option<&ipc::NetworkStatus>,
+    managed_machines: &[ipc::ManagedMachineInfo],
+    network: &str,
+) -> Result<apply::MembershipDiff> {
+    let mut diff = apply::membership_diff(firewall, current)?;
+    let desired: HashSet<ipc::MachineHostname> = apply::expected_hosts_for_network(firewall)
+        .into_iter()
+        .map(|hostname| hostname.parse())
+        .collect::<std::result::Result<_, _>>()?;
+
+    for machine in managed_machines
+        .iter()
+        .filter(|machine| machine.state == ipc::ManagedMachineState::Online)
+    {
+        let hostname = status_network
+            .and_then(|status| {
+                status
+                    .peers
+                    .iter()
+                    .find(|peer| peer.endpoint_id == machine.identity)
+                    .and_then(|peer| peer.hostname.as_deref())
+            })
+            .unwrap_or(machine.hostname.as_ref())
+            .parse::<ipc::MachineHostname>()?;
+        let active = managed_machine_has_network(machine, network);
+        if desired.contains(&hostname) && !active && !diff.joins.contains(&hostname) {
+            diff.joins.push(hostname);
+        } else if !desired.contains(&hostname) && active && !diff.leaves.contains(&hostname) {
+            diff.leaves.push(hostname);
+        }
+    }
+    diff.joins.sort();
+    diff.leaves.sort();
+    Ok(diff)
+}
+
 async fn ipc_managed_machines_for_apply() -> Result<Vec<ipc::ManagedMachineInfo>> {
     let mut stream = ipc::connect().await?;
     ipc::send(
         &mut stream,
-        ipc::IpcMessage::ManagedMachines { probe: false },
+        ipc::IpcMessage::ManagedMachines { probe: true },
     )
     .await?;
     match ipc::recv(&mut stream).await? {
@@ -1586,5 +1641,52 @@ mod tests {
         assert_eq!(machine.identity, identity);
         assert_eq!(machine.hostname.as_ref(), "build-box");
         assert!(managed_machine_for_hostname(Some(&network), &hostname, &machines[..1]).is_none());
+    }
+
+    #[test]
+    fn online_managed_machine_missing_network_is_rejoined() {
+        let identity = iroh::SecretKey::generate().public();
+        let mut roster_peer = peer("web", None);
+        roster_peer.endpoint_id = identity;
+        let network = net(Some("controller"), vec![roster_peer]);
+        let machine = ipc::ManagedMachineInfo {
+            identity,
+            hostname: "web".parse().unwrap(),
+            enrolled_at: ipc::UnixTimestampSecs::from_secs(100),
+            last_seen: None,
+            state: ipc::ManagedMachineState::Online,
+            networks: vec![ipc::NetworkName::new("other".to_string())],
+        };
+        let host: ipc::MachineHostname = "web".parse().unwrap();
+        let current = HashSet::from([host.clone()]);
+        let firewall = [("web".to_string(), apply::DeployHost::default())]
+            .into_iter()
+            .collect();
+
+        let membership =
+            membership_diff_for_apply(&firewall, &current, Some(&network), &[machine], "n")
+                .unwrap();
+
+        assert_eq!(membership.joins, vec![host]);
+    }
+
+    #[test]
+    fn online_managed_machine_outside_spec_is_removed() {
+        let machine = ipc::ManagedMachineInfo {
+            identity: iroh::SecretKey::generate().public(),
+            hostname: "web".parse().unwrap(),
+            enrolled_at: ipc::UnixTimestampSecs::from_secs(100),
+            last_seen: None,
+            state: ipc::ManagedMachineState::Online,
+            networks: vec![ipc::NetworkName::new("n".to_string())],
+        };
+        let host: ipc::MachineHostname = "web".parse().unwrap();
+        let current = HashSet::new();
+        let firewall = apply::DeployNetwork::new();
+
+        let membership =
+            membership_diff_for_apply(&firewall, &current, None, &[machine], "n").unwrap();
+
+        assert_eq!(membership.leaves, vec![host]);
     }
 }
