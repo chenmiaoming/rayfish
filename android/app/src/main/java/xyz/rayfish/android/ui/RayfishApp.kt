@@ -1,5 +1,8 @@
 package xyz.rayfish.android.ui
 
+import android.content.Intent
+import android.net.VpnService
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -7,27 +10,27 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
-import androidx.activity.compose.BackHandler
-import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.stringResource
-import android.content.Intent
-import android.net.VpnService
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import uniffi.ray_mobile.Status
 import xyz.rayfish.android.NodeHolder
 import xyz.rayfish.android.R
 import xyz.rayfish.android.RayfishVpnService
+import xyz.rayfish.android.ui.components.SectionCard
 import xyz.rayfish.android.ui.screens.*
+import xyz.rayfish.android.ui.theme.Chakra
 import xyz.rayfish.android.ui.theme.Rf
 
 enum class Tab(val labelRes: Int, val icon: ImageVector) {
@@ -47,9 +50,7 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     var detailName by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(enabled = detailName != null) { detailName = null }
-    var status by remember { mutableStateOf<Status?>(null) }
-    var starting by remember { mutableStateOf(true) }
-    var controlPlaneRunning by remember { mutableStateOf(false) }
+    var restoringTunnel by remember { mutableStateOf(true) }
 
     // Null until the check completes, and everything below is composed only once
     // it is true. That ordering is the whole point: every path out of this
@@ -70,17 +71,12 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
         return
     }
 
-    // Observe only: never start the node here. The 2s poll used to call
-    // ensureStarted(), which resurrected the node moments after the user
-    // disabled it (it showed back online on the coordinator). The toggle is the
-    // sole authority for the node's lifecycle now.
-    suspend fun readStatus() {
-        val snapshot = withContext(Dispatchers.IO) {
-            NodeHolder.get(context).status() to NodeHolder.isStarted()
-        }
-        status = snapshot.first
-        controlPlaneRunning = snapshot.second
-    }
+    // Construct the observer only after the identity gate. A first-run restore
+    // must remain in front of any operation that could create a new identity.
+    val model: RayfishViewModel = viewModel()
+    val snapshot by model.state.collectAsStateWithLifecycle()
+    val status = snapshot.status
+    val starting = restoringTunnel || !snapshot.loaded
 
     // On launch restore the tunnel only if the user left it enabled; otherwise
     // stay offline. Then poll every 2s while foregrounded; suspend in background.
@@ -121,14 +117,14 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
                     },
                 )
             }
-            readStatus()
+            model.refresh()
         } catch (t: Throwable) { snackbar.showSnackbar(context.getString(R.string.error_failed_to_start, t.message.orEmpty())) }
-        finally { starting = false }
+        finally { restoringTunnel = false }
     }
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             while (true) {
-                try { readStatus() } catch (t: Throwable) { if (t is CancellationException) throw t }
+                model.refresh()
                 delay(2000)
             }
         }
@@ -141,7 +137,7 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     }
 
     fun toast(msg: String) { scope.launch { snackbar.showSnackbar(msg) } }
-    fun refreshNow() { scope.launch { try { readStatus() } catch (t: Throwable) { if (t is CancellationException) throw t } } }
+    fun refreshNow() { model.refresh() }
 
     // Deep links: unchanged behavior, route to the joined/paired result.
     fun followLink(uri: String) {
@@ -187,21 +183,29 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
             }
         },
     ) { padding ->
-        Box(Modifier.padding(padding)) {
-            val d = status?.networks?.firstOrNull { it.name == detailName }
-            screenState.SaveableStateProvider(detailName?.let { "network:$it" } ?: "tab:${tab.name}") {
-                when {
-                    d != null -> NetworkDetailScreen(
-                        detail = d,
-                        onBack = { detailName = null }, onToast = ::toast, onChanged = ::refreshNow,
-                        onLeft = { screenState.removeState("network:${d.name}"); detailName = null; refreshNow() },
-                    )
-                    tab == Tab.HOME -> HomeScreen(status = status, starting = starting, onToast = ::toast, onOpenNetworks = { tab = Tab.NETWORKS }, controlPlaneRunning = controlPlaneRunning)
-                    tab == Tab.NETWORKS -> NetworksScreen(
-                        status = status, starting = starting, onToast = ::toast,
-                        onChanged = ::refreshNow, onOpen = { detailName = it.name },
-                    )
-                    tab == Tab.YOU -> YouScreen(status = status, onToast = ::toast, onChanged = ::refreshNow)
+        Column(Modifier.padding(padding)) {
+            if (snapshot.refreshFailed) {
+                SectionCard(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
+                    Text(stringResource(R.string.error_status_refresh), fontFamily = Chakra, color = Rf.Muted)
+                    TextButton(onClick = ::refreshNow) { Text(stringResource(R.string.action_retry)) }
+                }
+            }
+            Box(Modifier.weight(1f)) {
+                val d = status?.networks?.firstOrNull { it.name == detailName }
+                screenState.SaveableStateProvider(detailName?.let { "network:$it" } ?: "tab:${tab.name}") {
+                    when {
+                        d != null -> NetworkDetailScreen(
+                            detail = d,
+                            onBack = { detailName = null }, onToast = ::toast, onChanged = ::refreshNow,
+                            onLeft = { screenState.removeState("network:${d.name}"); detailName = null; refreshNow() },
+                        )
+                        tab == Tab.HOME -> HomeScreen(snapshot = snapshot, starting = starting, onToast = ::toast, onOpenNetworks = { tab = Tab.NETWORKS }, onRefresh = ::refreshNow)
+                        tab == Tab.NETWORKS -> NetworksScreen(
+                            status = status, starting = starting, onToast = ::toast,
+                            onChanged = ::refreshNow, onOpen = { detailName = it.name },
+                        )
+                        tab == Tab.YOU -> YouScreen(status = status, onToast = ::toast, onChanged = ::refreshNow)
+                    }
                 }
             }
         }

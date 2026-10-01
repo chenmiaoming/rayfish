@@ -10,13 +10,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
-import kotlinx.coroutines.CancellationException
-import xyz.rayfish.android.ReceiveService
-import xyz.rayfish.android.DownloadsOutcome
-import xyz.rayfish.android.TransferKey
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
@@ -24,46 +17,41 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.ray_mobile.FileOffer
 import uniffi.ray_mobile.NetworkConnState
-import uniffi.ray_mobile.PendingRequest
-import uniffi.ray_mobile.QueuedSend
 import uniffi.ray_mobile.Status
 import uniffi.ray_mobile.Transfer
 import uniffi.ray_mobile.TransferState
-import xyz.rayfish.android.FileAutoAccept
 import xyz.rayfish.android.NodeHolder
 import xyz.rayfish.android.OfferNotifier
 import xyz.rayfish.android.R
-import xyz.rayfish.android.formatSize
-import xyz.rayfish.android.TransferNotifier
+import xyz.rayfish.android.ReceiveService
 import xyz.rayfish.android.TunnelControl
+import xyz.rayfish.android.formatSize
 import xyz.rayfish.android.isActive
+import xyz.rayfish.android.ui.AppSnapshot
 import xyz.rayfish.android.ui.components.*
 import xyz.rayfish.android.ui.theme.*
 
 @Composable
-fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, onOpenNetworks: () -> Unit = {}, controlPlaneRunning: Boolean = false) {
+fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Unit, onOpenNetworks: () -> Unit = {}, onRefresh: () -> Unit = {}) {
+    val status = snapshot.status
+    val controlPlaneRunning = snapshot.controlPlaneRunning
+    val files = snapshot.files
+    val connects = snapshot.connects
+    val joins = snapshot.joins
+    val queued = snapshot.queued
+    val transfers = snapshot.transfers
+    val savingTransfers = snapshot.savingTransfers
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var vpnOn by rememberSaveable { mutableStateOf(NodeHolder.isEnabled(context)) }
     var pendingVpn by rememberSaveable { mutableStateOf<Boolean?>(null) }
-
-    // Notifications: pending file offers, connect requests, and (for networks we
-    // coordinate) join requests. Refetched on every status poll; surfaced as a
-    // dialog when something needs a decision.
-    var files by remember { mutableStateOf<List<FileOffer>>(emptyList()) }
-    var connects by remember { mutableStateOf<List<PendingRequest>>(emptyList()) }
-    var joins by remember { mutableStateOf<List<Pair<String, PendingRequest>>>(emptyList()) }
-    // Outbound sends whose peer hasn't taken the offer yet. Listed so a send to
-    // the wrong person, or one aimed at a device that never comes back, can be
-    // called off. Only these can be: a delivered offer is the recipient's.
-    var queued by remember { mutableStateOf<List<QueuedSend>>(emptyList()) }
-    var transfers by remember { mutableStateOf<List<Transfer>>(emptyList()) }
-    var savingTransfers by remember { mutableStateOf<Set<ULong>>(emptySet()) }
 
     // Reflect the real data-plane state when status arrives, without stomping an in-flight toggle.
     LaunchedEffect(status) {
@@ -134,80 +122,19 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, on
         else -> stringResource(R.string.home_connection_failed)
     }
 
-    // Pending file/connect offers don't change `status`, so poll on our own timer
-    // rather than keying off status. rememberUpdatedState keeps the coordinator
-    // network list fresh inside the long-lived loop.
-    val currentNets by rememberUpdatedState(nets)
-    suspend fun reloadNotifs() {
-        withContext(Dispatchers.IO) {
-            val node = NodeHolder.get(context)
-            // FileAutoAccept.run only starts own-device downloads on its bounded
-            // executor and returns immediately; it does not wait for them to finish.
-            // So an own-device offer is still present in listFileOffers() for the
-            // whole download, and must be filtered out below rather than assumed
-            // gone, or the user sees a manual "Save" row for a file that is already
-            // downloading and can fire a second, concurrent accept for the same id.
-            runCatching { FileAutoAccept.run(context) }
-            // With the VPN off and go-fully-offline enabled, RayfishVpnService is not
-            // running, so this 2s loop becomes the only poller while the app is open:
-            // without this, an own-device auto-accept (and any other in-flight
-            // transfer) would show no progress and no result notification at all.
-            // This is uncommon (standby is the default); the common case keeps the
-            // control plane running in the background.
-            runCatching { TransferNotifier.poll(context) }
-            // Posted even with the app open: the user may be on another tab, and
-            // an offer notification the foreground poll skipped would only appear
-            // once the background poller next ran, or never with the VPN fully off.
-            runCatching { OfferNotifier.poll(context) }
-            val autoAccepting = NodeHolder.isAutoAcceptOwnDevices(context)
-            files = runCatching { node.listFileOffers() }.getOrDefault(emptyList())
-                // Hide own-device offers while auto-accept is downloading or still
-                // retrying them, but not ones it has permanently given up on: those
-                // would otherwise be invisible with no way to save them at all.
-                .filter { !(autoAccepting && it.ownDevice) || FileAutoAccept.hasGivenUp(it.id) }
-            queued = runCatching { node.listQueuedSends() }.getOrDefault(emptyList())
-            transfers = runCatching { node.listTransfers() }.getOrDefault(emptyList())
-            // Downloads completion can change without changing the core snapshot.
-            savingTransfers = transfers.filter {
-                !it.outgoing && it.state == TransferState.DONE &&
-                    DownloadsOutcome.isPending(TransferKey(it.peer, it.filename, it.size))
-            }.map { it.id }.toSet()
-            connects = runCatching { node.listConnectRequests() }.getOrDefault(emptyList())
-            // Only registered networks can answer: an unregistered one has no
-            // handler to ask, so polling it is a round trip that always fails.
-            joins = currentNets
-                .filter { it.isCoordinator && it.state == NetworkConnState.CONNECTED }
-                .flatMap { n ->
-                    runCatching { node.listJoinRequests(n.name) }
-                        .getOrDefault(emptyList())
-                        .map { n.name to it }
-                }
-        }
-    }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(lifecycleOwner) {
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            while (true) {
-                try { reloadNotifs() }
-                catch (t: Throwable) { if (t is CancellationException) throw t }
-                kotlinx.coroutines.delay(2000)
-            }
-        }
-    }
-
     // `onFailure` is how a caller undoes what it staged before the call. A reject
     // that throws leaves the offer still pending core-side, so the notification
     // suppression taken out ahead of it has to come back off or that offer is
     // never announced again.
     fun act(onFailure: () -> Unit = {}, block: suspend () -> Unit) {
         scope.launch {
-            try { withContext(Dispatchers.IO) { block() }; reloadNotifs() }
+            try { withContext(Dispatchers.IO) { block() }; onRefresh() }
             catch (t: Throwable) { onFailure(); if (t is CancellationException) throw t; onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
         }
     }
     // The foreground service owns downloads, including their move to Downloads.
     // Observing its state keeps Save disabled across tab changes and recreation.
-    val accepting by ReceiveService.accepting.collectAsState()
+    val accepting by ReceiveService.accepting.collectAsStateWithLifecycle()
     fun acceptFile(f: FileOffer) {
         if (!ReceiveService.startAccept(context, f)) {
             onToast(context.getString(R.string.error_receive_start))
@@ -216,7 +143,6 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, on
 
     val hasRequests = connects.isNotEmpty() || joins.isNotEmpty()
     val hasFiles = files.isNotEmpty() || accepting.isNotEmpty() || queued.isNotEmpty() || transfers.isNotEmpty()
-
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -387,10 +313,10 @@ private fun FileTransferRow(filename: String, done: Boolean) {
 private fun HomePreview() {
     xyz.rayfish.android.ui.theme.RayfishTheme {
         HomeScreen(
-            status = Status(
+            snapshot = AppSnapshot(status = Status(
                 true, "7f3ac2e1", "200::7f3a",
                 peers = emptyList(), networks = emptyList(), pendingNetworks = emptyList(),
-            ),
+            )),
             starting = false, onToast = {},
         )
     }

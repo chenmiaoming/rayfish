@@ -4,16 +4,16 @@ import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import androidx.core.content.ContextCompat
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import androidx.core.content.ContextCompat
 import io.sentry.android.core.SentryLogcatAdapter as Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import uniffi.ray_mobile.FileOffer
 
 /**

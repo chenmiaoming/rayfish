@@ -267,4 +267,6 @@
     <string name="file_receiving">正在接收</string>
     <string name="file_transfer_detail">%1$s · %2$s · %3$s</string>
     <string name="file_transfer_bytes">%1$s / %2$s</string>
+    <string name="error_status_refresh">無法重新整理。顯示的是上次取得的狀態。</string>
+    <string name="action_retry">重試</string>
 </resources>

@@ -267,4 +267,6 @@
     <string name="file_receiving">受信中</string>
     <string name="file_transfer_detail">%1$s · %2$s · %3$s</string>
     <string name="file_transfer_bytes">%2$s 中 %1$s</string>
+    <string name="error_status_refresh">更新できませんでした。最後に確認した状態を表示しています。</string>
+    <string name="action_retry">再試行</string>
 </resources>

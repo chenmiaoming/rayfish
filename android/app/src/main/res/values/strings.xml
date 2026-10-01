@@ -293,4 +293,6 @@
     <string name="file_receiving">Receiving</string>
     <string name="file_transfer_detail">%1$s · %2$s · %3$s</string>
     <string name="file_transfer_bytes">%1$s of %2$s</string>
+    <string name="error_status_refresh">Could not refresh. Showing the last known status.</string>
+    <string name="action_retry">Retry</string>
 </resources>

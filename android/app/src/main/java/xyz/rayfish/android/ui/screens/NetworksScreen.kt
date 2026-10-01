@@ -158,8 +158,9 @@ private fun AddNetworkSheet(
     var code by rememberSaveable { mutableStateOf("") }
     val context = LocalContext.current
     val scan = rememberQrScanner { result -> if (result != null) onSubmitCode(result.trim()) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Rf.Sheet) {
-        Column(Modifier.padding(20.dp).padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Rf.Sheet,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(20.dp).padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionLabel(stringResource(R.string.label_join_or_pair))
             RayfishTextField(code, { code = it }, stringResource(R.string.hint_invite_or_pairing_code))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -177,7 +178,8 @@ private fun AddNetworkSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QrCodeSheet(title: String, code: String, context: android.content.Context, onDismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Rf.Sheet) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Rf.Sheet,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         // The sheet has its own window, drawn above the Scaffold that hosts the
         // snackbar, so a snackbar confirmation would be hidden behind it and the
         // copy would look like it did nothing. Confirm in the button instead.
@@ -189,7 +191,7 @@ fun QrCodeSheet(title: String, code: String, context: android.content.Context, o
                 taps = 0
             }
         }
-        Column(Modifier.fillMaxWidth().padding(20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
             SectionLabel(title)
             QrImage(code, size = 200.dp)
             Text(code, fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Muted, modifier = Modifier.fillMaxWidth())
