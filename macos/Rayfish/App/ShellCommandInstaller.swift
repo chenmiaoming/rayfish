@@ -84,7 +84,7 @@ enum ShellCommandInstaller {
             source <(\(shellQuoted(executable)) completions zsh)
             """
         case "bash":
-            completion = "source <(\(shellQuoted(executable)) completions bash)"
+            completion = "eval \"$(\(shellQuoted(executable)) completions bash)\""
         default:
             completion = ""
         }

@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Bash completion installed by the macOS app now registers in new terminals.
 - Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.
 - Incoming pings no longer keep Android's mesh transport awake or wake it after
   idle suspension.
