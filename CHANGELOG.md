@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `ray status` groups paired devices under their primary even while they are offline.
+- Installing the macOS app's shell command also enables tab completion in new terminals.
 - Android restores the active mesh notification if it is swiped away while the
   mesh service is still running.
 - macOS shows auto-accepted file transfers and their progress in the Files page

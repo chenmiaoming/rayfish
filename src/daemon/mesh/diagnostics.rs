@@ -300,7 +300,9 @@ impl Daemon {
             .map(|m| {
                 let hostname = m.hostname.clone().or_else(|| lookup_hostname(m.identity));
                 let connection = connected.get(&m.identity).map(Self::gather_conn_info);
-                let user_id = self.registry.device_user_map.resolve(&m.identity);
+                // The signed roster keeps this binding even when the peer has no
+                // connection. The connection-time device map may be empty here.
+                let user_id = m.user_identity.unwrap_or(m.identity);
                 let user_identity = (user_id != m.identity).then_some(user_id);
                 PeerStatus {
                     endpoint_id: m.identity,

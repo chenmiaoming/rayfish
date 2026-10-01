@@ -668,7 +668,7 @@ private struct SettingsView: View {
                 Text("Command line").font(RayfishTheme.heading(15))
                 Text("ray status").font(RayfishTheme.mono(13)).foregroundColor(RayfishTheme.rose)
                 HStack {
-                    Text("Make ray available in new \(ShellCommandInstaller.shellName()) terminals.")
+                    Text("Make ray and tab completion available in new \(ShellCommandInstaller.shellName()) terminals.")
                         .foregroundColor(RayfishTheme.muted)
                     Spacer()
                     Button("Install shell command") {
