@@ -26,13 +26,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Android network sheets remain scrollable with the keyboard open or in landscape.
-- Android keeps the last known status when a refresh fails and offers Retry.
-  Foreground updates now share one reader across tabs and activity recreation.
-
-- Android downloads started from Home continue when switching tabs. Navigation
-  and text inputs survive activity recreation, and Back closes network details.
-
 - Bash completion installed by the macOS app now registers in new terminals.
 - Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.
 - Incoming pings no longer keep Android's mesh transport awake or wake it after
@@ -50,6 +43,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   roster lists it but the machine does not have that network active.
 - `ray apply` kicks removed hosts from closed networks even after their managed
   machine record is gone, and reports failed removals as errors.
+
+- Android network sheets remain scrollable with the keyboard open or in landscape.
+- Android keeps the last known status when a refresh fails and offers Retry.
+  Foreground updates now share one reader across tabs and activity recreation.
+
+- Android downloads started from Home continue when switching tabs. Navigation
+  and text inputs survive activity recreation, and Back closes network details.
 
 ## [0.5.6] - 2026-10-01
 
