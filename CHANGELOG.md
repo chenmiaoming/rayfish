@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Android restores the active mesh notification if it is swiped away while the
+  mesh service is still running.
 - macOS shows auto-accepted file transfers and their progress in the Files page
   and notifications. Clicking a completed notification reveals the file in Finder.
 - `ray apply` treats concrete hosts in the spec as the desired network
