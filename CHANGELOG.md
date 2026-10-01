@@ -15,6 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Mesh SSH reuses the system OpenSSH ED25519 host key when `sshd -T` cannot
+  inspect the server configuration, instead of presenting a generated key.
+
 - The macOS app reports version 0.5.5 instead of the stale 0.4.2 value.
 
 - Peers reconnect after a dial stalls during a network outage instead of

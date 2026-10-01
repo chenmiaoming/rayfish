@@ -99,9 +99,9 @@ use crate::daemon::NetworkRegistry;
 use authz::resolve_user_policy;
 pub use authz::{SshAuthz, new_authz};
 use authz::{UserPolicy, auth_banner, resolve_user_policy_with_hostnames};
-use host_keys::{load_host_key, sftp_subsystem_command};
 #[cfg(test)]
-use host_keys::{parse_hostkey_paths, parse_sftp_subsystem};
+use host_keys::{host_key_paths, parse_hostkey_paths, parse_sftp_subsystem};
+use host_keys::{load_host_key, sftp_subsystem_command};
 use login::{LoginInfo, resolve_login};
 use permissions::{account_can, hand_over};
 use session::{Exit, SessionSpec, run_pipe_session, run_pty_session, signal_number};
@@ -1450,6 +1450,25 @@ mod tests {
     #[test]
     fn parse_hostkey_paths_empty_when_no_hostkey() {
         assert!(parse_hostkey_paths("port 22\npermitrootlogin no\n").is_empty());
+    }
+
+    #[test]
+    fn host_key_paths_fall_back_when_sshd_dump_fails() {
+        assert_eq!(
+            host_key_paths(None),
+            vec![
+                PathBuf::from("/etc/ssh/ssh_host_ed25519_key"),
+                PathBuf::from("/usr/local/etc/ssh/ssh_host_ed25519_key"),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_key_paths_use_sshd_configuration_when_available() {
+        assert_eq!(
+            host_key_paths(Some("hostkey /custom/ssh_host_ed25519_key\n")),
+            vec![PathBuf::from("/custom/ssh_host_ed25519_key")]
+        );
     }
 
     #[test]
