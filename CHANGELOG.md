@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Mesh SSH can use a different port with `ray config set ssh-port <port>`, so
+  another SSH service can use mesh port 22.
+
+### Fixed
+
+- Coordinators that leave with `ray nuke --force` publish their departure so
+  offline coordinators do not restore a stale roster. Valid destruction notices
+  are accepted even when the local roster is stale.
+
+- Android restores the active mesh notification if it is swiped away while the
+  mesh service is still running.
+- macOS shows auto-accepted file transfers and their progress in the Files page
+  and notifications. Clicking a completed notification reveals the file in Finder.
+- `ray apply` treats concrete hosts in the spec as the desired network
+  membership, joining missing managed machines and removing machines no longer
+  named. Firewall wildcards no longer preserve undeclared members.
+- `ray apply` retries joining an online managed machine when the coordinator's
+  roster lists it but the machine does not have that network active.
+
+## [0.5.6] - 2026-10-01
+
+### Added
+
 - The macOS Settings page shows the app version and lets you turn automatic
   updates on or off.
 - When a macOS update is ready, a notification offers to restart Rayfish and
@@ -15,9 +38,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Coordinators that leave with `ray nuke --force` publish their departure so
-  offline coordinators do not restore a stale roster. Valid destruction notices
-  are accepted even when the local roster is stale.
+- Mesh SSH reuses the system OpenSSH ED25519 host key when `sshd -T` cannot
+  inspect the server configuration, instead of presenting a generated key.
 
 - The macOS app reports version 0.5.5 instead of the stale 0.4.2 value.
 
@@ -2568,7 +2590,8 @@ First public release.
 - **Optional transports / export**: `--features tor` (Tor transport) and
   `--features otel` (OTLP span export).
 
-[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/rayfish/rayfish/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/rayfish/rayfish/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/rayfish/rayfish/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/rayfish/rayfish/compare/v0.5.2...v0.5.3

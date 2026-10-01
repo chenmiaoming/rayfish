@@ -35,6 +35,10 @@ use crate::{
     Action, Direction, GroupMode, NetworkKey, NodeKey, Protocol, SuggestedFirewall, TransportMode,
 };
 
+fn default_mesh_ssh_port() -> u16 {
+    22
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcMessage {
     // Requests
@@ -639,6 +643,8 @@ pub enum IpcMessage {
     /// is enabled, and each network's allow list.
     FirewallSshState {
         enabled: bool,
+        #[serde(default = "default_mesh_ssh_port")]
+        port: u16,
         /// `(network, allow-entries)` for networks with at least one rule.
         networks: Vec<(String, Vec<SshAllowView>)>,
     },
@@ -1383,6 +1389,8 @@ pub struct TransferFileInfo {
     pub size: u64,
     pub transferred: u64,
     pub state: TransferFileState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

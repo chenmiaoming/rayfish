@@ -1152,6 +1152,8 @@ impl Daemon {
         drop(guard);
         self.rebuild_ssh_authz();
         let my_v6 = derive_ipv6(&self.transport.identity.local_identity());
+        let ssh_port = config::load().map_or(crate::forward::SSH_PORT, |cfg| cfg.ssh_port);
+        crate::forward::set_ssh_nat_port(ssh_port);
         #[cfg(target_os = "macos")]
         if self.app_ssh_helper.load(Ordering::SeqCst) {
             crate::ssh::app_helper::spawn(
@@ -1168,7 +1170,7 @@ impl Daemon {
         // the derived mesh IPv6.
         let binds = vec![IpAddr::V6(my_v6)];
         server.spawn(binds, token);
-        // Turn on the userspace port NAT so mesh `:22` reaches the listener.
+        // Turn on the userspace port NAT so the configured mesh port reaches the listener.
         crate::forward::set_ssh_nat_active(true);
     }
 
@@ -1335,7 +1337,7 @@ impl Daemon {
         self.dns.configure(&dns_tun_name, &mut warnings).await;
 
         // Start the embedded mesh SSH server if enabled. It binds the mesh IPs'
-        // port 22, so it follows the data plane (mesh addresses must be up).
+        // configured port, so it follows the data plane (mesh addresses must be up).
         #[cfg(feature = "desktop")]
         if config::load().map(|c| c.ssh_enabled).unwrap_or(false) {
             self.start_ssh();

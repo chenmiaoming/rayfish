@@ -286,6 +286,10 @@ fn default_true() -> bool {
     true
 }
 
+pub(crate) const fn default_ssh_port() -> u16 {
+    22
+}
+
 /// In-memory aggregate of the on-disk config. Reads assemble this from
 /// `settings.toml` (globals) + one `networks/<name>.toml` per network; writes
 /// are targeted (`update_settings` / `save_network` / `delete_network`) so a
@@ -575,10 +579,13 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoint_hints: Vec<iroh::EndpointAddr>,
     /// Global toggle for the embedded mesh SSH server (`ray firewall ssh on`).
-    /// When on, the daemon listens on each mesh IP's port 22 and admits peers
+    /// When on, the daemon listens on each mesh IP's configured SSH port and admits peers
     /// authorized in a network's local or managed SSH allow list. Off by default.
     #[serde(default)]
     pub ssh_enabled: bool,
+    /// Port peers use to reach the embedded SSH server over the mesh.
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
     /// Global toggle for bridging this host's IPv4-only listeners onto the mesh
     /// address (`ray config set v4-bridge off`). On by default: the mesh
     /// firewall still denies inbound by default, so the only ports it changes
@@ -673,6 +680,7 @@ impl Default for AppConfig {
             dns_mode: DnsMode::On,
             endpoint_hints: Vec::new(),
             ssh_enabled: false,
+            ssh_port: default_ssh_port(),
             v4_bridge: true,
             pf_passthrough: true,
             on_demand: true,
@@ -801,8 +809,8 @@ fn ensure_not_in_network_update() -> Result<()> {
 /// per-network entries, which live in their own files).
 ///
 /// `Default` gives every field its type-default (so `mdns_enabled` is `false`);
-/// the fresh-install default that actually ships (`mdns` on) is built at the one
-/// `load_in` site with a `mdns_enabled: true` struct-update override.
+/// the fresh-install defaults are built at the `load_in` site with explicit
+/// overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Settings {
     #[serde(default = "default_true")]
@@ -829,6 +837,8 @@ struct Settings {
     endpoint_hints: Vec<iroh::EndpointAddr>,
     #[serde(default)]
     ssh_enabled: bool,
+    #[serde(default = "default_ssh_port")]
+    ssh_port: u16,
     #[serde(default = "default_true")]
     v4_bridge: bool,
     #[serde(default = "default_true")]
@@ -1351,11 +1361,11 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         let s = std::fs::read_to_string(&settings_path).context("reading settings.toml")?;
         toml::from_str(&s).context("parsing settings.toml")?
     } else {
-        // Fresh install: discovery and Magic DNS are on by default, everything
-        // else is the type-default.
+        // Fresh install: discovery and Magic DNS are on, and mesh SSH uses port 22.
         Settings {
             mdns_enabled: true,
             dns_mode: DnsMode::On,
+            ssh_port: default_ssh_port(),
             ..Default::default()
         }
     };
@@ -1395,6 +1405,7 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         dns_mode: settings.dns_mode,
         endpoint_hints: settings.endpoint_hints,
         ssh_enabled: settings.ssh_enabled,
+        ssh_port: settings.ssh_port,
         v4_bridge: settings.v4_bridge,
         pf_passthrough: settings.pf_passthrough,
         on_demand: settings.on_demand,
@@ -1469,6 +1480,7 @@ fn settings_toml(config: &AppConfig) -> Result<String> {
         dns_mode: config.dns_mode,
         endpoint_hints: config.endpoint_hints.clone(),
         ssh_enabled: config.ssh_enabled,
+        ssh_port: config.ssh_port,
         v4_bridge: config.v4_bridge,
         pf_passthrough: config.pf_passthrough,
         on_demand: config.on_demand,
@@ -2299,6 +2311,18 @@ name = "test"
         let loaded = load_in(dir).unwrap();
         assert_eq!(loaded.download_dir.as_deref(), Some("/srv/incoming"));
         assert_eq!(loaded.download_user, Some(1000));
+    }
+
+    #[test]
+    fn ssh_port_defaults_to_22_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(load_in(tmp.path()).unwrap().ssh_port, 22);
+        let cfg = AppConfig {
+            ssh_port: 2222,
+            ..Default::default()
+        };
+        save_settings_in(tmp.path(), &cfg).unwrap();
+        assert_eq!(load_in(tmp.path()).unwrap().ssh_port, 2222);
     }
 
     #[test]
