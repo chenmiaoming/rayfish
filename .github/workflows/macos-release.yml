@@ -202,5 +202,5 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           gh release view "$RELEASE_TAG"
-          gh release upload "$RELEASE_TAG" dist/*.dmg dist/*.sha256
-          gh release upload "$RELEASE_TAG" dist/*.xml
+          gh release upload "$RELEASE_TAG" dist/*.dmg dist/*.sha256 --clobber
+          gh release upload "$RELEASE_TAG" dist/*.xml --clobber
