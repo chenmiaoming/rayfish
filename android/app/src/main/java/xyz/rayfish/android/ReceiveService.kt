@@ -4,6 +4,9 @@ import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -74,6 +77,9 @@ class ReceiveService : Service() {
         // would otherwise see the count reach zero and leave the foreground
         // again, dropping this command's transfer to a background service.
         synchronized(lifecycle) {
+            // Even a duplicate is the newest command for stopSelf(startId).
+            lastStartId = startId
+            if (!activeIds.add(offerId)) return START_NOT_STICKY
             inFlight.incrementAndGet()
             lastStartId = startId
             startForegroundNotification(
@@ -112,6 +118,8 @@ class ReceiveService : Service() {
                 // call `stopSelf(1)` while 2 is the most recent, which is a no-op
                 // and leaves the service up for good.
                 synchronized(lifecycle) {
+                    activeIds.remove(offerId)
+                    acceptingOffers.value = acceptingOffers.value - offerId
                     if (inFlight.decrementAndGet() == 0) {
                         stopForegroundCompat()
                         stopSelf(lastStartId)
@@ -177,6 +185,23 @@ class ReceiveService : Service() {
 
     companion object {
         private const val TAG = "RayfishReceive"
+        private val activeIds = mutableSetOf<ULong>()
+        private val acceptingOffers = MutableStateFlow<Map<ULong, FileOffer>>(emptyMap())
+        val accepting = acceptingOffers.asStateFlow()
+
+        /** Reserve before service delivery so repeated taps cannot queue two saves. */
+        fun startAccept(context: Context, offer: FileOffer): Boolean = synchronized(lifecycle) {
+            if (offer.id in acceptingOffers.value || offer.id in activeIds) return true
+            acceptingOffers.value = acceptingOffers.value + (offer.id to offer)
+            try {
+                ContextCompat.startForegroundService(context, intent(context, ACTION_ACCEPT, offer))
+                true
+            } catch (t: Throwable) {
+                acceptingOffers.value = acceptingOffers.value - offer.id
+                Log.e(TAG, "could not start receive service", t)
+                false
+            }
+        }
 
         // Clear of the VPN (1) and SendService (2) foreground ids. Shared by every
         // start command: two concurrent accepts are one service with one

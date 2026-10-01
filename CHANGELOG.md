@@ -15,10 +15,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Android shows device names instead of IPv6 addresses, uses larger text, and
+  distinguishes VPN connectivity from file-only standby on Home.
+
 - Android keeps its file relay reachable while idle so peers can deliver file
   offers, while mesh links still close until the phone sends traffic.
 
 ### Fixed
+
+- Android downloads started from Home continue when switching tabs. Navigation
+  and text inputs survive activity recreation, and Back closes network details.
 
 - Bash completion installed by the macOS app now registers in new terminals.
 - Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.

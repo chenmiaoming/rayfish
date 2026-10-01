@@ -247,4 +247,11 @@
     <string name="notif_saved">已儲存</string>
     <string name="notif_transfer_failed">與 %s 的傳輸失敗</string>
     <string name="notif_offer_text">%1$s · %2$s</string>
+    <string name="toast_address_copied">位址已複製</string>
+    <string name="home_files_available">可傳輸檔案 · VPN 已關閉</string>
+    <string name="home_stopping">正在中斷連線…</string>
+    <string name="home_no_networks">VPN 已開啟 · 尚未新增網路</string>
+    <string name="home_connection_failed">網路連線失敗</string>
+    <string name="home_join_network">加入或建立網路</string>
+    <string name="error_receive_start">無法開始下載。請重試。</string>
 </resources>

@@ -5,6 +5,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
@@ -19,7 +22,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import uniffi.ray_mobile.NetworkDetail
 import uniffi.ray_mobile.Status
 import xyz.rayfish.android.NodeHolder
 import xyz.rayfish.android.R
@@ -40,10 +42,12 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     val snackbar = remember { SnackbarHostState() }
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var tab by remember { mutableStateOf(Tab.HOME) }
-    var detail by remember { mutableStateOf<NetworkDetail?>(null) }
+    var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
+    var detailName by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(enabled = detailName != null) { detailName = null }
     var status by remember { mutableStateOf<Status?>(null) }
     var starting by remember { mutableStateOf(true) }
+    var controlPlaneRunning by remember { mutableStateOf(false) }
 
     // Null until the check completes, and everything below is composed only once
     // it is true. That ordering is the whole point: every path out of this
@@ -69,7 +73,11 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     // disabled it (it showed back online on the coordinator). The toggle is the
     // sole authority for the node's lifecycle now.
     suspend fun readStatus() {
-        status = withContext(Dispatchers.IO) { NodeHolder.get(context).status() }
+        val snapshot = withContext(Dispatchers.IO) {
+            NodeHolder.get(context).status() to NodeHolder.isStarted()
+        }
+        status = snapshot.first
+        controlPlaneRunning = snapshot.second
     }
 
     // On launch restore the tunnel only if the user left it enabled; otherwise
@@ -118,14 +126,20 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             while (true) {
-                try { readStatus() } catch (_: Throwable) {}
+                try { readStatus() } catch (t: Throwable) { if (t is CancellationException) throw t }
                 delay(2000)
             }
         }
     }
 
+    LaunchedEffect(status?.networks, detailName) {
+        if (status != null && detailName != null && status?.networks?.none { it.name == detailName } == true) {
+            detailName = null
+        }
+    }
+
     fun toast(msg: String) { scope.launch { snackbar.showSnackbar(msg) } }
-    fun refreshNow() { scope.launch { try { readStatus() } catch (_: Throwable) {} } }
+    fun refreshNow() { scope.launch { try { readStatus() } catch (t: Throwable) { if (t is CancellationException) throw t } } }
 
     // Deep links: unchanged behavior, route to the joined/paired result.
     fun followLink(uri: String) {
@@ -151,7 +165,7 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
         containerColor = Rf.Bg,
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
-            if (detail == null) {
+            if (detailName == null) {
                 NavigationBar(containerColor = Rf.Bg) {
                     Tab.entries.forEach { t ->
                         val label = stringResource(t.labelRes)
@@ -172,17 +186,17 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
         },
     ) { padding ->
         Box(Modifier.padding(padding)) {
-            val d = detail
+            val d = status?.networks?.firstOrNull { it.name == detailName }
             when {
                 d != null -> NetworkDetailScreen(
-                    detail = status?.networks?.firstOrNull { it.name == d.name } ?: d,
-                    onBack = { detail = null }, onToast = ::toast, onChanged = ::refreshNow,
-                    onLeft = { detail = null; refreshNow() },
+                    detail = d,
+                    onBack = { detailName = null }, onToast = ::toast, onChanged = ::refreshNow,
+                    onLeft = { detailName = null; refreshNow() },
                 )
-                tab == Tab.HOME -> HomeScreen(status = status, starting = starting, onToast = ::toast)
+                tab == Tab.HOME -> HomeScreen(status = status, starting = starting, onToast = ::toast, onOpenNetworks = { tab = Tab.NETWORKS }, controlPlaneRunning = controlPlaneRunning)
                 tab == Tab.NETWORKS -> NetworksScreen(
                     status = status, starting = starting, onToast = ::toast,
-                    onChanged = ::refreshNow, onOpen = { detail = it },
+                    onChanged = ::refreshNow, onOpen = { detailName = it.name },
                 )
                 tab == Tab.YOU -> YouScreen(status = status, onToast = ::toast, onChanged = ::refreshNow)
             }

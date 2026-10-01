@@ -9,6 +9,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.CancellationException
+import xyz.rayfish.android.ReceiveService
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
@@ -26,27 +32,23 @@ import uniffi.ray_mobile.QueuedSend
 import uniffi.ray_mobile.Status
 import uniffi.ray_mobile.Transfer
 import uniffi.ray_mobile.TransferState
-import xyz.rayfish.android.DownloadsOutcome
 import xyz.rayfish.android.FileAutoAccept
 import xyz.rayfish.android.NodeHolder
 import xyz.rayfish.android.OfferNotifier
 import xyz.rayfish.android.R
 import xyz.rayfish.android.formatSize
-import xyz.rayfish.android.TransferKey
 import xyz.rayfish.android.TransferNotifier
 import xyz.rayfish.android.TunnelControl
 import xyz.rayfish.android.isActive
-import xyz.rayfish.android.moveToDownloads
 import xyz.rayfish.android.ui.components.*
 import xyz.rayfish.android.ui.theme.*
-import java.io.File
 
 @Composable
-fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
+fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, onOpenNetworks: () -> Unit = {}, controlPlaneRunning: Boolean = false) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var vpnOn by remember { mutableStateOf(false) }
-    var pendingVpn by remember { mutableStateOf<Boolean?>(null) }
+    var vpnOn by rememberSaveable { mutableStateOf(NodeHolder.isEnabled(context)) }
+    var pendingVpn by rememberSaveable { mutableStateOf<Boolean?>(null) }
 
     // Notifications: pending file offers, connect requests, and (for networks we
     // coordinate) join requests. Refetched on every status poll; surfaced as a
@@ -61,7 +63,7 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
     var transfers by remember { mutableStateOf<List<Transfer>>(emptyList()) }
 
     // Reflect the real data-plane state when status arrives, without stomping an in-flight toggle.
-    LaunchedEffect(status?.running) {
+    LaunchedEffect(status) {
         val running = status?.running ?: return@LaunchedEffect
         val pending = pendingVpn
         when {
@@ -99,15 +101,34 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
         }
     }
 
+    // A failed service startup must not strand an optimistic switch forever.
+    LaunchedEffect(pendingVpn) {
+        if (pendingVpn != null) {
+            kotlinx.coroutines.delay(30_000)
+            vpnOn = withContext(Dispatchers.IO) { NodeHolder.get(context).status().running }
+            pendingVpn = null
+            onToast(context.getString(R.string.error_vpn_start))
+        }
+    }
+
     val nets = status?.networks ?: emptyList()
     val online = nets.sumOf { n -> n.peers.count { it.isActive } }
     // Count only what the daemon has registered: the list also carries saved
     // networks that are still connecting, and this banner claims a working link.
     val connected = nets.count { it.state == NetworkConnState.CONNECTED }
+    val running = status?.running == true
+    val transitioning = starting || pendingVpn != null ||
+        (running && nets.any { it.state == NetworkConnState.CONNECTING })
     val banner = when {
         starting -> stringResource(R.string.status_starting)
-        vpnOn -> pluralStringResource(R.plurals.status_connected_networks, connected, connected)
-        else -> stringResource(R.string.status_disconnected)
+        pendingVpn == false -> stringResource(R.string.home_stopping)
+        pendingVpn == true -> stringResource(R.string.status_connecting_ellipsis)
+        !running && controlPlaneRunning -> stringResource(R.string.home_files_available)
+        !running -> stringResource(R.string.status_offline)
+        nets.any { it.state == NetworkConnState.CONNECTING } -> stringResource(R.string.status_connecting_ellipsis)
+        connected > 0 -> pluralStringResource(R.plurals.status_connected_networks, connected, connected)
+        nets.isEmpty() -> stringResource(R.string.home_no_networks)
+        else -> stringResource(R.string.home_connection_failed)
     }
 
     // Pending file/connect offers don't change `status`, so poll on our own timer
@@ -155,10 +176,14 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
                 }
         }
     }
-    LaunchedEffect(Unit) {
-        while (true) {
-            runCatching { reloadNotifs() }
-            kotlinx.coroutines.delay(2000)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                try { reloadNotifs() }
+                catch (t: Throwable) { if (t is CancellationException) throw t }
+                kotlinx.coroutines.delay(2000)
+            }
         }
     }
 
@@ -169,62 +194,15 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
     fun act(onFailure: () -> Unit = {}, block: suspend () -> Unit) {
         scope.launch {
             try { withContext(Dispatchers.IO) { block() }; reloadNotifs() }
-            catch (t: Throwable) { onFailure(); onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
+            catch (t: Throwable) { onFailure(); if (t is CancellationException) throw t; onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
         }
     }
-    // The core writes into this app-private staging dir; we then move the file to
-    // the device's public Downloads via MediaStore so it survives uninstall and
-    // shows up in the Files/Downloads app.
-    val saveDir = remember { context.getExternalFilesDir(null)?.absolutePath ?: context.filesDir.absolutePath }
-
-    // In-place accept state: once Save is tapped, the file's row turns into a
-    // progress bar (indeterminate: the core's accept is a single blocking call
-    // with no byte-level progress), then a brief "Done!", then the row is gone.
-    val accepting = remember { mutableStateMapOf<ULong, FileOffer>() }
-    val doneFiles = remember { mutableStateMapOf<ULong, FileOffer>() }
+    // The foreground service owns downloads, including their move to Downloads.
+    // Observing its state keeps Save disabled across tab changes and recreation.
+    val accepting by ReceiveService.accepting.collectAsState()
     fun acceptFile(f: FileOffer) {
-        accepting[f.id] = f
-        // Saving from the row settles the same offer the notification is
-        // advertising: take it down now rather than leaving a Save button on
-        // screen for a file that is already downloading.
-        OfferNotifier.markActedOn(context, f.id)
-        val key = TransferKey(f.from, f.filename, f.size)
-        // Mark pending before the blocking accept starts: the core reports the
-        // transfer DONE from inside acceptFileOffer, before moveToDownloads below
-        // has copied anything, so TransferNotifier's poller must see "pending"
-        // from the first moment DONE can appear.
-        DownloadsOutcome.markPending(key)
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    NodeHolder.get(context).acceptFileOffer(f.id, saveDir)
-                    // Re-stamp pending now that the download is done and the copy
-                    // is about to start: the first markPending call above only
-                    // needed to cover the wait for DONE to appear, and acceptFileOffer
-                    // can block far longer than PENDING_TIMEOUT_MS on a large file,
-                    // which would otherwise expire the entry before the copy even
-                    // begins.
-                    DownloadsOutcome.markPending(key)
-                    val reached = moveToDownloads(context, File(saveDir, f.filename), f.filename, f.mimeType)
-                    DownloadsOutcome.record(key, reached)
-                }
-                accepting.remove(f.id)
-                doneFiles[f.id] = f
-                reloadNotifs()
-                kotlinx.coroutines.delay(2000)
-                doneFiles.remove(f.id)
-            } catch (t: Throwable) {
-                // The accept itself failed: no Downloads outcome is ever coming for
-                // this key, so stop treating it as pending rather than making the
-                // result notification wait out the timeout for a failure that has
-                // already happened.
-                DownloadsOutcome.clearPending(key)
-                accepting.remove(f.id)
-                // Same reason as the reject path: the offer may still be pending,
-                // so stop suppressing its notification.
-                OfferNotifier.clearActedOn(f.id)
-                onToast(context.getString(R.string.error_failed, t.message.orEmpty()))
-            }
+        if (!ReceiveService.startAccept(context, f)) {
+            onToast(context.getString(R.string.error_receive_start))
         }
     }
 
@@ -232,31 +210,32 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
         it.outgoing && (it.state == TransferState.OFFERED || it.state == TransferState.TRANSFERRING)
     }
     val hasNotifs = files.isNotEmpty() || connects.isNotEmpty() || joins.isNotEmpty() ||
-        accepting.isNotEmpty() || doneFiles.isNotEmpty() || queued.isNotEmpty() || activeSends.isNotEmpty()
+        accepting.isNotEmpty() || queued.isNotEmpty() || activeSends.isNotEmpty()
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         BrandHeader()
-        StatusEyebrow(connected = vpnOn && !starting, text = banner)
+        StatusEyebrow(connected = running && connected > 0 && !transitioning, text = banner, transitioning = transitioning)
         ToggleCard(
             title = stringResource(R.string.label_tunnel),
-            subtitle = if (vpnOn) stringResource(R.string.tunnel_running, status?.ipv6.orEmpty()) else stringResource(R.string.status_stopped),
+            subtitle = banner,
             checked = vpnOn, onCheckedChange = { toggle(it) },
         )
         SectionCard {
-            SectionLabel(stringResource(R.string.label_this_device))
-            val ip6 = status?.ipv6?.takeIf { it.isNotEmpty() }
-            KeyValueRow(stringResource(R.string.label_ipv6), ip6 ?: stringResource(R.string.dash), onClick = ip6?.let { v -> { copyToClipboard(context, context.getString(R.string.label_ipv6), v); onToast(context.getString(R.string.toast_copied, v)) } })
+            SectionLabel(stringResource(R.string.label_networks))
             KeyValueRow(stringResource(R.string.label_networks), pluralStringResource(R.plurals.home_networks_peers, online, nets.size, online))
+        }
+        if (nets.isEmpty()) {
+            PillButton(stringResource(R.string.home_join_network), onClick = onOpenNetworks, modifier = Modifier.fillMaxWidth())
         }
         if (hasNotifs) {
             SectionCard {
                 SectionLabel(stringResource(R.string.label_notifications))
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     files.forEach { f ->
-                        if (f.id in accepting || f.id in doneFiles) return@forEach
+                        if (f.id in accepting) return@forEach
                         NotifRow(
                             title = f.filename,
                             subtitle = stringResource(R.string.home_file_from, formatSize(f.size), f.from),
@@ -286,7 +265,6 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
                         )
                     }
                     accepting.values.forEach { f -> FileTransferRow(f.filename, done = false) }
-                    doneFiles.values.forEach { f -> FileTransferRow(f.filename, done = true) }
                     connects.forEach { c ->
                         NotifRow(
                             title = c.hostname ?: c.shortId,
@@ -312,14 +290,14 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit) {
 @Composable
 private fun NotifRow(title: String, subtitle: String, acceptLabel: String, onAccept: () -> Unit, onReject: () -> Unit) {
     Column {
-        Text(title, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Rf.Heading, maxLines = 1)
-        Text(subtitle, fontFamily = PlexMono, fontSize = 10.sp, color = Rf.Muted)
+        Text(title, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Heading, maxLines = 1)
+        Text(subtitle, fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Muted)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onAccept, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-                Text(acceptLabel, color = Rf.Emerald, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                Text(acceptLabel, color = Rf.Emerald, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             }
             TextButton(onClick = onReject, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-                Text(stringResource(R.string.action_decline), color = Rf.Rose400, fontFamily = Chakra, fontSize = 12.sp)
+                Text(stringResource(R.string.action_decline), color = Rf.Rose400, fontFamily = Chakra, fontSize = 14.sp)
             }
         }
     }
@@ -330,10 +308,10 @@ private fun NotifRow(title: String, subtitle: String, acceptLabel: String, onAcc
 @Composable
 private fun QueuedSendRow(title: String, subtitle: String, onCancel: () -> Unit) {
     Column {
-        Text(title, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Rf.Heading, maxLines = 1)
-        Text(subtitle, fontFamily = PlexMono, fontSize = 10.sp, color = Rf.Muted)
+        Text(title, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Heading, maxLines = 1)
+        Text(subtitle, fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Muted)
         TextButton(onClick = onCancel, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-            Text(stringResource(R.string.action_cancel), color = Rf.Rose400, fontFamily = Chakra, fontSize = 12.sp)
+            Text(stringResource(R.string.action_cancel), color = Rf.Rose400, fontFamily = Chakra, fontSize = 14.sp)
         }
     }
 }
@@ -341,8 +319,8 @@ private fun QueuedSendRow(title: String, subtitle: String, onCancel: () -> Unit)
 @Composable
 private fun ActiveSendRow(title: String, subtitle: String, progress: Float, onCancel: () -> Unit) {
     Column {
-        Text(title, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Rf.Heading, maxLines = 1)
-        Text(subtitle, fontFamily = PlexMono, fontSize = 10.sp, color = Rf.Muted)
+        Text(title, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Heading, maxLines = 1)
+        Text(subtitle, fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Muted)
         LinearProgressIndicator(
             progress = { progress },
             modifier = Modifier.fillMaxWidth(),
@@ -350,7 +328,7 @@ private fun ActiveSendRow(title: String, subtitle: String, progress: Float, onCa
             trackColor = Rf.CardBorder,
         )
         TextButton(onClick = onCancel, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-            Text(stringResource(R.string.action_cancel), color = Rf.Rose400, fontFamily = Chakra, fontSize = 12.sp)
+            Text(stringResource(R.string.action_cancel), color = Rf.Rose400, fontFamily = Chakra, fontSize = 14.sp)
         }
     }
 }
@@ -358,10 +336,10 @@ private fun ActiveSendRow(title: String, subtitle: String, progress: Float, onCa
 @Composable
 private fun FileTransferRow(filename: String, done: Boolean) {
     Column {
-        Text(filename, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Rf.Heading, maxLines = 1)
+        Text(filename, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Heading, maxLines = 1)
         Spacer(Modifier.height(6.dp))
         if (done) {
-            Text(stringResource(R.string.action_done), fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Rf.Emerald)
+            Text(stringResource(R.string.action_done), fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Emerald)
         } else {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth(),

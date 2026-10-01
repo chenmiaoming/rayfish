@@ -94,7 +94,7 @@ fun IdentityRestoreDialogs(
                     RayfishTextField(password, { password = it }, stringResource(R.string.hint_backup_password), password = true)
                     Text(
                         stringResource(R.string.restore_password_hint),
-                        fontFamily = PlexMono, fontSize = 10.sp, color = Rf.Faint,
+                        fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Faint,
                     )
                 }
             },
@@ -129,7 +129,7 @@ fun IdentityRestoreDialogs(
             text = {
                 Text(
                     stringResource(R.string.replace_identity_body, shortId(existing)),
-                    fontFamily = Chakra, fontSize = 12.sp, color = Rf.Body,
+                    fontFamily = Chakra, fontSize = 14.sp, color = Rf.Body,
                 )
             },
             confirmButton = {
