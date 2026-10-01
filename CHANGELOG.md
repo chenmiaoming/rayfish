@@ -13,6 +13,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Mesh SSH can use a different port with `ray config set ssh-port <port>`, so
   another SSH service can use mesh port 22.
 
+### Changed
+
+- Android keeps its file relay reachable while idle so peers can deliver file
+  offers, while mesh links still close until the phone sends traffic.
+
 ### Fixed
 
 - Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.

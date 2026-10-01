@@ -523,8 +523,8 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
                 stats.record_drop(DropReason::Malformed);
                 continue;
             };
-            // Android keeps the TUN and DNS path alive while the iroh transport
-            // sleeps. A kernel echo reply to a remote ping is not local demand.
+            // Android keeps the TUN, DNS, and file relay alive while mesh links
+            // are idle. A kernel echo reply to a remote ping is not local demand.
             #[cfg(target_os = "android")]
             if let Some(reg) = dialer.as_ref() {
                 if is_icmp_echo_reply(&info) {

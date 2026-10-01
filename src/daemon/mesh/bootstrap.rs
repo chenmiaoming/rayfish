@@ -256,16 +256,6 @@ async fn build_daemon_inner(
         None => config::contact_secret(&mut app_config).public(),
     };
     let alpns = initial_alpns();
-    #[cfg(target_os = "android")]
-    let relay_mode =
-        transport::build_relay_mode(&app_config.relay)?.unwrap_or_else(|| iroh::RelayMode::Default);
-    #[cfg(target_os = "android")]
-    let relay_configs = relay_mode
-        .relay_map()
-        .urls::<Vec<RelayUrl>>()
-        .into_iter()
-        .filter_map(|url| relay_mode.relay_map().get(&url).map(|config| (url, config)))
-        .collect();
     let use_tor = app_config
         .networks
         .iter()
@@ -544,8 +534,6 @@ async fn build_daemon_inner(
             lan_peers,
             warm_lookup,
             pkarr_relay_url,
-            #[cfg(target_os = "android")]
-            relay_configs,
         },
     ));
     // The per-peer connection driver is built once here and shared by the
