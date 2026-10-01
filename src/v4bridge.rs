@@ -42,7 +42,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::forward::{SSH_LISTEN_PORT, SSH_PORT};
+use crate::forward::{self, SSH_LISTEN_PORT};
 use crate::listen_events;
 use crate::listener::bind_listener;
 
@@ -279,10 +279,13 @@ fn bridgeable_ports(mesh: Ipv6Addr, ours: &BTreeSet<u16>) -> Option<BTreeSet<u16
     Some(ports)
 }
 
-/// Ports the bridge never touches: mesh `:22` and the port behind it belong to
-/// the userspace SSH NAT in `forward.rs`, and binding either would fight it.
+/// The bridge skips the configured mesh SSH port and its internal listener port.
 fn is_bridgeable_port(port: u16) -> bool {
-    port != SSH_PORT && port != SSH_LISTEN_PORT && port < EPHEMERAL_FLOOR
+    is_bridgeable_port_for(port, forward::ssh_port())
+}
+
+fn is_bridgeable_port_for(port: u16, ssh_port: u16) -> bool {
+    port != SSH_LISTEN_PORT && port != ssh_port && port < EPHEMERAL_FLOOR
 }
 
 #[cfg(target_os = "linux")]
@@ -578,12 +581,14 @@ mod tests {
 
     #[test]
     fn the_ports_the_daemon_owns_are_never_bridged() {
-        assert!(!is_bridgeable_port(SSH_PORT), "mesh :22 is the SSH NAT's");
-        assert!(!is_bridgeable_port(SSH_LISTEN_PORT));
-        assert!(!is_bridgeable_port(EPHEMERAL_FLOOR));
-        assert!(!is_bridgeable_port(50000));
-        assert!(is_bridgeable_port(4000));
-        assert!(is_bridgeable_port(80));
+        assert!(!is_bridgeable_port_for(22, 22));
+        assert!(is_bridgeable_port_for(22, 2222));
+        assert!(!is_bridgeable_port_for(2222, 2222));
+        assert!(!is_bridgeable_port_for(SSH_LISTEN_PORT, 2222));
+        assert!(!is_bridgeable_port_for(EPHEMERAL_FLOOR, 2222));
+        assert!(!is_bridgeable_port_for(50000, 2222));
+        assert!(is_bridgeable_port_for(4000, 2222));
+        assert!(is_bridgeable_port_for(80, 2222));
     }
 
     #[test]

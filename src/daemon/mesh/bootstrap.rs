@@ -226,7 +226,7 @@ async fn build_daemon_inner(
     }
     let identity = IrohIdentityProvider::new(public_key);
     let my_ip = identity.local_ipv6();
-    // Register our mesh address for the userspace SSH port NAT (mesh `:22`
+    // Register our mesh address for the userspace SSH port NAT (configured port
     // <-> the embedded server's listen port). Stays inactive until `ssh on`.
     forward::init_ssh_nat(my_ip, crate::forward::SSH_LISTEN_PORT);
 

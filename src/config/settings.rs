@@ -50,9 +50,25 @@ pub fn apply_global(cfg: &mut AppConfig, key: GlobalKey, value: &str, replace: b
         GlobalKey::AutoUpdate => cfg.auto_update = parse_bool(value, false)?,
         GlobalKey::OnDemand => cfg.on_demand = parse_bool(value, true)?,
         // Writing `ssh_enabled` is only half of `ray firewall ssh on|off`: the
-        // caller must also seed/remove the `allow in tcp:22` passthrough and
+        // caller must also seed/remove the passthrough for the configured port and
         // start/stop the live listener (see `Daemon::ssh_config_set`).
         GlobalKey::Ssh => cfg.ssh_enabled = parse_bool(value, false)?,
+        GlobalKey::SshPort => {
+            let port = if value.trim().is_empty() {
+                super::default_ssh_port()
+            } else {
+                value
+                    .trim()
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("ssh-port must be a TCP port from 1 to 65535"))?
+            };
+            anyhow::ensure!(port != 0, "ssh-port must be a TCP port from 1 to 65535");
+            anyhow::ensure!(
+                port != crate::forward::SSH_LISTEN_PORT,
+                "ssh-port cannot use Rayfish's internal SSH listener port"
+            );
+            cfg.ssh_port = port;
+        }
         // Like `ssh`, only half the work: the live bridge has to start or stop
         // with it (see `Daemon::v4_bridge_config_set`).
         GlobalKey::V4Bridge => cfg.v4_bridge = parse_bool(value, true)?,
@@ -143,6 +159,7 @@ pub fn render_global(cfg: &AppConfig, key: GlobalKey) -> String {
         GlobalKey::AutoUpdate => on_off(cfg.auto_update),
         GlobalKey::OnDemand => on_off(cfg.on_demand),
         GlobalKey::Ssh => on_off(cfg.ssh_enabled),
+        GlobalKey::SshPort => cfg.ssh_port.to_string(),
         GlobalKey::V4Bridge => on_off(cfg.v4_bridge),
         GlobalKey::PfPassthrough => on_off(cfg.pf_passthrough),
         // Empty renders as unset, matching the `net.ephemeral-ttl` convention.
@@ -330,6 +347,19 @@ mod tests {
     #[test]
     fn hostname_default_is_deliberately_not_a_key() {
         assert!("hostname-default".parse::<NodeKey>().is_err());
+    }
+
+    #[test]
+    fn ssh_port_accepts_an_alternate_port_and_resets_to_22() {
+        let mut cfg = AppConfig::default();
+        apply_global(&mut cfg, GlobalKey::SshPort, "2222", false).unwrap();
+        assert_eq!(render_global(&cfg, GlobalKey::SshPort), "2222");
+        for invalid in ["0", "65536", "30022", "invalid"] {
+            assert!(apply_global(&mut cfg, GlobalKey::SshPort, invalid, false).is_err());
+            assert_eq!(cfg.ssh_port, 2222);
+        }
+        apply_global(&mut cfg, GlobalKey::SshPort, "", false).unwrap();
+        assert_eq!(cfg.ssh_port, 22);
     }
 
     /// No existing setter touches the outbound default; a key for it would be

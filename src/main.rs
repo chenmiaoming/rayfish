@@ -1136,7 +1136,8 @@ pub(crate) enum FirewallAction {
     ///
     /// Tailscale-style, with no SSH keys. `ssh on` starts the server;
     /// `ssh allow <net> <peer>` authorizes a peer to log in. Connect with a
-    /// stock client: `ssh user@host.ray`.
+    /// stock client: `ssh user@host.ray` (or `ssh -p <port>` after setting
+    /// `ray config set ssh-port <port>` on the server).
     Ssh {
         #[command(subcommand)]
         action: SshAction,
@@ -1147,11 +1148,11 @@ pub(crate) enum FirewallAction {
 pub(crate) enum SshAction {
     /// Start the mesh SSH server on this node
     ///
-    /// Listens on the mesh IPs' port 22, and opens tcp:22 in the local firewall.
+    /// Listens on the configured mesh SSH port (22 by default).
     On,
     /// Stop the mesh SSH server
     ///
-    /// Removes the tcp:22 passthrough.
+    /// Removes the configured port's passthrough.
     Off,
     /// Authorize a peer to SSH into this node
     ///

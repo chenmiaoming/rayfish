@@ -181,6 +181,7 @@ impl Daemon {
             NodeKey::Global(GlobalKey::Mdns) => return self.mdns_config_set(value).await,
             // Not a plain config write: see `Daemon::ssh_config_set`.
             NodeKey::Global(GlobalKey::Ssh) => return self.ssh_config_set(value),
+            NodeKey::Global(GlobalKey::SshPort) => return self.ssh_port_config_set(value),
             // Likewise: the bridge's listeners follow the setting live.
             NodeKey::Global(GlobalKey::V4Bridge) => return self.v4_bridge_config_set(value),
             // Likewise: the pf anchor follows the setting live, and on this key

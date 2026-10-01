@@ -38,12 +38,17 @@ struct SshNetworkOutput<'a> {
 #[derive(serde::Serialize)]
 struct SshStateOutput<'a> {
     enabled: bool,
+    port: u16,
     networks: Vec<SshNetworkOutput<'a>>,
 }
 
 impl DisplayOut for SshStateOutput<'_> {
     fn print_human(&self) {
-        println!("mesh SSH: {}", if self.enabled { "on" } else { "off" });
+        println!(
+            "mesh SSH: {} (port {})",
+            if self.enabled { "on" } else { "off" },
+            self.port
+        );
         if self.networks.is_empty() {
             println!("  (no SSH allow rules)");
             return;
@@ -228,7 +233,7 @@ fn to_ipc(action: FirewallAction) -> Result<ipc::IpcMessage> {
 
 /// Map a `ray firewall ssh` subcommand onto its IPC request. `on|off` is the
 /// `ssh` settings key: the daemon serves it through the handler that also seeds
-/// the tcp:22 passthrough and starts/stops the listener.
+/// the configured port's passthrough and starts/stops the listener.
 fn ssh_to_ipc(action: SshAction) -> ipc::IpcMessage {
     match action {
         SshAction::On => ipc::IpcMessage::ConfigSet {
@@ -275,9 +280,11 @@ async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
     let resp = ipc::recv(&mut stream).await?;
     match resp {
         ipc::IpcMessage::Ok { message } => println!("{message}"),
-        ipc::IpcMessage::FirewallSshState { enabled, networks } => {
-            render_ssh_state(enabled, networks, filter.as_deref())?
-        }
+        ipc::IpcMessage::FirewallSshState {
+            enabled,
+            port,
+            networks,
+        } => render_ssh_state(enabled, port, networks, filter.as_deref())?,
         ipc::IpcMessage::Error { message } => fail_with("firewall ssh", &message),
         other => fail_unexpected(&other),
     }
@@ -288,6 +295,7 @@ async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
 /// network.
 fn render_ssh_state(
     enabled: bool,
+    port: u16,
     networks: Vec<(String, Vec<ipc::SshAllowView>)>,
     filter: Option<&str>,
 ) -> Result<()> {
@@ -296,7 +304,11 @@ fn render_ssh_state(
         .filter(|(network, _)| filter.is_none_or(|name| name == network))
         .map(|(network, allow)| SshNetworkOutput { network, allow })
         .collect();
-    printout(&SshStateOutput { enabled, networks })
+    printout(&SshStateOutput {
+        enabled,
+        port,
+        networks,
+    })
 }
 
 /// Resolve within the rule's network, including every device for a user grant.
@@ -1392,7 +1404,7 @@ mod tests {
     }
 
     /// `ray firewall ssh on|off` must go through the `ssh` key, which is the
-    /// only path that also seeds the tcp:22 passthrough and starts the listener.
+    /// only path that also seeds the configured port's passthrough and starts the listener.
     #[test]
     fn ssh_toggle_maps_onto_the_ssh_key() {
         for (action, want) in [(SshAction::On, "on"), (SshAction::Off, "off")] {

@@ -26,14 +26,13 @@ use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Config, LOGIN_GRACE, Origin, SSH_LISTEN_PORT, SSH_PORT, SshAuthz, SshHandler, UserPolicy,
-    auth_banner, disable_nagle, load_host_key, resolve_user_policy_with_hostnames, serve,
-    server_config,
+    Config, LOGIN_GRACE, Origin, SSH_LISTEN_PORT, SshAuthz, SshHandler, UserPolicy, auth_banner,
+    disable_nagle, load_host_key, resolve_user_policy_with_hostnames, serve, server_config,
 };
 use crate::daemon::NetworkRegistry;
 
 const SOCKET: &str = "/var/run/com.rayfish.app.ssh.sock";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_SESSIONS: usize = 128;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -63,6 +62,7 @@ struct Grant {
     user: EndpointId,
     policy: UserPolicy,
     banner: Option<String>,
+    mesh_port: u16,
 }
 
 async fn send<T: Serialize>(writer: &mut (impl AsyncWrite + Unpin), value: &T) -> Result<()> {
@@ -197,6 +197,7 @@ fn grant_for(
         user,
         policy,
         banner,
+        mesh_port: crate::forward::ssh_port(),
     })
 }
 
@@ -272,7 +273,7 @@ async fn run_listener(
         .await??;
         let Some(grant) = grant else { continue };
         disable_nagle(&stream);
-        let server = SocketAddr::new(stream.local_addr()?.ip(), SSH_PORT);
+        let server = SocketAddr::new(stream.local_addr()?.ip(), grant.mesh_port);
         let hangup = Hangup(StdTcpStream::from(stream.as_fd().try_clone_to_owned()?));
         let handler = SshHandler::new(
             grant.policy,
@@ -448,6 +449,7 @@ mod tests {
                 user: iroh::SecretKey::generate().public(),
                 policy,
                 banner: None,
+                mesh_port: 22,
             }),
         )
         .await?;
@@ -483,6 +485,7 @@ mod tests {
                 user: iroh::SecretKey::generate().public(),
                 policy,
                 banner: None,
+                mesh_port: 22,
             }),
         )
         .await?;

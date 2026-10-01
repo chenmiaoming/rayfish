@@ -1345,6 +1345,7 @@ fn global_set_message(cfg: &AppConfig, key: GlobalKey, reset: bool) -> String {
         | GlobalKey::AutoUpdate
         | GlobalKey::OnDemand
         | GlobalKey::Ssh
+        | GlobalKey::SshPort
         | GlobalKey::V4Bridge
         | GlobalKey::PfPassthrough) => {
             if reset {

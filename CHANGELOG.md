@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Mesh SSH can use a different port with `ray config set ssh-port <port>`, so
+  another SSH service can use mesh port 22.
+
 ### Fixed
 
 - Android restores the active mesh notification if it is swiped away while the
