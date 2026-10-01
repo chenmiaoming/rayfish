@@ -79,7 +79,7 @@ impl DisplayOut for SshStateOutput<'_> {
         // Rules on an off server do not affect mesh traffic.
         if !self.enabled {
             println!("\nThese rules are not in effect: mesh SSH is off.");
-            println!("Start the server with `ray firewall ssh on`.");
+            println!("Start the server with `ray ssh on`.");
             return;
         }
         // Self-traffic uses loopback, so it bypasses the TUN's port rewrite.
@@ -266,9 +266,8 @@ fn ssh_to_ipc(action: SshAction) -> ipc::IpcMessage {
     }
 }
 
-/// `ray firewall ssh ...`: toggle the embedded mesh SSH server and manage
-/// per-network allow lists.
-async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
+/// Toggle the embedded mesh SSH server or manage per-network allow lists.
+pub(crate) async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
     // `show` filters the reply client-side, so keep its network before the move.
     let filter = match &action {
         SshAction::Show { network } => network.clone(),
@@ -285,7 +284,7 @@ async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
             port,
             networks,
         } => render_ssh_state(enabled, port, networks, filter.as_deref())?,
-        ipc::IpcMessage::Error { message } => fail_with("firewall ssh", &message),
+        ipc::IpcMessage::Error { message } => fail_with("ssh", &message),
         other => fail_unexpected(&other),
     }
     Ok(())
