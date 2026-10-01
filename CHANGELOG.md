@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Android can send files from Home and network details. Home shows incoming and
+  outgoing transfer progress and recent results separately from access requests.
+
 - `ray ssh on|off` enables or disables mesh SSH and saves the setting. The
   `ray ssh` command also manages SSH grants and shows server state.
 - Mesh SSH can use a different port with `ray config set ssh-port <port>`, so

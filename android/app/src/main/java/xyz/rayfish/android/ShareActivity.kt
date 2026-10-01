@@ -74,8 +74,12 @@ class ShareActivity : ComponentActivity() {
                 SharePicker(
                     itemCount = uris.size,
                     onPick = { target ->
-                        dispatchSend(uris, target)
-                        finish()
+                        try {
+                            dispatchSend(uris, target)
+                            finish()
+                        } catch (t: Exception) {
+                            android.widget.Toast.makeText(this, R.string.error_send_start, android.widget.Toast.LENGTH_LONG).show()
+                        }
                     },
                     onCancel = { finish() },
                 )

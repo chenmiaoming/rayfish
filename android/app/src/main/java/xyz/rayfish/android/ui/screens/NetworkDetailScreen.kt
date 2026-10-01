@@ -111,6 +111,7 @@ fun NetworkDetailScreen(
                 }
             }
         }
+        SendFilesButton(enabled = detail.peers.isNotEmpty(), onToast = onToast, modifier = Modifier.fillMaxWidth())
         firewall?.let { fw ->
             SectionCard {
                 SectionLabel(stringResource(R.string.label_firewall))

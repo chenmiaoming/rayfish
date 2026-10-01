@@ -15,6 +15,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import xyz.rayfish.android.ReceiveService
+import xyz.rayfish.android.DownloadsOutcome
+import xyz.rayfish.android.TransferKey
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
@@ -61,6 +63,7 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, on
     // called off. Only these can be: a delivered offer is the recipient's.
     var queued by remember { mutableStateOf<List<QueuedSend>>(emptyList()) }
     var transfers by remember { mutableStateOf<List<Transfer>>(emptyList()) }
+    var savingTransfers by remember { mutableStateOf<Set<ULong>>(emptySet()) }
 
     // Reflect the real data-plane state when status arrives, without stomping an in-flight toggle.
     LaunchedEffect(status) {
@@ -164,6 +167,11 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, on
                 .filter { !(autoAccepting && it.ownDevice) || FileAutoAccept.hasGivenUp(it.id) }
             queued = runCatching { node.listQueuedSends() }.getOrDefault(emptyList())
             transfers = runCatching { node.listTransfers() }.getOrDefault(emptyList())
+            // Downloads completion can change without changing the core snapshot.
+            savingTransfers = transfers.filter {
+                !it.outgoing && it.state == TransferState.DONE &&
+                    DownloadsOutcome.isPending(TransferKey(it.peer, it.filename, it.size))
+            }.map { it.id }.toSet()
             connects = runCatching { node.listConnectRequests() }.getOrDefault(emptyList())
             // Only registered networks can answer: an unregistered one has no
             // handler to ask, so polling it is a round trip that always fails.
@@ -206,11 +214,9 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, on
         }
     }
 
-    val activeSends = transfers.filter {
-        it.outgoing && (it.state == TransferState.OFFERED || it.state == TransferState.TRANSFERRING)
-    }
-    val hasNotifs = files.isNotEmpty() || connects.isNotEmpty() || joins.isNotEmpty() ||
-        accepting.isNotEmpty() || queued.isNotEmpty() || activeSends.isNotEmpty()
+    val hasRequests = connects.isNotEmpty() || joins.isNotEmpty()
+    val hasFiles = files.isNotEmpty() || accepting.isNotEmpty() || queued.isNotEmpty() || transfers.isNotEmpty()
+
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -230,9 +236,12 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, on
         if (nets.isEmpty()) {
             PillButton(stringResource(R.string.home_join_network), onClick = onOpenNetworks, modifier = Modifier.fillMaxWidth())
         }
-        if (hasNotifs) {
+        if (nets.isNotEmpty()) {
+            SendFilesButton(enabled = nets.any { it.peers.isNotEmpty() }, onToast = onToast, modifier = Modifier.fillMaxWidth())
+        }
+        if (hasFiles) {
             SectionCard {
-                SectionLabel(stringResource(R.string.label_notifications))
+                SectionLabel(stringResource(R.string.label_files))
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     files.forEach { f ->
                         if (f.id in accepting) return@forEach
@@ -255,16 +264,22 @@ fun HomeScreen(status: Status?, starting: Boolean, onToast: (String) -> Unit, on
                             onCancel = { act { NodeHolder.get(context).cancelSend(q.id) } },
                         )
                     }
-                    activeSends.forEach { t ->
-                        ActiveSendRow(
-                            title = t.filename,
-                            subtitle = stringResource(R.string.home_sending_to_peer, t.peer, formatSize(t.size)),
-                            progress = if (t.size == 0uL) 0f else
-                                (t.transferred.toFloat() / t.size.toFloat()).coerceIn(0f, 1f),
-                            onCancel = { act { NodeHolder.get(context).cancelTransfer(t.id) } },
-                        )
+                    transfers.sortedBy { it.state == TransferState.DONE || it.state == TransferState.FAILED }.forEach { t ->
+                        val saving = !t.outgoing && t.state == TransferState.DONE &&
+                            (accepting.values.any { it.from == t.peer && it.filename == t.filename && it.size == t.size } ||
+                                t.id in savingTransfers)
+                        TransferRow(t, saving, onCancel = { act { NodeHolder.get(context).cancelTransfer(t.id) } })
                     }
-                    accepting.values.forEach { f -> FileTransferRow(f.filename, done = false) }
+                    accepting.values.filter { f ->
+                        transfers.none { !it.outgoing && it.peer == f.from && it.filename == f.filename && it.size == f.size }
+                    }.forEach { f -> FileTransferRow(f.filename, done = false) }
+                }
+            }
+        }
+        if (hasRequests) {
+            SectionCard {
+                SectionLabel(stringResource(R.string.label_requests))
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     connects.forEach { c ->
                         NotifRow(
                             title = c.hostname ?: c.shortId,
@@ -317,18 +332,35 @@ private fun QueuedSendRow(title: String, subtitle: String, onCancel: () -> Unit)
 }
 
 @Composable
-private fun ActiveSendRow(title: String, subtitle: String, progress: Float, onCancel: () -> Unit) {
-    Column {
-        Text(title, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Heading, maxLines = 1)
-        Text(subtitle, fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Muted)
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.fillMaxWidth(),
-            color = Rf.Rose500,
-            trackColor = Rf.CardBorder,
-        )
-        TextButton(onClick = onCancel, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-            Text(stringResource(R.string.action_cancel), color = Rf.Rose400, fontFamily = Chakra, fontSize = 14.sp)
+private fun TransferRow(transfer: Transfer, saving: Boolean, onCancel: () -> Unit) {
+    val active = transfer.state == TransferState.OFFERED || transfer.state == TransferState.TRANSFERRING
+    val label = when {
+        saving -> stringResource(R.string.file_saving)
+        transfer.state == TransferState.FAILED -> stringResource(R.string.file_failed)
+        transfer.state == TransferState.DONE -> stringResource(if (transfer.outgoing) R.string.file_sent else R.string.file_received)
+        transfer.state == TransferState.OFFERED -> stringResource(R.string.file_waiting)
+        else -> stringResource(if (transfer.outgoing) R.string.file_sending else R.string.file_receiving)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(transfer.filename, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+            color = Rf.Heading, maxLines = 2)
+        Text(stringResource(R.string.file_transfer_detail, label, transfer.peer, formatSize(transfer.size)),
+            fontFamily = PlexMono, fontSize = 12.sp,
+            color = if (transfer.state == TransferState.FAILED) Rf.Rose400 else Rf.Muted)
+        if (active || saving) {
+            if (saving || transfer.state == TransferState.OFFERED || transfer.size == 0uL) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = Rf.Rose500, trackColor = Rf.CardBorder)
+            } else {
+                LinearProgressIndicator(
+                    progress = { (transfer.transferred.toDouble() / transfer.size.toDouble()).toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(), color = Rf.Rose500, trackColor = Rf.CardBorder,
+                )
+                Text(stringResource(R.string.file_transfer_bytes, formatSize(transfer.transferred), formatSize(transfer.size)),
+                    fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Muted)
+            }
+            if (active) TextButton(onClick = onCancel) {
+                Text(stringResource(R.string.action_cancel), color = Rf.Rose400)
+            }
         }
     }
 }

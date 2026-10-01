@@ -6,6 +6,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.Modifier
@@ -42,6 +43,7 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     val snackbar = remember { SnackbarHostState() }
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    val screenState = rememberSaveableStateHolder()
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     var detailName by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(enabled = detailName != null) { detailName = null }
@@ -187,18 +189,20 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     ) { padding ->
         Box(Modifier.padding(padding)) {
             val d = status?.networks?.firstOrNull { it.name == detailName }
-            when {
-                d != null -> NetworkDetailScreen(
-                    detail = d,
-                    onBack = { detailName = null }, onToast = ::toast, onChanged = ::refreshNow,
-                    onLeft = { detailName = null; refreshNow() },
-                )
-                tab == Tab.HOME -> HomeScreen(status = status, starting = starting, onToast = ::toast, onOpenNetworks = { tab = Tab.NETWORKS }, controlPlaneRunning = controlPlaneRunning)
-                tab == Tab.NETWORKS -> NetworksScreen(
-                    status = status, starting = starting, onToast = ::toast,
-                    onChanged = ::refreshNow, onOpen = { detailName = it.name },
-                )
-                tab == Tab.YOU -> YouScreen(status = status, onToast = ::toast, onChanged = ::refreshNow)
+            screenState.SaveableStateProvider(detailName?.let { "network:$it" } ?: "tab:${tab.name}") {
+                when {
+                    d != null -> NetworkDetailScreen(
+                        detail = d,
+                        onBack = { detailName = null }, onToast = ::toast, onChanged = ::refreshNow,
+                        onLeft = { screenState.removeState("network:${d.name}"); detailName = null; refreshNow() },
+                    )
+                    tab == Tab.HOME -> HomeScreen(status = status, starting = starting, onToast = ::toast, onOpenNetworks = { tab = Tab.NETWORKS }, controlPlaneRunning = controlPlaneRunning)
+                    tab == Tab.NETWORKS -> NetworksScreen(
+                        status = status, starting = starting, onToast = ::toast,
+                        onChanged = ::refreshNow, onOpen = { detailName = it.name },
+                    )
+                    tab == Tab.YOU -> YouScreen(status = status, onToast = ::toast, onChanged = ::refreshNow)
+                }
             }
         }
     }
