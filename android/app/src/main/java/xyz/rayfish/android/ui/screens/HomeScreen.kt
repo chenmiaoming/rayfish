@@ -41,13 +41,11 @@ import xyz.rayfish.android.ui.theme.*
 @Composable
 fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Unit, onOpenNetworks: () -> Unit = {}, onRefresh: () -> Unit = {}) {
     val status = snapshot.status
-    val controlPlaneRunning = snapshot.controlPlaneRunning
     val files = snapshot.files
     val connects = snapshot.connects
     val joins = snapshot.joins
     val queued = snapshot.queued
     val transfers = snapshot.transfers
-    val savingTransfers = snapshot.savingTransfers
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var vpnOn by rememberSaveable { mutableStateOf(NodeHolder.isEnabled(context)) }
@@ -114,7 +112,7 @@ fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Un
         starting -> stringResource(R.string.status_starting)
         pendingVpn == false -> stringResource(R.string.home_stopping)
         pendingVpn == true -> stringResource(R.string.status_connecting_ellipsis)
-        !running && controlPlaneRunning -> stringResource(R.string.home_files_available)
+        !running && snapshot.controlPlaneRunning -> stringResource(R.string.home_files_available)
         !running -> stringResource(R.string.status_offline)
         nets.any { it.state == NetworkConnState.CONNECTING } -> stringResource(R.string.status_connecting_ellipsis)
         connected > 0 -> pluralStringResource(R.plurals.status_connected_networks, connected, connected)
@@ -161,8 +159,7 @@ fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Un
         }
         if (nets.isEmpty()) {
             PillButton(stringResource(R.string.home_join_network), onClick = onOpenNetworks, modifier = Modifier.fillMaxWidth())
-        }
-        if (nets.isNotEmpty()) {
+        } else {
             SendFilesButton(enabled = nets.any { it.peers.isNotEmpty() }, onToast = onToast, modifier = Modifier.fillMaxWidth())
         }
         if (hasFiles) {
@@ -192,13 +189,12 @@ fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Un
                     }
                     transfers.sortedBy { it.state == TransferState.DONE || it.state == TransferState.FAILED }.forEach { t ->
                         val saving = !t.outgoing && t.state == TransferState.DONE &&
-                            (accepting.values.any { it.from == t.peer && it.filename == t.filename && it.size == t.size } ||
-                                t.id in savingTransfers)
+                            (accepting.values.any { t.matches(it) } || t.id in snapshot.savingTransfers)
                         TransferRow(t, saving, onCancel = { act { NodeHolder.get(context).cancelTransfer(t.id) } })
                     }
                     accepting.values.filter { f ->
-                        transfers.none { !it.outgoing && it.peer == f.from && it.filename == f.filename && it.size == f.size }
-                    }.forEach { f -> FileTransferRow(f.filename, done = false) }
+                        transfers.none { it.matches(f) }
+                    }.forEach { f -> FileTransferRow(f.filename) }
                 }
             }
         }
@@ -292,21 +288,20 @@ private fun TransferRow(transfer: Transfer, saving: Boolean, onCancel: () -> Uni
 }
 
 @Composable
-private fun FileTransferRow(filename: String, done: Boolean) {
+private fun FileTransferRow(filename: String) {
     Column {
         Text(filename, fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Heading, maxLines = 1)
         Spacer(Modifier.height(6.dp))
-        if (done) {
-            Text(stringResource(R.string.action_done), fontFamily = Chakra, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Rf.Emerald)
-        } else {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth(),
-                color = Rf.Rose500,
-                trackColor = Rf.CardBorder,
-            )
-        }
+        LinearProgressIndicator(
+            modifier = Modifier.fillMaxWidth(),
+            color = Rf.Rose500,
+            trackColor = Rf.CardBorder,
+        )
     }
 }
+
+private fun Transfer.matches(offer: FileOffer): Boolean =
+    !outgoing && peer == offer.from && filename == offer.filename && size == offer.size
 
 @androidx.compose.ui.tooling.preview.Preview(backgroundColor = 0xFF18181B, showBackground = true)
 @Composable

@@ -143,7 +143,7 @@ fun IdentityBackupCard(status: Status?, onToast: (String) -> Unit, onChanged: ()
                                     NodeHolder.get(context).backupIdentity(password)
                                 }
                                 pendingCode = backup.code
-                                saveBackup.launch(suggestedFileName(backup.publicKey))
+                                saveBackup.launch("rayfish-identity-${shortId(backup.publicKey)}.txt")
                             } catch (t: Throwable) {
                                 onToast(context.getString(R.string.error_backup_failed, t.message.orEmpty()))
                             } finally {
@@ -161,5 +161,3 @@ fun IdentityBackupCard(status: Status?, onToast: (String) -> Unit, onChanged: ()
         )
     }
 }
-
-private fun suggestedFileName(publicKey: String): String = "rayfish-identity-${shortId(publicKey)}.txt"

@@ -82,40 +82,14 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     // stay offline. Then poll every 2s while foregrounded; suspend in background.
     LaunchedEffect(Unit) {
         try {
-            if (NodeHolder.isEnabled(context)) {
-                if (VpnService.prepare(context) == null) {
-                    ContextCompat.startForegroundService(
-                        context, Intent(context, RayfishVpnService::class.java),
-                    )
-                } else {
-                    // Another app (Tailscale, say) holds the single VpnService slot, so
-                    // our saved enable intent is stale: it was set true when we still
-                    // had the tunnel, but we can no longer get it back. Clear it now,
-                    // the same reasoning onRevoke already uses, so the toggle stops
-                    // reading "on" for a tunnel that will never come up, and the You
-                    // screen's go-fully-offline control sees the real state instead of
-                    // this leftover intent.
-                    NodeHolder.setEnabled(context, false)
-                    if (!NodeHolder.isGoOfflineWhenDisabled(context)) {
-                        ContextCompat.startForegroundService(
-                            context,
-                            Intent(context, RayfishVpnService::class.java).apply {
-                                action = RayfishVpnService.ACTION_STANDBY
-                            },
-                        )
-                    }
-                }
-            } else if (!NodeHolder.isGoOfflineWhenDisabled(context)) {
-                // The VPN is not being restored, and the user has not asked to go
-                // fully offline when disabled, so standby is the default: files
-                // should keep working. Nothing else brings the control plane up
-                // after a process death; bring it up now via standby.
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, RayfishVpnService::class.java).apply {
-                        action = RayfishVpnService.ACTION_STANDBY
-                    },
-                )
+            val enabled = NodeHolder.isEnabled(context)
+            val restoreTunnel = enabled && VpnService.prepare(context) == null
+            // Clear saved intent when another VPN has taken the service slot.
+            if (enabled && !restoreTunnel) NodeHolder.setEnabled(context, false)
+            if (restoreTunnel || !NodeHolder.isGoOfflineWhenDisabled(context)) {
+                val intent = Intent(context, RayfishVpnService::class.java)
+                if (!restoreTunnel) intent.action = RayfishVpnService.ACTION_STANDBY
+                ContextCompat.startForegroundService(context, intent)
             }
             model.refresh()
         } catch (t: Throwable) { snackbar.showSnackbar(context.getString(R.string.error_failed_to_start, t.message.orEmpty())) }
@@ -131,13 +105,12 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
     }
 
     LaunchedEffect(status?.networks, detailName) {
-        if (status != null && detailName != null && status?.networks?.none { it.name == detailName } == true) {
+        if (detailName != null && status?.networks?.none { it.name == detailName } == true) {
             detailName = null
         }
     }
 
     fun toast(msg: String) { scope.launch { snackbar.showSnackbar(msg) } }
-    fun refreshNow() { model.refresh() }
 
     // Deep links: unchanged behavior, route to the joined/paired result.
     fun followLink(uri: String) {
@@ -145,7 +118,7 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
             try {
                 NodeHolder.ensureStarted(context)
                 val action = withContext(Dispatchers.IO) { NodeHolder.get(context).handleLink(uri) }
-                refreshNow()
+                model.refresh()
                 toast(context.messageForLinkAction(action, R.string.toast_paired))
             } catch (t: Throwable) { toast(context.getString(R.string.error_link_failed, t.message.orEmpty())) }
         }
@@ -187,7 +160,7 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
             if (snapshot.refreshFailed) {
                 SectionCard(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
                     Text(stringResource(R.string.error_status_refresh), fontFamily = Chakra, color = Rf.Muted)
-                    TextButton(onClick = ::refreshNow) { Text(stringResource(R.string.action_retry)) }
+                    TextButton(onClick = model::refresh) { Text(stringResource(R.string.action_retry)) }
                 }
             }
             Box(Modifier.weight(1f)) {
@@ -196,15 +169,15 @@ fun RayfishApp(initialLinkUri: String?, alreadyHandled: (String) -> Boolean, mar
                     when {
                         d != null -> NetworkDetailScreen(
                             detail = d,
-                            onBack = { detailName = null }, onToast = ::toast, onChanged = ::refreshNow,
-                            onLeft = { screenState.removeState("network:${d.name}"); detailName = null; refreshNow() },
+                            onBack = { detailName = null }, onToast = ::toast, onChanged = model::refresh,
+                            onLeft = { screenState.removeState("network:${d.name}"); detailName = null; model.refresh() },
                         )
-                        tab == Tab.HOME -> HomeScreen(snapshot = snapshot, starting = starting, onToast = ::toast, onOpenNetworks = { tab = Tab.NETWORKS }, onRefresh = ::refreshNow)
+                        tab == Tab.HOME -> HomeScreen(snapshot = snapshot, starting = starting, onToast = ::toast, onOpenNetworks = { tab = Tab.NETWORKS }, onRefresh = model::refresh)
                         tab == Tab.NETWORKS -> NetworksScreen(
                             status = status, starting = starting, onToast = ::toast,
-                            onChanged = ::refreshNow, onOpen = { detailName = it.name },
+                            onChanged = model::refresh, onOpen = { detailName = it.name },
                         )
-                        tab == Tab.YOU -> YouScreen(status = status, onToast = ::toast, onChanged = ::refreshNow)
+                        tab == Tab.YOU -> YouScreen(status = status, onToast = ::toast, onChanged = model::refresh)
                     }
                 }
             }

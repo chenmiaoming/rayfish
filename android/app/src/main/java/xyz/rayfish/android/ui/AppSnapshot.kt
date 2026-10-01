@@ -76,8 +76,7 @@ private fun readSnapshot(context: Context, previous: AppSnapshot): AppSnapshot {
     catch (t: Exception) { failed = true; fallback }
 
     val status = read(previous.status) { node.status() }
-    val started = NodeHolder.isStarted()
-    if (!started) return AppSnapshot(status = status, loaded = true, refreshFailed = failed)
+    if (!NodeHolder.isStarted()) return AppSnapshot(status = status, loaded = true, refreshFailed = failed)
 
     // These are also event driven in the service. Foreground reconciliation covers
     // file-only operation when the user opted out of a standing VPN service.
