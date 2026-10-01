@@ -342,7 +342,7 @@ private struct NetworkCard: View {
             .padding(14)
             ForEach(network.peers) { peer in
                 Rectangle().fill(RayfishTheme.line).frame(height: 1)
-                PeerRow(peer: peer, domains: [peer.domain(in: network.name)])
+                PeerRow(peer: peer, domains: peer.hostname.isEmpty ? [] : [peer.domain(in: network.name)])
                     .padding(.horizontal, 14).padding(.vertical, 11)
             }
             if network.peers.isEmpty {
@@ -376,6 +376,12 @@ private struct PeerRow: View {
             if let latency = peer.latencyMs { Text("\(latency) ms").foregroundColor(RayfishTheme.faint) }
         }
         .font(RayfishTheme.mono(12))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard let domain = domains.first else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(domain, forType: .string)
+        }
         .contextMenu {
             ForEach(domains, id: \.self) { domain in
                 Button("Copy \(domain)") {
@@ -397,7 +403,7 @@ private struct DevicesView: View {
     }
     private func domains(for peer: ProviderPeer) -> [String] {
         (controller.status?.networks ?? []).compactMap { network in
-            network.peers.first { $0.ipv6 == peer.ipv6 }?.domain(in: network.name)
+            network.peers.first { $0.ipv6 == peer.ipv6 && !$0.hostname.isEmpty }?.domain(in: network.name)
         }.sorted()
     }
     var body: some View {

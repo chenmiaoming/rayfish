@@ -95,8 +95,13 @@ fun NetworkDetailScreen(
             SectionLabel(pluralStringResource(R.plurals.peers_section, online, online))
             if (detail.peers.isEmpty()) Text(stringResource(R.string.no_peers_yet), fontFamily = PlexMono, fontSize = 11.sp, color = Rf.Faint)
             detail.peers.forEach { p ->
+                val domain = p.hostname.takeIf { it.isNotEmpty() }?.let { "$it.${detail.name}.ray" }
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
-                    .clickable { copyToClipboard(context, p.hostname.ifEmpty { context.getString(R.string.clipboard_peer) }, p.ipv6); onToast(context.getString(R.string.toast_copied, p.ipv6)) }
+                    .clickable(enabled = domain != null) {
+                        if (domain != null && copyToClipboard(context, context.getString(R.string.clipboard_address), domain)) {
+                            onToast(context.getString(R.string.toast_copied, domain))
+                        }
+                    }
                     .padding(top = 9.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(if (p.isActive) Rf.Emerald else Rf.Faint))
                     Spacer(Modifier.width(8.dp))

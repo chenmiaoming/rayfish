@@ -15,6 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.
+- Incoming pings no longer keep Android's mesh transport awake or wake it after
+  idle suspension.
 - `ray status` groups paired devices under their primary even while they are offline.
 - Installing the macOS app's shell command also enables tab completion in new terminals.
 - Android restores the active mesh notification if it is swiped away while the
