@@ -462,6 +462,9 @@ impl NetworkRegistry {
         }
 
         if has_other_coordinators {
+            if let Err(error) = self.publish_coordinator_departure(name).await {
+                return ipc_err(format!("cannot leave network '{name}': {error:#}"));
+            }
             return match self.leave_network(name).await {
                 IpcMessage::Ok { .. } => IpcMessage::Ok {
                     message: format!("left network '{name}'; other coordinators keep it running"),
@@ -488,6 +491,72 @@ impl NetworkRegistry {
             },
             Err(error) => ipc_err(format!("{error:#}")),
         }
+    }
+
+    /// Publish a roster without this coordinator while its publisher is still
+    /// active. An offline coordinator needs this record to learn the departure.
+    async fn publish_coordinator_departure(&self, name: &str) -> Result<()> {
+        let handle = self
+            .networks
+            .get(name)
+            .context("network is no longer active")?;
+        let state = Arc::clone(&handle.state);
+        let cancel = handle.cancel.clone();
+        drop(handle);
+        let commit = Arc::clone(&state.read().unwrap().snapshot_commit);
+        let _commit = commit.lock().await;
+        let my_id = self.transport.endpoint.id();
+        let (key, bytes, seeds) = {
+            let state = state.read().unwrap();
+            let key = state
+                .network_secret_key
+                .clone()
+                .context("network key is unavailable")?;
+            let mut members = state.members.clone();
+            let departing = members
+                .remove(&my_id)
+                .context("coordinator is absent from roster")?;
+            anyhow::ensure!(
+                departing.is_coordinator,
+                "local member is not a coordinator"
+            );
+            let mut seeds: Vec<EndpointId> = members
+                .all()
+                .iter()
+                .filter(|member| member.is_coordinator)
+                .map(|member| member.identity)
+                .collect();
+            anyhow::ensure!(!seeds.is_empty(), "no other coordinator remains");
+            // The departing daemon still serves blobs after leaving the mesh.
+            // An offline coordinator needs this seed to fetch the new snapshot.
+            seeds.push(my_id);
+            let bytes = canonical_group_bytes(
+                &members,
+                &state.approved,
+                &state.suggested_firewall,
+                state.group_name.as_deref(),
+                &state.reusable_keys,
+                &state.nullifiers,
+            );
+            (key, bytes, seeds)
+        };
+        let client =
+            dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)?;
+        anyhow::ensure!(
+            dht::destruction::resolve(
+                &client,
+                dht::destruction::discovery_key(&key).public(),
+                key.public(),
+            )
+            .await?
+            .is_none(),
+            "network has already been destroyed"
+        );
+        self.transport.blob_store.blobs().add_slice(&bytes).await?;
+        dht::publish_network(&client, &key, &blake3::hash(&bytes), &seeds).await?;
+        // The publisher must stop before it can overwrite this final roster.
+        cancel.cancel();
+        Ok(())
     }
 
     /// Remove a member from a closed network. Coordinator-only (any network-key

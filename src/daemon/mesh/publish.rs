@@ -228,6 +228,9 @@ pub(crate) fn spawn_network_publisher(
                 }
                 let commit = Arc::clone(&state.read().unwrap().snapshot_commit);
                 let _commit = commit.lock().await;
+                if token.is_cancelled() {
+                    break;
+                }
                 let mut persistence_ready = true;
                 if let Some(hash) = group_hash_needing_persistence(&state, &network_name, false) {
                     persistence_ready =

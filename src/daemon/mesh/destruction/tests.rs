@@ -340,6 +340,16 @@ async fn nuke_leaves_network_to_remaining_coordinator_even_when_offline() {
             daemon.registry.nuke_network(name, false).await,
             IpcMessage::Error { .. }
         ));
+        if !connected {
+            relay.fail.store(true, Ordering::Relaxed);
+            assert!(matches!(
+                daemon.registry.nuke_network(name, true).await,
+                IpcMessage::Error { .. }
+            ));
+            assert!(daemon.registry.networks.contains_key(name));
+            assert!(config::load_network(name).unwrap().is_some());
+            relay.fail.store(false, Ordering::Relaxed);
+        }
         let receive = async {
             if connected {
                 let (_, mut recv) = inbound.accept_bi().await.unwrap();
@@ -374,6 +384,32 @@ async fn nuke_leaves_network_to_remaining_coordinator_even_when_offline() {
                 .await
                 .unwrap()
         ));
+        let record = dht::resolve_network_packet(&client, key.public())
+            .await
+            .unwrap();
+        let (hash, seeds) = dht::decode_network_record(&record).unwrap();
+        assert!(seeds.contains(&peer.id()));
+        assert!(seeds.contains(&daemon.transport.endpoint.id()));
+        let bytes = daemon
+            .transport
+            .blob_store
+            .blobs()
+            .get_bytes(iroh_blobs::Hash::from_bytes(*hash.as_bytes()))
+            .await
+            .unwrap();
+        let roster = verify_group_blob(&bytes, &hash).unwrap();
+        assert!(
+            roster
+                .members
+                .iter()
+                .any(|member| member.identity == peer.id())
+        );
+        assert!(
+            !roster
+                .members
+                .iter()
+                .any(|member| member.identity == daemon.transport.endpoint.id())
+        );
         assert!(conn.close_reason().is_none());
         // The remaining coordinator can still persist and publish this key.
         config::save_network(&net).unwrap();
@@ -392,7 +428,7 @@ async fn nuke_leaves_network_to_remaining_coordinator_even_when_offline() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
-async fn both_roles_require_coordinator_origin_and_network_signature() {
+async fn both_roles_accept_network_signed_proof_with_stale_roster() {
     let _lock = config::CONFIG_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -451,37 +487,9 @@ async fn both_roles_require_coordinator_origin_and_network_signature() {
         ));
         assert!(daemon.registry.networks.contains_key("doomed"));
         let proof = destruction::encode(key).unwrap();
-        for untrusted in [stranger.public(), member] {
-            assert!(handler.handle_common(
-                untrusted,
-                &ControlMsg::SignedRecord {
-                    packet: proof.as_bytes().to_vec(),
-                }
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert!(config::destruction::load(key.public()).unwrap().is_none());
-        assert!(
-            !daemon
-                .registry
-                .networks
-                .get("doomed")
-                .unwrap()
-                .state
-                .read()
-                .unwrap()
-                .destroyed
-        );
-        daemon
-            .registry
-            .networks
-            .get("doomed")
-            .unwrap()
-            .state
-            .write()
-            .unwrap()
-            .members
-            .remove(&member);
+        let handle = daemon.registry.networks.get("doomed").unwrap();
+        handle.state.write().unwrap().members.remove(&coordinator);
+        drop(handle);
         assert!(handler.handle_common(
             coordinator,
             &ControlMsg::SignedRecord {

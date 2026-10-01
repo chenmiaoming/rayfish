@@ -1789,12 +1789,6 @@ impl AcceptHandler {
                 if let Ok(packet) = dht::verify_network_record(packet, key)
                     && dht::destruction::is_destroyed(&packet)
                 {
-                    // peer_id comes from the authenticated QUIC connection,
-                    // never from a claimed sender in the message payload.
-                    if !sender_is_coordinator(state, peer_id) {
-                        tracing::warn!("rejecting destruction notice from a non-coordinator");
-                        return true;
-                    }
                     // Destruction is terminal, regardless of timestamp. A newer
                     // live record cannot restore a destroyed network identity.
                     self.registry().schedule_destruction(network, packet);

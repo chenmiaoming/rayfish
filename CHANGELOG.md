@@ -15,6 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Coordinators that leave with `ray nuke --force` publish their departure so
+  offline coordinators do not restore a stale roster. Valid destruction notices
+  are accepted even when the local roster is stale.
+
 - Peers reconnect after a dial stalls during a network outage instead of
   remaining unreachable until Rayfish restarts.
 
