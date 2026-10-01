@@ -16,6 +16,8 @@ const RECORD_VERSION: &str = "v1";
 pub(crate) const RECORD_TTL: u32 = 300;
 const PKARR_RELAY_URL: &str = "https://dns.iroh.link/pkarr";
 
+pub(crate) mod destruction;
+
 /// Cap on a single record resolution. The relay is plain HTTPS and iroh's
 /// client sets no total timeout, so a blackholed relay (or a host whose DNS
 /// stopped resolving the relay's own name) would otherwise leave `ray join`
@@ -80,6 +82,7 @@ pub fn encode_network_record(
         RECORD_VERSION.to_string(),
         format!("h,{blob_hash}"),
         format!("m,{}", crate::transport::MESH_RECORD_VERSION),
+        format!("d,{}", destruction::discovery_key(key).public()),
     ];
     for peer in seed_peers {
         values.push(format!("p,{peer}"));
@@ -116,6 +119,10 @@ pub fn verify_network_record(bytes: &[u8], network_pubkey: EndpointId) -> Result
 }
 
 pub fn decode_network_record(packet: &SignedPacket) -> Result<(blake3::Hash, Vec<EndpointId>)> {
+    ensure!(
+        !destruction::is_destroyed(packet),
+        "network has been destroyed"
+    );
     let records = packet.txt_records(RECORD_NAME);
     ensure!(!records.is_empty(), "no network records found");
     ensure!(
@@ -207,6 +214,20 @@ pub async fn publish_network(
 /// pre-dial compatibility check. Decode the standard fields with
 /// [`decode_network_record`].
 pub async fn resolve_network_packet(
+    client: &PkarrRelayClient,
+    network_pubkey: EndpointId,
+) -> Result<SignedPacket> {
+    let packet = resolve_packet(client, network_pubkey).await?;
+    if !destruction::is_destroyed(&packet)
+        && let Some(key) = destruction::discovery_id(&packet)
+        && let Some(destroyed) = destruction::resolve(client, key, network_pubkey).await?
+    {
+        return Ok(destroyed);
+    }
+    Ok(packet)
+}
+
+async fn resolve_packet(
     client: &PkarrRelayClient,
     network_pubkey: EndpointId,
 ) -> Result<SignedPacket> {

@@ -15,6 +15,7 @@ mod alias;
 mod bootstrap;
 mod coordinator;
 mod create_join;
+mod destruction;
 pub(super) mod diagnostics;
 mod exit_node;
 mod files;
