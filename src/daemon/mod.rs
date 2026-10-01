@@ -56,8 +56,6 @@ use anyhow::{Context, Result};
 use iroh::address_lookup::PkarrRelayClient;
 use iroh::endpoint::{Connection, Endpoint, VarInt};
 use iroh::{EndpointId, SecretKey};
-#[cfg(target_os = "android")]
-use iroh::{RelayConfig, RelayUrl};
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, HashAndFormat};
 use tokio::sync::Notify;
@@ -2107,8 +2105,6 @@ mod accept_handler_tests {
                 lan_peers: Arc::new(LanPeers::new()),
                 warm_lookup: iroh::address_lookup::memory::MemoryLookup::new(),
                 pkarr_relay_url: dht::pkarr_relay_url(&config::ServerOverride::default()),
-                #[cfg(target_os = "android")]
-                relay_configs: Vec::new(),
             },
         ));
         let hostname_table = dns::new_hostname_table();

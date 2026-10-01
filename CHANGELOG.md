@@ -8,8 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray ssh on|off` enables or disables mesh SSH and saves the setting. The
+  `ray ssh` command also manages SSH grants and shows server state.
 - Mesh SSH can use a different port with `ray config set ssh-port <port>`, so
   another SSH service can use mesh port 22.
+
+### Changed
+
+- Android keeps its file relay reachable while idle so peers can deliver file
+  offers, while mesh links still close until the phone sends traffic.
 
 ### Fixed
 
@@ -17,6 +24,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   offline coordinators do not restore a stale roster. Valid destruction notices
   are accepted even when the local roster is stale.
 
+- Bash completion installed by the macOS app now registers in new terminals.
+- Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.
+- Incoming pings no longer keep Android's mesh transport awake or wake it after
+  idle suspension.
+- `ray status` groups paired devices under their primary even while they are offline.
+- Installing the macOS app's shell command also enables tab completion in new terminals.
 - Android restores the active mesh notification if it is swiped away while the
   mesh service is still running.
 - macOS shows auto-accepted file transfers and their progress in the Files page
@@ -26,6 +39,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   named. Firewall wildcards no longer preserve undeclared members.
 - `ray apply` retries joining an online managed machine when the coordinator's
   roster lists it but the machine does not have that network active.
+- `ray apply` kicks removed hosts from closed networks even after their managed
+  machine record is gone, and reports failed removals as errors.
 
 ## [0.5.6] - 2026-10-01
 

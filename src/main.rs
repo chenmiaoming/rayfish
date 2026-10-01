@@ -160,6 +160,7 @@ fn json_requested(command: &Command) -> bool {
         | Command::Netcheck { json }
         | Command::Admin { json, .. }
         | Command::Firewall { json, .. }
+        | Command::Ssh { json, .. }
         | Command::ExitNode { json, .. }
         | Command::Mdns { json, .. }
         | Command::Dns { json, .. }
@@ -519,6 +520,14 @@ pub(crate) enum Command {
     Firewall {
         #[command(subcommand)]
         action: FirewallAction,
+        /// Emit machine-readable JSON instead of styled text
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Manage the embedded mesh SSH server and access rules
+    Ssh {
+        #[command(subcommand)]
+        action: SshAction,
         /// Emit machine-readable JSON instead of styled text
         #[arg(long, global = true)]
         json: bool,
@@ -1749,6 +1758,7 @@ async fn run() -> Result<()> {
             json: _,
         } => ipc_admin(&network, action).await,
         Command::Firewall { action, json: _ } => ipc_firewall(action).await,
+        Command::Ssh { action, json: _ } => ipc_firewall_ssh(action).await,
         Command::ExitNode { action, json: _ } => ipc_exit_node(action).await,
         Command::Apply {
             spec,
@@ -2155,6 +2165,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ssh_commands_parse_at_root_and_under_firewall() {
+        for args in [&["ray", "ssh", "off"][..], &["ray", "fw", "ssh", "off"][..]] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Ssh {
+                    action: SshAction::Off,
+                    ..
+                } | Command::Firewall {
+                    action: FirewallAction::Ssh {
+                        action: SshAction::Off
+                    },
+                    ..
+                }
+            ));
+        }
+        let cli = Cli::try_parse_from(["ray", "ssh", "show", "--json"]).unwrap();
+        assert!(json_requested(&cli.command));
     }
 
     #[test]
