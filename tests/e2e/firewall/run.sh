@@ -66,9 +66,11 @@ echo "   A_IP=$A_IP  B_IP=$B_IP  C_IP=$C_IP"
 # The coordinator's roster does not prove the member-to-member data path.
 # Dial every pair before rule probes, while the seeded ICMP allow is intact.
 # A negative firewall assertion must not pass just because the mesh is unready.
+# Allow the same 120s convergence window as wait_roster: a member may need the
+# 60s signed-record poll before it can authenticate another newly joined peer.
 for pair in "$A $B_IP srv-a->srv-b" "$B $C_IP srv-b->srv-c" "$C $A_IP srv-c->srv-a"; do
   read -r from target label <<< "$pair"
-  if retry_until 30 "[[ \"\$(ping_loss '$from' '$target')\" == 0 ]]"; then
+  if retry_until 120 "[[ \"\$(ping_loss '$from' '$target')\" == 0 ]]"; then
     pass "mesh ready ($label)"
   else
     fail "mesh did not become reachable ($label)"; summary
