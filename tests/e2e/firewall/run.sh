@@ -63,6 +63,18 @@ A_IP="$(my_ip "$A" "$NET")"; B_IP="$(my_ip "$B" "$NET")"; C_IP="$(my_ip "$C" "$N
 echo "   A_IP=$A_IP  B_IP=$B_IP  C_IP=$C_IP"
 [[ -n "$A_IP" && -n "$B_IP" && -n "$C_IP" ]] || { fail "missing a VPN ip"; summary; }
 
+# The coordinator's roster does not prove the member-to-member data path.
+# Dial every pair before rule probes, while the seeded ICMP allow is intact.
+# A negative firewall assertion must not pass just because the mesh is unready.
+for pair in "$A $B_IP srv-a->srv-b" "$B $C_IP srv-b->srv-c" "$C $A_IP srv-c->srv-a"; do
+  read -r from target label <<< "$pair"
+  if retry_until 30 "[[ \"\$(ping_loss '$from' '$target')\" == 0 ]]"; then
+    pass "mesh ready ($label)"
+  else
+    fail "mesh did not become reachable ($label)"; summary
+  fi
+done
+
 # ---------------------------------------------------------------------------
 step "2. consent pipeline — coordinator suggests, non-auto-accept member reviews"
 # A denies-only suggestion (no catch-all) keeps srv-b otherwise open, so it can't

@@ -8,11 +8,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray status` and the macOS app warn when a peer connection has high latency,
+  packet loss, or a backed-up send queue.
+
+- `ray identityof <contact-id>` looks up the advertised device identity without
+  connecting to the peer or requesting approval.
+
+- Android can send files from Home and network details. Home shows incoming and
+  outgoing transfer progress and recent results separately from access requests.
+
+- `ray ssh on|off` enables or disables mesh SSH and saves the setting. The
+  `ray ssh` command also manages SSH grants and shows server state.
 - Mesh SSH can use a different port with `ray config set ssh-port <port>`, so
   another SSH service can use mesh port 22.
+- Experimental: `ray config set quic-congestion loss-tolerant` switches the
+  tunnel to a congestion controller that ignores ordinary packet loss. It
+  applies on restart; the default stays `cubic`. The macOS app has a toggle
+  for it in Settings, and tab completion offers both values.
+
+### Changed
+
+- Android shows device names instead of IPv6 addresses, uses larger text, and
+  distinguishes VPN connectivity from file-only standby on Home.
+
+- Android keeps its file relay reachable while idle so peers can deliver file
+  offers, while mesh links still close until the phone sends traffic.
 
 ### Fixed
 
+- The macOS app version now matches the Rayfish version in `Cargo.toml`.
+- IPv4 listener bridging is enabled by default on fresh installs and starts
+  with the macOS app's VPN. An explicit `v4-bridge off` setting is preserved.
+- The macOS app bridges IPv4 services through its background helper so macOS
+  can deliver mesh connections to them, including when mesh SSH is disabled.
+- Android firewall forms keep the selected peer after activity recreation.
+- Android shows file transfer cancellation only for outgoing transfers.
+- Coordinators that leave with `ray nuke --force` publish their departure so
+  offline coordinators do not restore a stale roster. Valid destruction notices
+  are accepted even when the local roster is stale.
+
+- Bash completion installed by the macOS app now registers in new terminals.
+- Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.
+- Incoming pings no longer keep Android's mesh transport awake or wake it after
+  idle suspension.
+- `ray status` groups paired devices under their primary even while they are offline.
+- Installing the macOS app's shell command also enables tab completion in new terminals.
 - Android restores the active mesh notification if it is swiped away while the
   mesh service is still running.
 - macOS shows auto-accepted file transfers and their progress in the Files page
@@ -22,6 +62,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   named. Firewall wildcards no longer preserve undeclared members.
 - `ray apply` retries joining an online managed machine when the coordinator's
   roster lists it but the machine does not have that network active.
+- `ray apply` kicks removed hosts from closed networks even after their managed
+  machine record is gone, and reports failed removals as errors.
+
+- Android network sheets remain scrollable with the keyboard open or in landscape.
+- Android keeps the last known status when a refresh fails and offers Retry.
+  Foreground updates now share one reader across tabs and activity recreation.
+
+- Android downloads started from Home continue when switching tabs. Navigation
+  and text inputs survive activity recreation, and Back closes network details.
+
+### Performance
+
+- Linux enables TUN TCP/UDP segmentation and receive offloads, batching packets
+  between the mesh and kernel to reduce per-packet work.
+- macOS batches packet-tunnel I/O. Peer traffic uses a bounded QUIC datagram
+  queue without adding another per-peer queue in the forwarding path.
+- Peer metrics report QUIC queue depth, congestion window, loss,
+  path MTU, and TUN offload and batching state for throughput diagnostics.
 
 ## [0.5.6] - 2026-10-01
 
@@ -94,6 +152,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Android release and nightly APKs use a permanent signing key so future updates
   preserve app data. Existing debug installs need a one-time backup and restore
   into the release app, which installs alongside the debug app.
+
+- `ray nuke --force` leaves the network running when another coordinator remains.
+  The last coordinator tells all peers to leave before closing connections, with
+  signed deletion records for peers that missed the notice.
 
 ## [0.5.4] - 2026-09-29
 

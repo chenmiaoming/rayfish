@@ -441,6 +441,10 @@ pub enum IpcMessage {
     ListLanPeers,
     /// `ray contact id`: print this node's contact id. Open read.
     ContactId,
+    /// Resolve a contact's signed record without dialing the peer. Open read.
+    ResolveContact {
+        contact_id: EndpointId,
+    },
     /// `ray contact rotate`: rotate this node's contact key (old id stops
     /// resolving once its pkarr record expires).
     RotateContact,
@@ -740,6 +744,10 @@ pub enum IpcMessage {
     /// This node's contact id (reply to `ContactId`/`RotateContact`).
     ContactIdResponse {
         contact_id: String,
+    },
+    /// The device endpoint advertised by a contact, not its paired user identity.
+    ContactResolved {
+        endpoint_id: EndpointId,
     },
     /// Reply to `ConfigGet`: `(key, value)` rows as `config::config_get` renders.
     ConfigValues {
@@ -1583,6 +1591,52 @@ pub struct ConnectionInfo {
     pub datagrams_tx: u64,
     pub datagrams_rx: u64,
     pub lost_packets: u64,
+    #[serde(default)]
+    pub quality: ConnectionQuality,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_issue: Option<ConnectionIssue>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    derive_more::IsVariant,
+    derive_more::Display,
+)]
+pub enum ConnectionQuality {
+    #[default]
+    #[display("good")]
+    Good,
+    #[display("degraded")]
+    Degraded,
+    #[display("congested")]
+    Congested,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    derive_more::IsVariant,
+    derive_more::Display,
+)]
+pub enum ConnectionIssue {
+    #[display("high latency")]
+    HighLatency,
+    #[display("packet loss")]
+    PacketLoss,
+    #[display("send queue full")]
+    SendQueue,
 }
 
 #[derive(
@@ -2569,6 +2623,22 @@ mod tests {
             IpcMessage::ContactIdResponse { contact_id } => assert_eq!(contact_id, "abc123"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn contact_lookup_roundtrip() {
+        let contact_id = iroh::SecretKey::from([7; 32]).public();
+        let endpoint_id = iroh::SecretKey::from([8; 32]).public();
+        let bytes = rmp_serde::to_vec_named(&IpcMessage::ResolveContact { contact_id }).unwrap();
+        assert!(matches!(
+            rmp_serde::from_slice::<IpcMessage>(&bytes).unwrap(),
+            IpcMessage::ResolveContact { contact_id: decoded } if decoded == contact_id
+        ));
+        let bytes = rmp_serde::to_vec_named(&IpcMessage::ContactResolved { endpoint_id }).unwrap();
+        assert!(matches!(
+            rmp_serde::from_slice::<IpcMessage>(&bytes).unwrap(),
+            IpcMessage::ContactResolved { endpoint_id: decoded } if decoded == endpoint_id
+        ));
     }
 
     #[test]

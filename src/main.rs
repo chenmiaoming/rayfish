@@ -160,6 +160,7 @@ fn json_requested(command: &Command) -> bool {
         | Command::Netcheck { json }
         | Command::Admin { json, .. }
         | Command::Firewall { json, .. }
+        | Command::Ssh { json, .. }
         | Command::ExitNode { json, .. }
         | Command::Mdns { json, .. }
         | Command::Dns { json, .. }
@@ -234,12 +235,12 @@ pub(crate) enum Command {
         #[arg(long)]
         delegate: Option<ipc::ManagedMachineSelector>,
     },
-    /// Destroy a network (coordinator only)
+    /// Leave a network, destroying it if the last coordinator
     Nuke {
         /// Three-word network name
         #[arg(add = complete::networks())]
         name: String,
-        /// Force destroy even if other members exist
+        /// Proceed even if other members exist
         #[arg(long)]
         force: bool,
     },
@@ -523,6 +524,14 @@ pub(crate) enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
+    /// Manage the embedded mesh SSH server and access rules
+    Ssh {
+        #[command(subcommand)]
+        action: SshAction,
+        /// Emit machine-readable JSON instead of styled text
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Offer or use an internet gateway
     ///
     /// Offer this node as a gateway, or route this node's traffic through one.
@@ -565,16 +574,20 @@ pub(crate) enum Command {
         /// New hostname (e.g. "alice" → alice.network.ray)
         name: String,
     },
-    /// Print a host's identity string
+    /// Print a host's or contact's identity string
     ///
     /// The value to paste into a `ray apply` spec's `aliases:` map. Resolves to
     /// the user identity if the device is paired, else the device's transport
     /// identity. Searches all networks; different identities sharing a name
     /// are listed in a table. The older `identityof <network> <hostname>` form
     /// limits the lookup to one network.
+    ///
+    /// A contact id resolves its signed discovery record without connecting to
+    /// the peer. This returns the advertised device identity, which may differ
+    /// from its paired user identity. Requires a running daemon.
     #[command(visible_alias = "whois")]
     Identityof {
-        /// Hostname to look up across all networks
+        /// Hostname to look up across all networks, or a contact id
         #[arg(add = complete::peers())]
         peer: String,
         /// Hostname for a scoped lookup, treating PEER as the network name
@@ -1749,6 +1762,7 @@ async fn run() -> Result<()> {
             json: _,
         } => ipc_admin(&network, action).await,
         Command::Firewall { action, json: _ } => ipc_firewall(action).await,
+        Command::Ssh { action, json: _ } => ipc_firewall_ssh(action).await,
         Command::ExitNode { action, json: _ } => ipc_exit_node(action).await,
         Command::Apply {
             spec,
@@ -2050,6 +2064,12 @@ mod tests {
                 Command::Identityof { peer, hostname: Some(hostname), json: true }
                     if peer == "network-a" && hostname == "build-box"
             ));
+            let contact = iroh::SecretKey::from([7; 32]).public().to_string();
+            let cli = Cli::try_parse_from(["ray", command, &contact, "--json"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Identityof { peer, hostname: None, json: true } if peer == contact
+            ));
         }
         assert!(Cli::try_parse_from(["ray", "identityof"]).is_err());
     }
@@ -2155,6 +2175,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ssh_commands_parse_at_root_and_under_firewall() {
+        for args in [&["ray", "ssh", "off"][..], &["ray", "fw", "ssh", "off"][..]] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Ssh {
+                    action: SshAction::Off,
+                    ..
+                } | Command::Firewall {
+                    action: FirewallAction::Ssh {
+                        action: SshAction::Off
+                    },
+                    ..
+                }
+            ));
+        }
+        let cli = Cli::try_parse_from(["ray", "ssh", "show", "--json"]).unwrap();
+        assert!(json_requested(&cli.command));
     }
 
     #[test]

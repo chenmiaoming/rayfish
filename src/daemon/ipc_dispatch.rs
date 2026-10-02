@@ -18,6 +18,7 @@ impl Daemon {
                 | IpcMessage::Connections
                 | IpcMessage::Requests { .. }
                 | IpcMessage::ContactId
+                | IpcMessage::ResolveContact { .. }
                 | IpcMessage::Ping { .. }
                 | IpcMessage::Netcheck
                 | IpcMessage::AliasList { .. }
@@ -200,6 +201,7 @@ impl Daemon {
                 | GlobalKey::DnsUpstreams
                 | GlobalKey::AutoUpdate
                 | GlobalKey::OnDemand
+                | GlobalKey::QuicCongestion
                 | GlobalKey::DownloadDir
                 | GlobalKey::DownloadUser),
             ) => k,
@@ -678,6 +680,20 @@ impl Daemon {
             IpcMessage::ContactId => IpcMessage::ContactIdResponse {
                 contact_id: self.contact_public.to_string(),
             },
+            IpcMessage::ResolveContact { contact_id } => {
+                let result = async {
+                    let client = dht::create_pkarr_client(
+                        &self.transport.endpoint,
+                        &self.transport.pkarr_relay_url,
+                    )?;
+                    dht::resolve_contact(&client, contact_id).await
+                }
+                .await;
+                match result {
+                    Ok(endpoint_id) => IpcMessage::ContactResolved { endpoint_id },
+                    Err(error) => ipc_err(format!("could not resolve contact: {error:#}")),
+                }
+            }
             IpcMessage::RotateContact => self.rotate_contact().await,
             IpcMessage::Ping {
                 peer,
@@ -687,5 +703,19 @@ impl Daemon {
             IpcMessage::Netcheck => self.netcheck().await,
             other => ipc_err(format!("unexpected message: {:?}", other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contact_lookup_is_an_open_read() {
+        let request = IpcMessage::ResolveContact {
+            contact_id: SecretKey::from([7; 32]).public(),
+        };
+        assert!(Daemon::is_open_read(&request));
+        assert!(Daemon::check_authorized(&request, None).is_none());
     }
 }

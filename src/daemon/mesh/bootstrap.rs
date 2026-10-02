@@ -256,30 +256,12 @@ async fn build_daemon_inner(
         None => config::contact_secret(&mut app_config).public(),
     };
     let alpns = initial_alpns();
-    #[cfg(target_os = "android")]
-    let relay_mode =
-        transport::build_relay_mode(&app_config.relay)?.unwrap_or_else(|| iroh::RelayMode::Default);
-    #[cfg(target_os = "android")]
-    let relay_configs = relay_mode
-        .relay_map()
-        .urls::<Vec<RelayUrl>>()
-        .into_iter()
-        .filter_map(|url| relay_mode.relay_map().get(&url).map(|config| (url, config)))
-        .collect();
     let use_tor = app_config
         .networks
         .iter()
         .any(|net| net.transport.as_ref().is_some_and(|t| t.is_tor()));
-    let (ep, warm_lookup) = transport::create_endpoint_with_alpns(
-        key.clone(),
-        alpns,
-        use_tor,
-        &app_config.relay,
-        &app_config.discovery_dns,
-        &app_config.dns_upstreams,
-        app_config.endpoint_hints.clone(),
-    )
-    .await?;
+    let (ep, warm_lookup) =
+        transport::create_endpoint_with_alpns(key.clone(), alpns, use_tor, &app_config).await?;
     *endpoint_out = Some(ep.clone());
 
     // Built before the blob store below, because the provider event pump that
@@ -544,8 +526,6 @@ async fn build_daemon_inner(
             lan_peers,
             warm_lookup,
             pkarr_relay_url,
-            #[cfg(target_os = "android")]
-            relay_configs,
         },
     ));
     // The per-peer connection driver is built once here and shared by the
@@ -722,7 +702,7 @@ async fn build_daemon_inner(
     let daemon = Arc::new(Daemon {
         transport,
         registry,
-        rtt_history: Mutex::new(Default::default()),
+        connection_history: Mutex::new(Default::default()),
         paired_network_joins: Arc::new(DashSet::new()),
         stats: Arc::clone(&stats),
         start: Instant::now(),
@@ -754,6 +734,7 @@ async fn build_daemon_inner(
         v4_bridge_token: Mutex::new(None),
     });
     daemon.management.bind_daemon(&daemon);
+    tokio::spawn(Arc::clone(&daemon.registry).republish_destructions());
 
     tokio::spawn(Arc::clone(&daemon).run_paired_network_sync());
 

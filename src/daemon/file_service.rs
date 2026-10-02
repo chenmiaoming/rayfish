@@ -303,10 +303,22 @@ impl FileService {
 
     /// `FILES_ALPN`: read a single `FileOffer` and queue it for `ray files`.
     /// Rejects offers whose claimed sender doesn't match the dialing identity.
+    /// An idle Android node also checks the current roster before reading an
+    /// offer, so unknown endpoints cannot make the phone process file metadata.
     pub(crate) async fn accept_file_offer(self: &Arc<Self>, conn: Connection) {
         let pending = Arc::clone(&self.pending_files);
         let counter = Arc::clone(&self.file_id_counter);
         let remote_id = conn.remote_id();
+        #[cfg(target_os = "android")]
+        if self.transport.is_suspended()
+            && self
+                .registry
+                .resolve_route(IpAddr::V6(derive_ipv6(&remote_id)))
+                .is_none()
+        {
+            conn.close(VarInt::from_u32(0), b"unknown file sender");
+            return;
+        }
         match conn.accept_bi().await {
             Ok((_send, mut recv)) => {
                 match control::recv_msg(&mut recv).await {

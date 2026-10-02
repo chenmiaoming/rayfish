@@ -79,7 +79,7 @@ impl DisplayOut for SshStateOutput<'_> {
         // Rules on an off server do not affect mesh traffic.
         if !self.enabled {
             println!("\nThese rules are not in effect: mesh SSH is off.");
-            println!("Start the server with `ray firewall ssh on`.");
+            println!("Start the server with `ray ssh on`.");
             return;
         }
         // Self-traffic uses loopback, so it bypasses the TUN's port rewrite.
@@ -266,9 +266,8 @@ fn ssh_to_ipc(action: SshAction) -> ipc::IpcMessage {
     }
 }
 
-/// `ray firewall ssh ...`: toggle the embedded mesh SSH server and manage
-/// per-network allow lists.
-async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
+/// Toggle the embedded mesh SSH server or manage per-network allow lists.
+pub(crate) async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
     // `show` filters the reply client-side, so keep its network before the move.
     let filter = match &action {
         SshAction::Show { network } => network.clone(),
@@ -285,7 +284,7 @@ async fn ipc_firewall_ssh(action: SshAction) -> Result<()> {
             port,
             networks,
         } => render_ssh_state(enabled, port, networks, filter.as_deref())?,
-        ipc::IpcMessage::Error { message } => fail_with("firewall ssh", &message),
+        ipc::IpcMessage::Error { message } => fail_with("ssh", &message),
         other => fail_unexpected(&other),
     }
     Ok(())
@@ -831,11 +830,52 @@ pub(crate) async fn ipc_apply(
                     }
                 }
             } else {
-                removal_failures = true;
-                eprintln!(
-                    "{}  {net_name}: host '{host}' is not controlled; cannot request leave",
-                    style::red("  !")
-                );
+                let peer = status_network.and_then(|network| {
+                    network
+                        .peers
+                        .iter()
+                        .find(|peer| peer.hostname.as_deref() == Some(host.as_ref()))
+                });
+                if let Some(peer) = peer {
+                    match ipc_request(ipc::IpcMessage::Kick {
+                        network: net_name.clone(),
+                        peer: peer.endpoint_id.to_string(),
+                        confirm: true,
+                    })
+                    .await
+                    {
+                        Ok(ipc::IpcMessage::Ok { message }) => {
+                            println!("{}  {message}", style::faint("kicked:"));
+                        }
+                        Ok(ipc::IpcMessage::Error { message }) => {
+                            removal_failures = true;
+                            eprintln!(
+                                "{}  {net_name}: failed to kick '{host}': {message}",
+                                style::red("  !")
+                            );
+                        }
+                        Ok(other) => {
+                            removal_failures = true;
+                            eprintln!(
+                                "{}  {net_name}: unexpected kick response for '{host}': {other:?}",
+                                style::red("  !")
+                            );
+                        }
+                        Err(error) => {
+                            removal_failures = true;
+                            eprintln!(
+                                "{}  {net_name}: failed to kick '{host}': {error}",
+                                style::red("  !")
+                            );
+                        }
+                    }
+                } else {
+                    removal_failures = true;
+                    eprintln!(
+                        "{}  {net_name}: host '{host}' is not in the roster and is not controlled",
+                        style::red("  !")
+                    );
+                }
             }
         }
 
@@ -938,6 +978,7 @@ pub(crate) async fn ipc_apply(
             );
         }
     }
+    anyhow::ensure!(!removal_failures, "some members could not be removed");
     anyhow::ensure!(!ssh_failures, "some SSH grants could not be applied");
     Ok(())
 }
@@ -1130,7 +1171,33 @@ fn identity_matches_json(matches: &[HostIdentityMatch<'_>]) -> serde_json::Value
     }
 }
 
+#[derive(serde::Serialize)]
+struct ContactIdentityOutput {
+    contact_id: EndpointId,
+    endpoint_id: EndpointId,
+}
+
+impl DisplayOut for ContactIdentityOutput {
+    fn print_human(&self) {
+        println!("{}", self.endpoint_id);
+    }
+}
+
 pub(crate) async fn cmd_identityof(peer: &str, hostname: Option<&str>) -> Result<()> {
+    if hostname.is_none()
+        && let Ok(contact_id) = peer.parse::<EndpointId>()
+    {
+        let mut stream = ipc::connect().await?;
+        ipc::send(&mut stream, ipc::IpcMessage::ResolveContact { contact_id }).await?;
+        return match ipc::recv(&mut stream).await? {
+            ipc::IpcMessage::ContactResolved { endpoint_id } => printout(&ContactIdentityOutput {
+                contact_id,
+                endpoint_id,
+            }),
+            ipc::IpcMessage::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected contact lookup response: {other:?}"),
+        };
+    }
     let (self_id, networks) = ipc_status_full().await?;
     let network = hostname.map(|_| peer);
     let matches = host_identity_matches(&networks, &self_id, hostname.unwrap_or(peer), network)?;

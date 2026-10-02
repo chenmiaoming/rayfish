@@ -147,6 +147,19 @@ private struct ContentView: View {
                     }
                     .foregroundColor(RayfishTheme.muted)
                 }
+                if let warning = controller.status?.connectionWarning {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "network.slash")
+                        Text(warning).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(RayfishTheme.text(14))
+                    .foregroundColor(RayfishTheme.amber)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RayfishTheme.amber.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(RayfishTheme.amber.opacity(0.25)))
+                }
                 if let error = controller.error {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: "exclamationmark.triangle")
@@ -342,7 +355,7 @@ private struct NetworkCard: View {
             .padding(14)
             ForEach(network.peers) { peer in
                 Rectangle().fill(RayfishTheme.line).frame(height: 1)
-                PeerRow(peer: peer, domains: [peer.domain(in: network.name)])
+                PeerRow(peer: peer, domains: peer.hostname.isEmpty ? [] : [peer.domain(in: network.name)])
                     .padding(.horizontal, 14).padding(.vertical, 11)
             }
             if network.peers.isEmpty {
@@ -376,6 +389,12 @@ private struct PeerRow: View {
             if let latency = peer.latencyMs { Text("\(latency) ms").foregroundColor(RayfishTheme.faint) }
         }
         .font(RayfishTheme.mono(12))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard let domain = domains.first else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(domain, forType: .string)
+        }
         .contextMenu {
             ForEach(domains, id: \.self) { domain in
                 Button("Copy \(domain)") {
@@ -397,7 +416,7 @@ private struct DevicesView: View {
     }
     private func domains(for peer: ProviderPeer) -> [String] {
         (controller.status?.networks ?? []).compactMap { network in
-            network.peers.first { $0.ipv6 == peer.ipv6 }?.domain(in: network.name)
+            network.peers.first { $0.ipv6 == peer.ipv6 && !$0.hostname.isEmpty }?.domain(in: network.name)
         }.sorted()
     }
     var body: some View {
@@ -570,6 +589,7 @@ private struct SettingsView: View {
     let updater: SPUUpdater?
     @State private var shellCommandMessage: String?
     @State private var automaticUpdatesEnabled = false
+    @State private var congestionNeedsReconnect = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Settings").font(RayfishTheme.heading()).foregroundColor(RayfishTheme.ink)
@@ -665,10 +685,44 @@ private struct SettingsView: View {
             .disabled(controller.status == nil || controller.isLoading)
             .padding(18).rayfishCard()
             VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Loss-tolerant congestion control")
+                    Spacer()
+                    Toggle("Loss-tolerant congestion control", isOn: Binding(
+                        get: { controller.status?.quicLossTolerant ?? false },
+                        set: { enabled in
+                            Task {
+                                await controller.setSetting(.quicLossTolerant, enabled: enabled)
+                                congestionNeedsReconnect = controller.error == nil
+                            }
+                        }
+                    ))
+                    .labelsHidden()
+                }
+                Text("Experimental. Keeps throughput up on lossy links instead of slowing down on every lost packet.")
+                    .foregroundColor(RayfishTheme.muted)
+                if congestionNeedsReconnect {
+                    HStack {
+                        Text("Reconnect to apply this change.").foregroundColor(RayfishTheme.amber)
+                        Spacer()
+                        Button("Reconnect now") {
+                            congestionNeedsReconnect = false
+                            Task { await controller.reconnect() }
+                        }
+                    }
+                }
+                if controller.status == nil {
+                    Text("Connect to view and change this setting.").foregroundColor(RayfishTheme.faint)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(controller.status == nil || controller.isLoading)
+            .padding(18).rayfishCard()
+            VStack(alignment: .leading, spacing: 14) {
                 Text("Command line").font(RayfishTheme.heading(15))
                 Text("ray status").font(RayfishTheme.mono(13)).foregroundColor(RayfishTheme.rose)
                 HStack {
-                    Text("Make ray available in new \(ShellCommandInstaller.shellName()) terminals.")
+                    Text("Make ray and tab completion available in new \(ShellCommandInstaller.shellName()) terminals.")
                         .foregroundColor(RayfishTheme.muted)
                     Spacer()
                     Button("Install shell command") {
