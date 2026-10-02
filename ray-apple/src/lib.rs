@@ -332,67 +332,75 @@ impl Node {
                 Vec::new()
             }
         };
-        Ok(NodeStatus {
-            requests: NodeRequestStatus {
-                pending_requests,
-                contact_id,
-                connection_requests,
-            },
-            files: incoming_files(state.list_files())?,
-            ssh: NodeSshStatus {
-                enabled: settings.ssh_enabled,
-                rules: settings
-                    .networks
-                    .iter()
-                    .flat_map(|network| {
-                        network.ssh_allow.iter().map(|rule| SshRule {
-                            network: network.name.clone(),
-                            peer: rule.peer.clone(),
-                            users: rule.users.clone(),
-                        })
-                    })
-                    .collect(),
-            },
-            services: NodeServiceStatus {
-                dns_enabled: settings.dns_mode.enabled(),
-                mdns_enabled: settings.mdns_enabled,
-                mdns_active,
-                v4_bridge_enabled: settings.v4_bridge,
-            },
-            mesh: NodeMeshStatus {
-                active,
-                ipv6: membership::derive_ipv6(&endpoint_id).to_string(),
-                networks: networks
+        let requests = NodeRequestStatus {
+            pending_requests,
+            contact_id,
+            connection_requests,
+        };
+        let files = incoming_files(state.list_files())?;
+        let rules = settings
+            .networks
+            .iter()
+            .flat_map(|network| {
+                network.ssh_allow.iter().map(|rule| SshRule {
+                    network: network.name.clone(),
+                    peer: rule.peer.clone(),
+                    users: rule.users.clone(),
+                })
+            })
+            .collect();
+        let ssh = NodeSshStatus {
+            enabled: settings.ssh_enabled,
+            rules,
+        };
+        let services = NodeServiceStatus {
+            dns_enabled: settings.dns_mode.enabled(),
+            mdns_enabled: settings.mdns_enabled,
+            mdns_active,
+            v4_bridge_enabled: settings.v4_bridge,
+        };
+        let ipv6 = membership::derive_ipv6(&endpoint_id).to_string();
+        let networks = networks
+            .into_iter()
+            .map(|network| Network {
+                name: network.name,
+                hostname: network.my_hostname.unwrap_or_default(),
+                ipv6: network.my_ipv6.to_string(),
+                role: network.role.to_string(),
+                peers: network
+                    .peers
                     .into_iter()
-                    .map(|network| Network {
-                        name: network.name,
-                        hostname: network.my_hostname.unwrap_or_default(),
-                        ipv6: network.my_ipv6.to_string(),
-                        role: network.role.to_string(),
-                        peers: network
-                            .peers
-                            .into_iter()
-                            .map(|peer| Peer {
-                                identity: peer.endpoint_id.to_string(),
-                                hostname: peer
-                                    .hostname
-                                    .unwrap_or_else(|| peer.endpoint_id.to_string()),
-                                ipv6: peer.ipv6.to_string(),
-                                state: peer
-                                    .connection
-                                    .as_ref()
-                                    .map(|connection| connection.conn_type.to_string())
-                                    .unwrap_or_else(|| peer.state.to_string()),
-                                latency_ms: peer
-                                    .connection
-                                    .and_then(|connection| connection.rtt_ms)
-                                    .map(|latency| latency.round() as u32),
-                                is_own_device: peer.is_own_device,
-                            })
-                            .collect(),
+                    .map(|peer| Peer {
+                        identity: peer.endpoint_id.to_string(),
+                        hostname: peer
+                            .hostname
+                            .unwrap_or_else(|| peer.endpoint_id.to_string()),
+                        ipv6: peer.ipv6.to_string(),
+                        state: peer
+                            .connection
+                            .as_ref()
+                            .map(|connection| connection.conn_type.to_string())
+                            .unwrap_or_else(|| peer.state.to_string()),
+                        latency_ms: peer
+                            .connection
+                            .and_then(|connection| connection.rtt_ms)
+                            .map(|latency| latency.round() as u32),
+                        is_own_device: peer.is_own_device,
                     })
                     .collect(),
-            },
+            })
+            .collect();
+        let mesh = NodeMeshStatus {
+            active,
+            ipv6,
+            networks,
+        };
+        Ok(NodeStatus {
+            mesh,
+            requests,
+            files,
+            ssh,
+            services,
         })
     }
 
