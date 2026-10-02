@@ -23,7 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   another SSH service can use mesh port 22.
 - Experimental: `ray config set quic-congestion loss-tolerant` switches the
   tunnel to a congestion controller that ignores ordinary packet loss. It
-  applies on restart; the default stays `cubic`.
+  applies on restart; the default stays `cubic`. The macOS app has a toggle
+  for it in Settings, and tab completion offers both values.
 
 ### Changed
 

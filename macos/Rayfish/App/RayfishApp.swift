@@ -589,6 +589,7 @@ private struct SettingsView: View {
     let updater: SPUUpdater?
     @State private var shellCommandMessage: String?
     @State private var automaticUpdatesEnabled = false
+    @State private var congestionNeedsReconnect = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Settings").font(RayfishTheme.heading()).foregroundColor(RayfishTheme.ink)
@@ -678,6 +679,40 @@ private struct SettingsView: View {
                 }
                 if controller.status == nil {
                     Text("Connect to view and change DNS settings.").foregroundColor(RayfishTheme.faint)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(controller.status == nil || controller.isLoading)
+            .padding(18).rayfishCard()
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Loss-tolerant congestion control")
+                    Spacer()
+                    Toggle("Loss-tolerant congestion control", isOn: Binding(
+                        get: { controller.status?.quicLossTolerant ?? false },
+                        set: { enabled in
+                            Task {
+                                await controller.setSetting(.quicLossTolerant, enabled: enabled)
+                                congestionNeedsReconnect = controller.error == nil
+                            }
+                        }
+                    ))
+                    .labelsHidden()
+                }
+                Text("Experimental. Keeps throughput up on lossy links instead of slowing down on every lost packet.")
+                    .foregroundColor(RayfishTheme.muted)
+                if congestionNeedsReconnect {
+                    HStack {
+                        Text("Reconnect to apply this change.").foregroundColor(RayfishTheme.amber)
+                        Spacer()
+                        Button("Reconnect now") {
+                            congestionNeedsReconnect = false
+                            Task { await controller.reconnect() }
+                        }
+                    }
+                }
+                if controller.status == nil {
+                    Text("Connect to view and change this setting.").foregroundColor(RayfishTheme.faint)
                 }
             }
             .toggleStyle(.switch)

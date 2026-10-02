@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rayfish::config;
+use rayfish::config::QuicCongestion;
 use rayfish::config::settings::GlobalKey;
 #[cfg(target_os = "macos")]
 use rayfish::daemon::start_embedded_ipc;
@@ -94,6 +95,7 @@ pub struct NodeServiceStatus {
     pub mdns_enabled: bool,
     pub mdns_active: bool,
     pub v4_bridge_enabled: bool,
+    pub quic_loss_tolerant: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -130,11 +132,14 @@ pub struct IncomingFile {
     pub destination: Option<String>,
 }
 
-#[derive(uniffi::Enum)]
+#[derive(Clone, Copy, uniffi::Enum)]
 pub enum GlobalSetting {
     Dns,
     Mdns,
     Ssh,
+    /// On selects the loss-tolerant QUIC congestion controller, off cubic.
+    /// Applies when the endpoint next binds.
+    QuicLossTolerant,
 }
 
 impl From<GlobalSetting> for GlobalKey {
@@ -143,6 +148,7 @@ impl From<GlobalSetting> for GlobalKey {
             GlobalSetting::Dns => Self::Dns,
             GlobalSetting::Mdns => Self::Mdns,
             GlobalSetting::Ssh => Self::Ssh,
+            GlobalSetting::QuicLossTolerant => Self::QuicCongestion,
         }
     }
 }
@@ -367,6 +373,7 @@ impl Node {
             mdns_enabled: settings.mdns_enabled,
             mdns_active,
             v4_bridge_enabled: settings.v4_bridge,
+            quic_loss_tolerant: settings.quic_congestion == QuicCongestion::LossTolerant,
         };
         let ipv6 = membership::derive_ipv6(&endpoint_id).to_string();
         let connection_warning = networks
@@ -484,16 +491,15 @@ impl Node {
                 .block_on(state.set_mdns_enabled(enabled))
                 .map_err(AppleError::network);
         }
-        config::update_settings(|settings| {
-            config::config_set(
-                settings,
-                key.into(),
-                if enabled { "on" } else { "off" },
-                false,
-            )
-        })
-        .map(|_| ())
-        .map_err(AppleError::network)
+        let value = match (key, enabled) {
+            (GlobalSetting::QuicLossTolerant, true) => QuicCongestion::LossTolerant.as_ref(),
+            (GlobalSetting::QuicLossTolerant, false) => QuicCongestion::Cubic.as_ref(),
+            (_, true) => "on",
+            (_, false) => "off",
+        };
+        config::update_settings(|settings| config::config_set(settings, key.into(), value, false))
+            .map(|_| ())
+            .map_err(AppleError::network)
     }
 
     pub fn set_ssh_rule(
@@ -1023,6 +1029,9 @@ mod tests {
                 let disabled = node.status().unwrap();
                 assert!(!disabled.services.mdns_active);
                 assert_eq!(disabled.mesh.active, before.mesh.active);
+                node.set_setting(GlobalSetting::QuicLossTolerant, true)
+                    .unwrap();
+                assert!(node.status().unwrap().services.quic_loss_tolerant);
                 assert!(Arc::ptr_eq(&state, &node.state().unwrap()));
                 assert!(matches!(
                     node.connect_peer("invalid contact id".into(), None),
@@ -1059,6 +1068,7 @@ mod tests {
                 assert!(!restarted.services.dns_enabled);
                 assert!(!restarted.services.mdns_enabled);
                 assert!(!restarted.services.mdns_active);
+                assert!(restarted.services.quic_loss_tolerant);
             }
             let started = Instant::now();
             node.stop();

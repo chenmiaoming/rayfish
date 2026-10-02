@@ -154,6 +154,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             case .dns: key = .dns
             case .mdns: key = .mdns
             case .ssh: key = .ssh
+            case .quicLossTolerant: key = .quicLossTolerant
             }
             try node.setSetting(key: key, enabled: enabled)
         case .setSSHRule:
@@ -290,7 +291,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             },
             sshEnabled: status.ssh.enabled,
             sshRules: status.ssh.rules.map { ProviderSSHRule(network: $0.network, peer: $0.peer, users: $0.users) },
-            connectionWarning: status.connectionWarning
+            connectionWarning: status.connectionWarning,
+            quicLossTolerant: status.services.quicLossTolerant
         )
     }
 }

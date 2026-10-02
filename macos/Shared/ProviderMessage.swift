@@ -46,7 +46,7 @@ struct ProviderRequest: Codable {
 }
 
 enum ProviderSetting: String, Codable {
-    case dns, mdns, ssh
+    case dns, mdns, ssh, quicLossTolerant
 }
 
 struct ProviderResponse: Codable {
@@ -93,6 +93,7 @@ struct ProviderStatus: Codable, Equatable {
     var sshEnabled: Bool? = nil
     var sshRules: [ProviderSSHRule]? = nil
     var connectionWarning: String? = nil
+    var quicLossTolerant: Bool? = nil
 }
 
 struct ProviderSSHRule: Codable, Equatable, Identifiable {
