@@ -1778,6 +1778,24 @@ impl AcceptHandler {
     /// roster, dropped it). Returns true if the message was consumed.
     pub(crate) fn handle_common(&self, peer_id: EndpointId, msg: &ControlMsg) -> bool {
         match *msg {
+            ControlMsg::SignedRecord { ref packet } => {
+                let (state, network) = match self {
+                    Self::Coordinator(s) => (&s.state, &s.network_name),
+                    Self::Member(s) => (&s.state, &s.network_name),
+                };
+                let Ok(key) = state.read().map(|s| s.network_public_key) else {
+                    return true;
+                };
+                if let Ok(packet) = dht::verify_network_record(packet, key)
+                    && dht::destruction::is_destroyed(&packet)
+                {
+                    // Destruction is terminal, regardless of timestamp. A newer
+                    // live record cannot restore a destroyed network identity.
+                    self.registry().schedule_destruction(network, packet);
+                    return true;
+                }
+                false
+            }
             // A member tells us it does (or no longer does) offer itself as an
             // exit node. Only a network-key holder records it on the sender's
             // roster entry and republishes (`record_exit_offer` no-ops
@@ -1811,6 +1829,13 @@ impl AcceptHandler {
         msg: ControlMsg,
     ) -> Option<Ipv6Addr> {
         if self.handle_common(peer_id, &msg) {
+            return None;
+        }
+        let destroyed = match self {
+            Self::Coordinator(s) => s.state.read().map(|s| s.destroyed).unwrap_or(true),
+            Self::Member(s) => s.state.read().map(|s| s.destroyed).unwrap_or(true),
+        };
+        if destroyed {
             return None;
         }
         match self {
@@ -2333,6 +2358,7 @@ mod direct_grant_tests {
             approved: ApprovedList::new(),
             snapshot: None,
             snapshot_commit: Arc::new(AsyncMutex::new(())),
+            destroyed: false,
             converged_hash: None,
             unconfirmed_durable_hash: None,
             network_secret_key: None,

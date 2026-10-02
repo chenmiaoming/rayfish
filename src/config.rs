@@ -110,6 +110,7 @@ mod option_secret_key_hex {
     }
 }
 
+pub(crate) mod destruction;
 mod write;
 
 pub use write::{restrict_perms, write_file};
@@ -1550,6 +1551,15 @@ pub fn save_network(net: &NetworkConfig) -> Result<()> {
 /// Caller holds [`NETWORK_CONFIG_LOCK`] when this runs in production.
 fn save_network_unlocked(dir: &Path, net: &NetworkConfig) -> Result<()> {
     validate_net_name(&net.name)?;
+    if let Some(key) = net
+        .network_public_key
+        .or_else(|| net.network_secret_key.as_ref().map(SecretKey::public))
+    {
+        anyhow::ensure!(
+            destruction::load_in(dir, key)?.is_none(),
+            "network has been destroyed"
+        );
+    }
     let ndir = dir.join(NETWORKS_SUBDIR);
     let path = ndir.join(format!("{}.toml", net.name));
     let contents = toml::to_string_pretty(net).context("serializing network config")?;

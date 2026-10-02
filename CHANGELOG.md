@@ -28,6 +28,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Android firewall forms keep the selected peer after activity recreation.
 - Android shows file transfer cancellation only for outgoing transfers.
+- Coordinators that leave with `ray nuke --force` publish their departure so
+  offline coordinators do not restore a stale roster. Valid destruction notices
+  are accepted even when the local roster is stale.
 
 - Bash completion installed by the macOS app now registers in new terminals.
 - Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.
@@ -125,6 +128,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Android release and nightly APKs use a permanent signing key so future updates
   preserve app data. Existing debug installs need a one-time backup and restore
   into the release app, which installs alongside the debug app.
+
+- `ray nuke --force` leaves the network running when another coordinator remains.
+  The last coordinator tells all peers to leave before closing connections, with
+  signed deletion records for peers that missed the notice.
 
 ## [0.5.4] - 2026-09-29
 
