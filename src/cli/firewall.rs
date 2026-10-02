@@ -1171,7 +1171,33 @@ fn identity_matches_json(matches: &[HostIdentityMatch<'_>]) -> serde_json::Value
     }
 }
 
+#[derive(serde::Serialize)]
+struct ContactIdentityOutput {
+    contact_id: EndpointId,
+    endpoint_id: EndpointId,
+}
+
+impl DisplayOut for ContactIdentityOutput {
+    fn print_human(&self) {
+        println!("{}", self.endpoint_id);
+    }
+}
+
 pub(crate) async fn cmd_identityof(peer: &str, hostname: Option<&str>) -> Result<()> {
+    if hostname.is_none()
+        && let Ok(contact_id) = peer.parse::<EndpointId>()
+    {
+        let mut stream = ipc::connect().await?;
+        ipc::send(&mut stream, ipc::IpcMessage::ResolveContact { contact_id }).await?;
+        return match ipc::recv(&mut stream).await? {
+            ipc::IpcMessage::ContactResolved { endpoint_id } => printout(&ContactIdentityOutput {
+                contact_id,
+                endpoint_id,
+            }),
+            ipc::IpcMessage::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected contact lookup response: {other:?}"),
+        };
+    }
     let (self_id, networks) = ipc_status_full().await?;
     let network = hostname.map(|_| peer);
     let matches = host_identity_matches(&networks, &self_id, hostname.unwrap_or(peer), network)?;

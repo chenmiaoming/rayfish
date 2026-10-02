@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray identityof <contact-id>` looks up the advertised device identity without
+  connecting to the peer or requesting approval.
+
 - Android can send files from Home and network details. Home shows incoming and
   outgoing transfer progress and recent results separately from access requests.
 

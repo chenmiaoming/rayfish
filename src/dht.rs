@@ -272,10 +272,9 @@ pub async fn resolve_contact(
     client: &PkarrRelayClient,
     contact_pubkey: EndpointId,
 ) -> Result<EndpointId> {
-    let packet = client
-        .resolve(contact_pubkey)
+    let packet = resolve_packet(client, contact_pubkey)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to resolve contact record: {e:#}"))?;
+        .context("failed to resolve contact record")?;
     decode_contact_record(&packet)
 }
 
@@ -286,7 +285,65 @@ pub async fn resolve_contact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::SecretKey;
+    use std::net::Ipv4Addr;
+
+    use iroh::{SecretKey, endpoint::presets};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn contact_lookup_verifies_the_record_without_a_peer_connection() {
+        let contact = SecretKey::from([7; 32]);
+        let endpoint_id = SecretKey::from([8; 32]).public();
+        let valid = encode_contact_record(&contact, endpoint_id)
+            .unwrap()
+            .to_relay_payload();
+        let forged = encode_contact_record(&SecretKey::from([9; 32]), endpoint_id)
+            .unwrap()
+            .to_relay_payload();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let url = Url::parse(&format!("http://{}/pkarr", listener.local_addr().unwrap())).unwrap();
+        let path = format!("GET /pkarr/{} HTTP/1.1\r\n", contact.public().to_z32());
+        let server = tokio::spawn(async move {
+            for (status, payload) in [
+                ("200 OK", valid),
+                ("200 OK", forged),
+                ("404 Not Found", vec![]),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    assert!(count > 0 && request.len() < 16384);
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                assert!(request.starts_with(path.as_bytes()));
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(&payload).await.unwrap();
+            }
+        });
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let client = create_pkarr_client(&endpoint, &url).unwrap();
+        assert_eq!(
+            resolve_contact(&client, contact.public()).await.unwrap(),
+            endpoint_id
+        );
+        assert!(resolve_contact(&client, contact.public()).await.is_err());
+        assert!(resolve_contact(&client, contact.public()).await.is_err());
+        server.await.unwrap();
+        endpoint.close().await;
+    }
 
     #[test]
     fn relay_url_defaults_when_unset() {

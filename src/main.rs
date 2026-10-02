@@ -574,16 +574,20 @@ pub(crate) enum Command {
         /// New hostname (e.g. "alice" → alice.network.ray)
         name: String,
     },
-    /// Print a host's identity string
+    /// Print a host's or contact's identity string
     ///
     /// The value to paste into a `ray apply` spec's `aliases:` map. Resolves to
     /// the user identity if the device is paired, else the device's transport
     /// identity. Searches all networks; different identities sharing a name
     /// are listed in a table. The older `identityof <network> <hostname>` form
     /// limits the lookup to one network.
+    ///
+    /// A contact id resolves its signed discovery record without connecting to
+    /// the peer. This returns the advertised device identity, which may differ
+    /// from its paired user identity. Requires a running daemon.
     #[command(visible_alias = "whois")]
     Identityof {
-        /// Hostname to look up across all networks
+        /// Hostname to look up across all networks, or a contact id
         #[arg(add = complete::peers())]
         peer: String,
         /// Hostname for a scoped lookup, treating PEER as the network name
@@ -2059,6 +2063,12 @@ mod tests {
                 cli.command,
                 Command::Identityof { peer, hostname: Some(hostname), json: true }
                     if peer == "network-a" && hostname == "build-box"
+            ));
+            let contact = iroh::SecretKey::from([7; 32]).public().to_string();
+            let cli = Cli::try_parse_from(["ray", command, &contact, "--json"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Identityof { peer, hostname: None, json: true } if peer == contact
             ));
         }
         assert!(Cli::try_parse_from(["ray", "identityof"]).is_err());
