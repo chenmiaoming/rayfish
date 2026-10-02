@@ -20,6 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- IPv4 listener bridging is enabled by default on fresh installs and starts
+  with the macOS app's VPN. An explicit `v4-bridge off` setting is preserved.
 - Coordinators that leave with `ray nuke --force` publish their departure so
   offline coordinators do not restore a stale roster. Valid destruction notices
   are accepted even when the local roster is stale.
