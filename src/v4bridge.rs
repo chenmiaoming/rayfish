@@ -102,7 +102,7 @@ impl V4Bridge {
         Self { v6, ssh_port: None }
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", all(unix, test)))]
     pub(crate) fn with_ssh_port(mut self, port: u16) -> Self {
         self.ssh_port = Some(port);
         self

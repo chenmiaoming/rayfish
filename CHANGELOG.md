@@ -8,12 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Android can send files from Home and network details. Home shows incoming and
+  outgoing transfer progress and recent results separately from access requests.
+
 - `ray ssh on|off` enables or disables mesh SSH and saves the setting. The
   `ray ssh` command also manages SSH grants and shows server state.
 - Mesh SSH can use a different port with `ray config set ssh-port <port>`, so
   another SSH service can use mesh port 22.
 
 ### Changed
+
+- Android shows device names instead of IPv6 addresses, uses larger text, and
+  distinguishes VPN connectivity from file-only standby on Home.
 
 - Android keeps its file relay reachable while idle so peers can deliver file
   offers, while mesh links still close until the phone sends traffic.
@@ -24,6 +30,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with the macOS app's VPN. An explicit `v4-bridge off` setting is preserved.
 - The macOS app bridges IPv4 services through its background helper so macOS
   can deliver mesh connections to them, including when mesh SSH is disabled.
+- Android firewall forms keep the selected peer after activity recreation.
+- Android shows file transfer cancellation only for outgoing transfers.
 - Coordinators that leave with `ray nuke --force` publish their departure so
   offline coordinators do not restore a stale roster. Valid destruction notices
   are accepted even when the local roster is stale.
@@ -45,6 +53,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   roster lists it but the machine does not have that network active.
 - `ray apply` kicks removed hosts from closed networks even after their managed
   machine record is gone, and reports failed removals as errors.
+
+- Android network sheets remain scrollable with the keyboard open or in landscape.
+- Android keeps the last known status when a refresh fails and offers Retry.
+  Foreground updates now share one reader across tabs and activity recreation.
+
+- Android downloads started from Home continue when switching tabs. Navigation
+  and text inputs survive activity recreation, and Back closes network details.
 
 ## [0.5.6] - 2026-10-01
 
