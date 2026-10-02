@@ -40,8 +40,7 @@ wait_all_ssh "$A" "$B" "$C"
 seed_known_hosts "$A" "$B" "$C"
 reset_state "$A" "$B" "$C"
 deploy_all "$ROOT" "$A" "$B" "$C"
-for h in "$A" "$B" "$C"; do on "$h" 'ray up' >/dev/null 2>&1 || true; done
-wait_daemons "$A" "$B" "$C"
+activate_daemons "$A" "$B" "$C" || summary
 
 # ---------------------------------------------------------------------------
 step "1. srv-a creates the closed network"
@@ -152,9 +151,8 @@ fi
 # srv-c joins unattended; only srv-b is online to admit it.
 on "$C" "ray join $REUSABLE --hostname srv-c --auto-accept-firewall" 2>&1 | strip | sed 's/^/   c| /'
 wait_roster "$B" srv-c
-on "$A" 'systemctl start rayfish' >/dev/null 2>&1 || true     # bring the coordinator back
-on "$A" 'ray up' >/dev/null 2>&1 || true
-wait_daemons "$A"
+on "$A" 'systemctl start rayfish' || { fail "srv-a daemon could not be started"; summary; }
+activate_daemons "$A" || summary
 
 # ---------------------------------------------------------------------------
 step "6. hostname change propagates to roster + magic DNS"
@@ -184,10 +182,10 @@ else
 fi
 on "$A" "ray nuke $NET --force" 2>&1 | strip | sed 's/^/   a| /'
 # After nuke the coordinator drops the network locally.
-if retry_until 30 "! has_net '$A' '$NET'"; then
+if retry_until 30 "net_absent '$A' '$NET'"; then
   pass "nuke removed the network from the coordinator"
 else
-  fail "network still present on coordinator after nuke"
+  fail "could not verify network removed from coordinator after nuke"
 fi
 
 # ---------------------------------------------------------------------------
@@ -200,7 +198,7 @@ on "$A" "printf 'networks:\n  demo:\n    srv-a:\n      allows:\n        \"*\": i
 on "$A" 'ray apply /tmp/spec.yaml --dry-run' 2>&1 | strip | sed 's/^/   a| /'
 on "$A" 'ray apply /tmp/spec.yaml --dry-run' 2>&1 | strip | grep -qi 'demo' \
   && pass "ray apply --dry-run normalizes the spec" || fail "ray apply --dry-run did not echo the spec"
-! has_net "$A" demo && pass "dry-run created no network" || fail "dry-run unexpectedly created 'demo'"
+net_absent "$A" demo && pass "dry-run created no network" || fail "could not verify dry-run left 'demo' absent"
 
 # ---------------------------------------------------------------------------
 summary

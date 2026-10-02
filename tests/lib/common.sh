@@ -133,6 +133,25 @@ wait_daemons(){
   done
 }
 
+# activate_daemons <ip...> : wait for IPC before `ray up`, then verify activation.
+# Type=simple service starts return before the daemon's IPC socket is ready.
+activate_daemons(){
+  local ip
+  for ip in "$@"; do
+    if ! retry_until 60 "on '$ip' 'ray status' >/dev/null 2>&1"; then
+      fail "daemon not responding on $ip"; return 1
+    fi
+    if ! on "$ip" 'ray up'; then
+      fail "could not activate daemon on $ip"; return 1
+    fi
+    if retry_until 30 "status_json '$ip' | jq -e '.active == true' >/dev/null 2>&1"; then
+      pass "daemon active on $ip"
+    else
+      fail "daemon did not become active on $ip"; return 1
+    fi
+  done
+}
+
 # ---------------------------------------------------------------------------
 # JSON-backed status helpers. Every `ray` subcommand takes a global `--json`
 # flag (color/spinners off, machine-readable). We run it on the remote host and
@@ -255,6 +274,15 @@ has_net(){
     '(.networks // []) | map(select(.name == $n)) | .[0].name // empty')" ]]
 }
 
+# net_absent <ip> <net> : prove absence only after a successful status query.
+net_absent(){
+  local json
+  json="$(status_json "$1")" || return 1
+  echo "$json" | jq -e --arg n "$2" '
+    type == "object" and (.networks | type == "array")
+    and all(.networks[]; .name != $n)' >/dev/null 2>&1
+}
+
 # holds_key <ip> <net> : exit 0 if this node holds the network key (admin/coordinator).
 holds_key(){
   on "$1" "ray admin $2 list --json" 2>/dev/null | jq -e 'any(.[]; .self == true)' >/dev/null 2>&1
@@ -325,7 +353,7 @@ stop_tcp_listener(){ on "$1" "pkill -f 'http.server $2'" >/dev/null 2>&1 || true
 # _cleanup_udp_receiver <dst-pub-ip> <port> : kill any running UDP test receiver
 # on the host and remove all marker/pid files.
 _cleanup_udp_receiver(){
-  on "$1" "[ -f /tmp/udp_pid_$2 ] && kill \$(cat /tmp/udp_pid_$2) 2>/dev/null || true; rm -f /tmp/udp_ready_$2 /tmp/udp_got_$2 /tmp/udp_pid_$2" >/dev/null 2>&1 || true
+  on "$1" "[ -f /tmp/udp_pid_$2 ] && kill \$(cat /tmp/udp_pid_$2) 2>/dev/null || true; rm -f /tmp/udp_ready_$2 /tmp/udp_got_$2 /tmp/udp_error_$2 /tmp/udp_pid_$2" >/dev/null 2>&1 || true
 }
 
 # udp_probe <from-pub-ip> <dst-pub-ip> <dst-vpn-ip> <port> : echo OPEN if a UDP
@@ -341,13 +369,13 @@ udp_probe(){
   local from_pub="$1" dst_pub="$2" dst_vpn="$3" port="$4"
   # AF_INET6 on both ends: <dst-vpn-ip> is a mesh address and there is no other
   # family to fall back to, so an AF_INET socket here never sees the datagram.
-  if ! on "$dst_pub" "[ -f /tmp/udp_pid_$port ] && kill \$(cat /tmp/udp_pid_$port) 2>/dev/null || true; rm -f /tmp/udp_ready_$port /tmp/udp_got_$port /tmp/udp_pid_$port; setsid python3 -c 'import socket, os, sys; open(\"/tmp/udp_pid_$port\",\"w\").write(str(os.getpid()));
+  if ! on "$dst_pub" "[ -f /tmp/udp_pid_$port ] && kill \$(cat /tmp/udp_pid_$port) 2>/dev/null || true; rm -f /tmp/udp_ready_$port /tmp/udp_got_$port /tmp/udp_error_$port /tmp/udp_pid_$port; setsid python3 -c 'import socket, os, sys; open(\"/tmp/udp_pid_$port\",\"w\").write(str(os.getpid()));
 try:
- s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); s.settimeout(8); s.bind((\"::\",$port)); open(\"/tmp/udp_ready_$port\",\"w\").write(\"1\")
+ s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); s.bind((\"::\",$port)); open(\"/tmp/udp_ready_$port\",\"w\").write(\"1\")
 except Exception: sys.exit(1)
 try:
  s.recvfrom(64); open(\"/tmp/udp_got_$port\",\"w\").write(\"1\")
-except Exception: pass' >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1; then
+except Exception: open(\"/tmp/udp_error_$port\",\"w\").write(\"1\"); sys.exit(1)' >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1; then
     _cleanup_udp_receiver "$dst_pub" "$port"
     echo "ERROR"
     return 1
@@ -390,7 +418,9 @@ except Exception: pass' >/dev/null 2>&1 </dev/null &" >/dev/null 2>&1; then
   local end=$((SECONDS + 6))
   while (( SECONDS < end )); do
     local obs
-    if ! obs="$(on "$dst_pub" "[ -f /tmp/udp_got_$port ] && echo GOT || echo WAIT" 2>/dev/null)"; then
+    # A dead/broken receiver cannot prove that the firewall denied the packet.
+    # Keep it alive until cleanup rather than letting its timeout race SSH/send.
+    if ! obs="$(on "$dst_pub" "if [ -f /tmp/udp_got_$port ]; then echo GOT; elif [ ! -f /tmp/udp_error_$port ] && kill -0 \$(cat /tmp/udp_pid_$port) 2>/dev/null; then echo WAIT; else echo ERROR; fi" 2>/dev/null)"; then
       _cleanup_udp_receiver "$dst_pub" "$port"
       echo "ERROR"
       return 1

@@ -43,8 +43,7 @@ wait_all_ssh "$A" "$B" "$C"
 seed_known_hosts "$A" "$B" "$C"
 reset_state "$A" "$B" "$C"
 deploy_all "$ROOT" "$A" "$B" "$C"
-for h in "$A" "$B" "$C"; do on "$h" 'ray up' >/dev/null 2>&1 || true; done
-wait_daemons "$A" "$B" "$C"
+activate_daemons "$A" "$B" "$C" || summary
 
 # ---------------------------------------------------------------------------
 step "1. srv-a creates the closed network; srv-b + srv-c join via invites"

@@ -36,8 +36,7 @@ reset_state "$A" "$B"
 deploy_all "$ROOT" "$A" "$B"
 # Ensure the VPN is active on both (TUN up + contact publisher running). After a
 # `systemctl restart` the daemon boots inactive, so activate explicitly.
-for h in "$A" "$B"; do on "$h" 'ray up' >/dev/null 2>&1 || true; done
-wait_daemons "$A" "$B"
+activate_daemons "$A" "$B" || summary
 
 # ---------------------------------------------------------------------------
 step "2. read contact ids"

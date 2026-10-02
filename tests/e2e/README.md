@@ -45,6 +45,10 @@ provision/teardown/assert bodies are shared in [`../lib/`](../lib).
 The throughput/latency benchmark (`tests/e2e.sh bench`) is a sibling suite
 under [`../bench/`](../bench) (same shared `tests/lib/`).
 
+Run `bash tests/test-e2e-harness.sh` to check daemon activation, status-query
+failures, diagnostics, cleanup exit codes, and UDP probe failure handling without
+Docker or cloud credentials. These regression checks also run in CI.
+
 ## Prerequisites (both backends)
 
 - `jq` (the assertions parse `ray status --json` on the runner), plus `just` and
