@@ -1585,47 +1585,27 @@ public func FfiConverterTypeNetwork_lower(_ value: Network) -> RustBuffer {
 }
 
 
-public struct NodeStatus {
+public struct NodeMeshStatus {
     public var active: Bool
     public var ipv6: String
     public var networks: [Network]
-    public var pendingRequests: [JoinRequest]
-    public var contactId: String?
-    public var connectionRequests: [ConnectionRequest]
-    public var files: [IncomingFile]
-    public var sshEnabled: Bool
-    public var sshRules: [SshRule]
-    public var dnsEnabled: Bool
-    public var mdnsEnabled: Bool
-    public var mdnsActive: Bool
-    public var v4BridgeEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(active: Bool, ipv6: String, networks: [Network], pendingRequests: [JoinRequest], contactId: String?, connectionRequests: [ConnectionRequest], files: [IncomingFile], sshEnabled: Bool, sshRules: [SshRule], dnsEnabled: Bool, mdnsEnabled: Bool, mdnsActive: Bool, v4BridgeEnabled: Bool) {
+    public init(active: Bool, ipv6: String, networks: [Network]) {
         self.active = active
         self.ipv6 = ipv6
         self.networks = networks
-        self.pendingRequests = pendingRequests
-        self.contactId = contactId
-        self.connectionRequests = connectionRequests
-        self.files = files
-        self.sshEnabled = sshEnabled
-        self.sshRules = sshRules
-        self.dnsEnabled = dnsEnabled
-        self.mdnsEnabled = mdnsEnabled
-        self.mdnsActive = mdnsActive
-        self.v4BridgeEnabled = v4BridgeEnabled
     }
 }
 
 #if compiler(>=6)
-extension NodeStatus: Sendable {}
+extension NodeMeshStatus: Sendable {}
 #endif
 
 
-extension NodeStatus: Equatable, Hashable {
-    public static func ==(lhs: NodeStatus, rhs: NodeStatus) -> Bool {
+extension NodeMeshStatus: Equatable, Hashable {
+    public static func ==(lhs: NodeMeshStatus, rhs: NodeMeshStatus) -> Bool {
         if lhs.active != rhs.active {
             return false
         }
@@ -1635,6 +1615,75 @@ extension NodeStatus: Equatable, Hashable {
         if lhs.networks != rhs.networks {
             return false
         }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(active)
+        hasher.combine(ipv6)
+        hasher.combine(networks)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeMeshStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeMeshStatus {
+        return
+            try NodeMeshStatus(
+                active: FfiConverterBool.read(from: &buf),
+                ipv6: FfiConverterString.read(from: &buf),
+                networks: FfiConverterSequenceTypeNetwork.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NodeMeshStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.active, into: &buf)
+        FfiConverterString.write(value.ipv6, into: &buf)
+        FfiConverterSequenceTypeNetwork.write(value.networks, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeMeshStatus_lift(_ buf: RustBuffer) throws -> NodeMeshStatus {
+    return try FfiConverterTypeNodeMeshStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeMeshStatus_lower(_ value: NodeMeshStatus) -> RustBuffer {
+    return FfiConverterTypeNodeMeshStatus.lower(value)
+}
+
+
+public struct NodeRequestStatus {
+    public var pendingRequests: [JoinRequest]
+    public var contactId: String?
+    public var connectionRequests: [ConnectionRequest]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(pendingRequests: [JoinRequest], contactId: String?, connectionRequests: [ConnectionRequest]) {
+        self.pendingRequests = pendingRequests
+        self.contactId = contactId
+        self.connectionRequests = connectionRequests
+    }
+}
+
+#if compiler(>=6)
+extension NodeRequestStatus: Sendable {}
+#endif
+
+
+extension NodeRequestStatus: Equatable, Hashable {
+    public static func ==(lhs: NodeRequestStatus, rhs: NodeRequestStatus) -> Bool {
         if lhs.pendingRequests != rhs.pendingRequests {
             return false
         }
@@ -1644,15 +1693,77 @@ extension NodeStatus: Equatable, Hashable {
         if lhs.connectionRequests != rhs.connectionRequests {
             return false
         }
-        if lhs.files != rhs.files {
-            return false
-        }
-        if lhs.sshEnabled != rhs.sshEnabled {
-            return false
-        }
-        if lhs.sshRules != rhs.sshRules {
-            return false
-        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(pendingRequests)
+        hasher.combine(contactId)
+        hasher.combine(connectionRequests)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeRequestStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeRequestStatus {
+        return
+            try NodeRequestStatus(
+                pendingRequests: FfiConverterSequenceTypeJoinRequest.read(from: &buf),
+                contactId: FfiConverterOptionString.read(from: &buf),
+                connectionRequests: FfiConverterSequenceTypeConnectionRequest.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NodeRequestStatus, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeJoinRequest.write(value.pendingRequests, into: &buf)
+        FfiConverterOptionString.write(value.contactId, into: &buf)
+        FfiConverterSequenceTypeConnectionRequest.write(value.connectionRequests, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeRequestStatus_lift(_ buf: RustBuffer) throws -> NodeRequestStatus {
+    return try FfiConverterTypeNodeRequestStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeRequestStatus_lower(_ value: NodeRequestStatus) -> RustBuffer {
+    return FfiConverterTypeNodeRequestStatus.lower(value)
+}
+
+
+public struct NodeServiceStatus {
+    public var dnsEnabled: Bool
+    public var mdnsEnabled: Bool
+    public var mdnsActive: Bool
+    public var v4BridgeEnabled: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(dnsEnabled: Bool, mdnsEnabled: Bool, mdnsActive: Bool, v4BridgeEnabled: Bool) {
+        self.dnsEnabled = dnsEnabled
+        self.mdnsEnabled = mdnsEnabled
+        self.mdnsActive = mdnsActive
+        self.v4BridgeEnabled = v4BridgeEnabled
+    }
+}
+
+#if compiler(>=6)
+extension NodeServiceStatus: Sendable {}
+#endif
+
+
+extension NodeServiceStatus: Equatable, Hashable {
+    public static func ==(lhs: NodeServiceStatus, rhs: NodeServiceStatus) -> Bool {
         if lhs.dnsEnabled != rhs.dnsEnabled {
             return false
         }
@@ -1669,15 +1780,6 @@ extension NodeStatus: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(active)
-        hasher.combine(ipv6)
-        hasher.combine(networks)
-        hasher.combine(pendingRequests)
-        hasher.combine(contactId)
-        hasher.combine(connectionRequests)
-        hasher.combine(files)
-        hasher.combine(sshEnabled)
-        hasher.combine(sshRules)
         hasher.combine(dnsEnabled)
         hasher.combine(mdnsEnabled)
         hasher.combine(mdnsActive)
@@ -1690,19 +1792,10 @@ extension NodeStatus: Equatable, Hashable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeStatus {
+public struct FfiConverterTypeNodeServiceStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeServiceStatus {
         return
-            try NodeStatus(
-                active: FfiConverterBool.read(from: &buf),
-                ipv6: FfiConverterString.read(from: &buf),
-                networks: FfiConverterSequenceTypeNetwork.read(from: &buf),
-                pendingRequests: FfiConverterSequenceTypeJoinRequest.read(from: &buf),
-                contactId: FfiConverterOptionString.read(from: &buf),
-                connectionRequests: FfiConverterSequenceTypeConnectionRequest.read(from: &buf),
-                files: FfiConverterSequenceTypeIncomingFile.read(from: &buf),
-                sshEnabled: FfiConverterBool.read(from: &buf),
-                sshRules: FfiConverterSequenceTypeSshRule.read(from: &buf),
+            try NodeServiceStatus(
                 dnsEnabled: FfiConverterBool.read(from: &buf),
                 mdnsEnabled: FfiConverterBool.read(from: &buf),
                 mdnsActive: FfiConverterBool.read(from: &buf),
@@ -1710,20 +1803,175 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
         )
     }
 
-    public static func write(_ value: NodeStatus, into buf: inout [UInt8]) {
-        FfiConverterBool.write(value.active, into: &buf)
-        FfiConverterString.write(value.ipv6, into: &buf)
-        FfiConverterSequenceTypeNetwork.write(value.networks, into: &buf)
-        FfiConverterSequenceTypeJoinRequest.write(value.pendingRequests, into: &buf)
-        FfiConverterOptionString.write(value.contactId, into: &buf)
-        FfiConverterSequenceTypeConnectionRequest.write(value.connectionRequests, into: &buf)
-        FfiConverterSequenceTypeIncomingFile.write(value.files, into: &buf)
-        FfiConverterBool.write(value.sshEnabled, into: &buf)
-        FfiConverterSequenceTypeSshRule.write(value.sshRules, into: &buf)
+    public static func write(_ value: NodeServiceStatus, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.dnsEnabled, into: &buf)
         FfiConverterBool.write(value.mdnsEnabled, into: &buf)
         FfiConverterBool.write(value.mdnsActive, into: &buf)
         FfiConverterBool.write(value.v4BridgeEnabled, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeServiceStatus_lift(_ buf: RustBuffer) throws -> NodeServiceStatus {
+    return try FfiConverterTypeNodeServiceStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeServiceStatus_lower(_ value: NodeServiceStatus) -> RustBuffer {
+    return FfiConverterTypeNodeServiceStatus.lower(value)
+}
+
+
+public struct NodeSshStatus {
+    public var enabled: Bool
+    public var rules: [SshRule]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(enabled: Bool, rules: [SshRule]) {
+        self.enabled = enabled
+        self.rules = rules
+    }
+}
+
+#if compiler(>=6)
+extension NodeSshStatus: Sendable {}
+#endif
+
+
+extension NodeSshStatus: Equatable, Hashable {
+    public static func ==(lhs: NodeSshStatus, rhs: NodeSshStatus) -> Bool {
+        if lhs.enabled != rhs.enabled {
+            return false
+        }
+        if lhs.rules != rhs.rules {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(enabled)
+        hasher.combine(rules)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeSshStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeSshStatus {
+        return
+            try NodeSshStatus(
+                enabled: FfiConverterBool.read(from: &buf),
+                rules: FfiConverterSequenceTypeSshRule.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NodeSshStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterSequenceTypeSshRule.write(value.rules, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeSshStatus_lift(_ buf: RustBuffer) throws -> NodeSshStatus {
+    return try FfiConverterTypeNodeSshStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeSshStatus_lower(_ value: NodeSshStatus) -> RustBuffer {
+    return FfiConverterTypeNodeSshStatus.lower(value)
+}
+
+
+public struct NodeStatus {
+    public var mesh: NodeMeshStatus
+    public var requests: NodeRequestStatus
+    public var files: [IncomingFile]
+    public var ssh: NodeSshStatus
+    public var services: NodeServiceStatus
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mesh: NodeMeshStatus, requests: NodeRequestStatus, files: [IncomingFile], ssh: NodeSshStatus, services: NodeServiceStatus) {
+        self.mesh = mesh
+        self.requests = requests
+        self.files = files
+        self.ssh = ssh
+        self.services = services
+    }
+}
+
+#if compiler(>=6)
+extension NodeStatus: Sendable {}
+#endif
+
+
+extension NodeStatus: Equatable, Hashable {
+    public static func ==(lhs: NodeStatus, rhs: NodeStatus) -> Bool {
+        if lhs.mesh != rhs.mesh {
+            return false
+        }
+        if lhs.requests != rhs.requests {
+            return false
+        }
+        if lhs.files != rhs.files {
+            return false
+        }
+        if lhs.ssh != rhs.ssh {
+            return false
+        }
+        if lhs.services != rhs.services {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(mesh)
+        hasher.combine(requests)
+        hasher.combine(files)
+        hasher.combine(ssh)
+        hasher.combine(services)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeStatus {
+        return
+            try NodeStatus(
+                mesh: FfiConverterTypeNodeMeshStatus.read(from: &buf),
+                requests: FfiConverterTypeNodeRequestStatus.read(from: &buf),
+                files: FfiConverterSequenceTypeIncomingFile.read(from: &buf),
+                ssh: FfiConverterTypeNodeSshStatus.read(from: &buf),
+                services: FfiConverterTypeNodeServiceStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NodeStatus, into buf: inout [UInt8]) {
+        FfiConverterTypeNodeMeshStatus.write(value.mesh, into: &buf)
+        FfiConverterTypeNodeRequestStatus.write(value.requests, into: &buf)
+        FfiConverterSequenceTypeIncomingFile.write(value.files, into: &buf)
+        FfiConverterTypeNodeSshStatus.write(value.ssh, into: &buf)
+        FfiConverterTypeNodeServiceStatus.write(value.services, into: &buf)
     }
 }
 
