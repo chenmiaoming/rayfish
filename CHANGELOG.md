@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray status` and the macOS app warn when a peer connection has high latency,
+  packet loss, or a backed-up send queue.
+
 - `ray identityof <contact-id>` looks up the advertised device identity without
   connecting to the peer or requesting approval.
 
@@ -29,6 +32,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The macOS app version now matches the Rayfish version in `Cargo.toml`.
 - IPv4 listener bridging is enabled by default on fresh installs and starts
   with the macOS app's VPN. An explicit `v4-bridge off` setting is preserved.
 - The macOS app bridges IPv4 services through its background helper so macOS
@@ -66,8 +70,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Performance
 
-- Bursty peer traffic such as Screen Sharing gets a larger send queue, reducing
-  packet loss when QUIC temporarily lowers its sending rate.
+- Linux enables TUN TCP/UDP segmentation and receive offloads, batching packets
+  between the mesh and kernel to reduce per-packet work.
+- macOS batches packet-tunnel I/O. Peer traffic uses a bounded QUIC datagram
+  queue without adding another per-peer queue in the forwarding path.
+- Peer metrics report QUIC queue depth, congestion window, loss,
+  path MTU, and TUN offload and batching state for throughput diagnostics.
 
 ## [0.5.6] - 2026-10-01
 

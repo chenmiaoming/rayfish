@@ -286,9 +286,8 @@ async fn bind_endpoint(cfg: &BindConfig<'_>, port: u16) -> Result<Endpoint> {
         //     regress it. GSO coalesces same-destination segments into one sendmsg,
         //     cutting syscalls under burst.
         //   - Datagrams enabled (iroh/noq default `Some` receive buffer), with a
-        //     larger logical send limit for bursty traffic. The hot path checks
-        //     remaining capacity through `datagram_send_buffer_space` before it
-        //     queues a complete packet (see `forward::run_mesh`).
+        //     small send limit. The forwarding path never waits for capacity;
+        //     when the queue is full, noQ discards older datagrams.
         // The congestion controller stays at the noq default (Cubic). Switching to
         // BBR3 would help on lossy/shallow-buffer consumer uplinks but requires a
         // `noq-proto` dependency to reach the config type, deferred to a measured
@@ -479,7 +478,7 @@ fn is_unroutable(e: &io::Error) -> bool {
     )
 }
 
-const DATAGRAM_SEND_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+pub(crate) const DATAGRAM_SEND_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// Builds the [`QuicTransportConfig`] for rayfish's data-plane shape (one QUIC
 /// connection carrying DATAGRAM frames per peer, plus reliable control streams).
@@ -496,9 +495,9 @@ fn quic_transport_config() -> QuicTransportConfig {
         // Keep GSO on (default) explicitly so a future change can't silently
         // regress it.
         .enable_segmentation_offload(true)
-        // Screen sharing and other bursty traffic can temporarily outrun QUIC's
-        // congestion window. This is a logical per-connection limit: noq retains
-        // queued Bytes as needed rather than reserving the full capacity here.
+        // Keep the unreliable datagram queue small. When it fills, noQ discards
+        // older datagrams rather than making the forwarding path wait and add
+        // latency behind stale traffic.
         .datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_SIZE)
         .build()
 }

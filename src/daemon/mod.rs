@@ -741,7 +741,7 @@ struct TunTasks {
 
 pub struct Daemon {
     /// Recent RTT samples per peer, shared by successive status requests.
-    rtt_history: Mutex<mesh::diagnostics::RttHistory>,
+    connection_history: Mutex<mesh::diagnostics::ConnectionHistory>,
     /// The process-lifetime foundation (endpoint, identity, blob store, metrics,
     /// contact id), grouped so extracted services can depend on `Arc<Transport>`
     /// instead of the whole daemon. During the service-decomposition transition
@@ -1014,7 +1014,12 @@ impl Daemon {
         // A dedicated child token so the data plane can be stopped independently
         // of a full daemon shutdown; it still cancels when `shutdown_token` does.
         let cancel = self.shutdown_token.child_token();
-        let writer_handle = forward::spawn_tun_writer(writer, new_rx, Arc::clone(&self.active));
+        let writer_handle = forward::spawn_tun_writer(
+            writer,
+            new_rx,
+            Arc::clone(&self.active),
+            Arc::clone(&self.stats),
+        );
         let mesh_handle = {
             let peers = self.registry.peers.clone();
             let firewall = self.registry.firewall.clone();
