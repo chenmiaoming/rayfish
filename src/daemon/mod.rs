@@ -1101,15 +1101,16 @@ impl Daemon {
         self.attach_tun(reader, writer).await;
         self.active.store(true, Ordering::SeqCst);
         #[cfg(feature = "desktop")]
-        if config::load().is_ok_and(|settings| settings.ssh_enabled) {
-            self.start_ssh();
-        }
-        #[cfg(feature = "desktop")]
-        if config::load()
-            .map(|settings| settings.v4_bridge)
-            .unwrap_or(true)
         {
-            self.start_v4_bridge();
+            if config::load().is_ok_and(|settings| settings.ssh_enabled) {
+                self.start_ssh();
+            }
+            if config::load()
+                .map(|settings| settings.v4_bridge)
+                .unwrap_or(true)
+            {
+                self.start_v4_bridge();
+            }
         }
         self.registry.poll_nudge.notify_waiters();
     }
@@ -1124,9 +1125,10 @@ impl Daemon {
     /// underlying fds. Idempotent: a no-op if no interface is attached.
     pub fn detach_tun(&self) {
         #[cfg(feature = "desktop")]
-        self.stop_ssh();
-        #[cfg(feature = "desktop")]
-        self.stop_v4_bridge();
+        {
+            self.stop_ssh();
+            self.stop_v4_bridge();
+        }
         self.active
             .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(tasks) = self.tun_tasks.lock().unwrap().take() {

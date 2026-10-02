@@ -10,6 +10,7 @@
 
 #[cfg(target_os = "macos")]
 use std::ffi::{c_char, c_int};
+use std::future::Future;
 #[cfg(target_os = "macos")]
 use std::net::IpAddr;
 use std::net::{Ipv6Addr, Shutdown, SocketAddr, TcpStream as StdTcpStream};
@@ -34,9 +35,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::net::{TcpListener, UnixStream};
 use tokio::task::JoinSet;
-#[cfg(target_os = "macos")]
-use tokio::time::sleep;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -134,24 +133,34 @@ pub(crate) fn spawn(
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                _ = token.cancelled() => return,
-                result = authorize_connections(address, &registry, &authz) => {
-                    crate::forward::set_ssh_nat_active(false);
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "macOS SSH helper unavailable; enable Rayfish in Login Items & Extensions");
-                    }
-                }
+        retry_service(token, || async {
+            let result = authorize_connections(address, &registry, &authz).await;
+            crate::forward::set_ssh_nat_active(false);
+            if let Err(error) = result {
+                tracing::warn!(%error, "macOS SSH helper unavailable; enable Rayfish in Login Items & Extensions");
             }
-            tokio::select! {
-                biased;
-                _ = token.cancelled() => return,
-                _ = sleep(CONTROL_TIMEOUT) => {}
-            }
-        }
+        })
+        .await;
     });
+}
+
+async fn retry_service<F, Fut>(token: CancellationToken, mut attempt: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    loop {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => return,
+            _ = attempt() => {}
+        }
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => return,
+            _ = sleep(CONTROL_TIMEOUT) => {}
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -181,7 +190,7 @@ async fn authorize_connections(
 
 #[cfg(target_os = "macos")]
 async fn connect_service(address: Ipv6Addr, service: Service) -> Result<UnixStream> {
-    let control = timeout(CONTROL_TIMEOUT, async {
+    timeout(CONTROL_TIMEOUT, async {
         let meta = tokio::fs::symlink_metadata(SOCKET).await?;
         ensure!(
             meta.file_type().is_socket() && meta.uid() == 0 && meta.mode() & 0o077 == 0,
@@ -202,30 +211,19 @@ async fn connect_service(address: Ipv6Addr, service: Service) -> Result<UnixStre
         ensure!(ready.version == VERSION, "SSH helper version mismatch");
         Ok::<_, anyhow::Error>(stream)
     })
-    .await??;
-    Ok(control)
+    .await?
 }
 
 /// Keep the bridge in the helper while the external tunnel is attached.
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_v4_bridge(address: Ipv6Addr, token: CancellationToken) {
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                _ = token.cancelled() => return,
-                result = bridge_connections(address) => {
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "macOS IPv4 bridge helper unavailable; enable Rayfish in Login Items & Extensions");
-                    }
-                }
+        retry_service(token, || async {
+            if let Err(error) = bridge_connections(address).await {
+                tracing::warn!(%error, "macOS IPv4 bridge helper unavailable; enable Rayfish in Login Items & Extensions");
             }
-            tokio::select! {
-                biased;
-                _ = token.cancelled() => return,
-                _ = sleep(CONTROL_TIMEOUT) => {}
-            }
-        }
+        })
+        .await;
     });
 }
 
@@ -440,6 +438,8 @@ mod tests {
     use russh::client;
     use russh::keys::{Algorithm, PublicKey};
     use tokio::net::TcpStream;
+    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::time::Instant;
 
     struct AcceptTestKey;
 
@@ -456,6 +456,90 @@ mod tests {
             &mut rand::rng(),
             Algorithm::Ed25519,
         )?)))
+    }
+
+    #[tokio::test]
+    async fn retry_waits_before_reconnecting_and_cancellation_closes_control() -> Result<()> {
+        let (control, mut peer) = UnixStream::pair()?;
+        let (started, mut attempts) = unbounded_channel();
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let task = tokio::spawn(async move {
+            let mut control = Some(control);
+            let mut first = true;
+            retry_service(token, || {
+                let stream = if first {
+                    first = false;
+                    None
+                } else {
+                    control.take()
+                };
+                let started = started.clone();
+                async move {
+                    started
+                        .send(Instant::now())
+                        .expect("the test receives attempts");
+                    if let Some(mut stream) = stream {
+                        let mut byte = [0];
+                        assert_eq!(
+                            stream
+                                .read(&mut byte)
+                                .await
+                                .expect("read the control socket"),
+                            0
+                        );
+                    }
+                }
+            })
+            .await;
+        });
+        let first_attempt = timeout(CONTROL_TIMEOUT, attempts.recv())
+            .await?
+            .context("the first attempt must start")?;
+        let retry = timeout(CONTROL_TIMEOUT * 2, attempts.recv())
+            .await?
+            .context("the retry must start")?;
+        // Tokio timers have millisecond precision.
+        assert!(retry - first_attempt >= CONTROL_TIMEOUT - Duration::from_millis(1));
+        cancel.cancel();
+        timeout(CONTROL_TIMEOUT, task).await??;
+        let mut byte = [0];
+        assert_eq!(timeout(CONTROL_TIMEOUT, peer.read(&mut byte)).await??, 0);
+        assert!(
+            attempts.recv().await.is_none(),
+            "cancellation stops retries"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_cancellation_wins_before_an_attempt_and_during_backoff() -> Result<()> {
+        let token = CancellationToken::new();
+        token.cancel();
+        retry_service(token, || async {
+            panic!("a cancelled service must not run")
+        })
+        .await;
+
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let (started, mut attempts) = unbounded_channel();
+        let task = tokio::spawn(async move {
+            retry_service(token, || async {
+                started.send(()).expect("the test receives attempts");
+            })
+            .await;
+        });
+        timeout(CONTROL_TIMEOUT, attempts.recv())
+            .await?
+            .context("the first attempt must start")?;
+        cancel.cancel();
+        timeout(CONTROL_TIMEOUT / 2, task).await??;
+        assert!(
+            attempts.recv().await.is_none(),
+            "backoff must not reconnect"
+        );
+        Ok(())
     }
 
     #[test]
