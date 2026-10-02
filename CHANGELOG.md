@@ -26,6 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Android firewall forms keep the selected peer after activity recreation.
+- Android shows file transfer cancellation only for outgoing transfers.
+
 - Bash completion installed by the macOS app now registers in new terminals.
 - Clicking a peer in the Android, macOS, or web UI copies its full `.ray` domain.
 - Incoming pings no longer keep Android's mesh transport awake or wake it after

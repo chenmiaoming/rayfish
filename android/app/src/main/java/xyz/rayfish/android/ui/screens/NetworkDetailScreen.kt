@@ -215,6 +215,7 @@ fun NetworkDetailScreen(
     if (showAddRule) {
         var proto by rememberSaveable { mutableStateOf("tcp") }
         var port by rememberSaveable { mutableStateOf("") }
+        var peerId by rememberSaveable { mutableStateOf<String?>(null) }
         // Label shown in the dropdown -> what firewallAdd matches on. The node id
         // is the unambiguous form: a peer may have no hostname set, and the
         // daemon resolves a full endpoint id for offline members too.
@@ -224,21 +225,23 @@ fun NetworkDetailScreen(
                 "${p.hostname.ifEmpty { p.nodeId.take(8) }} · ${p.nodeId.take(4)}" to p.nodeId
             }
         }
-        var peerLabel by remember { mutableStateOf(anyPeer) }
+        val peerLabel = peerChoices.firstOrNull { it.second == peerId }?.first ?: peerId ?: anyPeer
         AlertDialog(
             onDismissRequest = { showAddRule = false },
             containerColor = Rf.Sheet,
             title = { Text(stringResource(R.string.allow_inbound), fontFamily = Chakra, fontWeight = FontWeight.Bold, color = Rf.Heading) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    RayfishDropdown(peerLabel, peerChoices.map { it.first }, { peerLabel = it }, stringResource(R.string.fw_peer))
+                    RayfishDropdown(peerLabel, peerChoices.map { it.first }, { label ->
+                        peerId = peerChoices.firstOrNull { it.first == label }?.second
+                    }, stringResource(R.string.fw_peer))
                     RayfishDropdown(proto, listOf("tcp", "udp", "icmp", "any"), { proto = it }, stringResource(R.string.fw_protocol))
                     RayfishTextField(port, { port = it.trim() }, stringResource(R.string.hint_port))
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val peer = peerChoices.firstOrNull { it.first == peerLabel }?.second
+                    val peer = peerId
                     scope.launch {
                         try {
                             withContext(Dispatchers.IO) {

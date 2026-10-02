@@ -280,7 +280,7 @@ private fun TransferRow(transfer: Transfer, saving: Boolean, onCancel: () -> Uni
                 Text(stringResource(R.string.file_transfer_bytes, formatSize(transfer.transferred), formatSize(transfer.size)),
                     fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Muted)
             }
-            if (active) TextButton(onClick = onCancel) {
+            if (active && transfer.outgoing) TextButton(onClick = onCancel) {
                 Text(stringResource(R.string.action_cancel), color = Rf.Rose400)
             }
         }
