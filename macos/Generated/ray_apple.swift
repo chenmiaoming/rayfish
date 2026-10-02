@@ -1598,10 +1598,11 @@ public struct NodeStatus {
     public var dnsEnabled: Bool
     public var mdnsEnabled: Bool
     public var mdnsActive: Bool
+    public var v4BridgeEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(active: Bool, ipv6: String, networks: [Network], pendingRequests: [JoinRequest], contactId: String?, connectionRequests: [ConnectionRequest], files: [IncomingFile], sshEnabled: Bool, sshRules: [SshRule], dnsEnabled: Bool, mdnsEnabled: Bool, mdnsActive: Bool) {
+    public init(active: Bool, ipv6: String, networks: [Network], pendingRequests: [JoinRequest], contactId: String?, connectionRequests: [ConnectionRequest], files: [IncomingFile], sshEnabled: Bool, sshRules: [SshRule], dnsEnabled: Bool, mdnsEnabled: Bool, mdnsActive: Bool, v4BridgeEnabled: Bool) {
         self.active = active
         self.ipv6 = ipv6
         self.networks = networks
@@ -1614,6 +1615,7 @@ public struct NodeStatus {
         self.dnsEnabled = dnsEnabled
         self.mdnsEnabled = mdnsEnabled
         self.mdnsActive = mdnsActive
+        self.v4BridgeEnabled = v4BridgeEnabled
     }
 }
 
@@ -1660,6 +1662,9 @@ extension NodeStatus: Equatable, Hashable {
         if lhs.mdnsActive != rhs.mdnsActive {
             return false
         }
+        if lhs.v4BridgeEnabled != rhs.v4BridgeEnabled {
+            return false
+        }
         return true
     }
 
@@ -1676,6 +1681,7 @@ extension NodeStatus: Equatable, Hashable {
         hasher.combine(dnsEnabled)
         hasher.combine(mdnsEnabled)
         hasher.combine(mdnsActive)
+        hasher.combine(v4BridgeEnabled)
     }
 }
 
@@ -1699,7 +1705,8 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
                 sshRules: FfiConverterSequenceTypeSshRule.read(from: &buf),
                 dnsEnabled: FfiConverterBool.read(from: &buf),
                 mdnsEnabled: FfiConverterBool.read(from: &buf),
-                mdnsActive: FfiConverterBool.read(from: &buf)
+                mdnsActive: FfiConverterBool.read(from: &buf),
+                v4BridgeEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -1716,6 +1723,7 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
         FfiConverterBool.write(value.dnsEnabled, into: &buf)
         FfiConverterBool.write(value.mdnsEnabled, into: &buf)
         FfiConverterBool.write(value.mdnsActive, into: &buf)
+        FfiConverterBool.write(value.v4BridgeEnabled, into: &buf)
     }
 }
 

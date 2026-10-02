@@ -64,6 +64,7 @@ pub struct NodeStatus {
     pub dns_enabled: bool,
     pub mdns_enabled: bool,
     pub mdns_active: bool,
+    pub v4_bridge_enabled: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -317,6 +318,7 @@ impl Node {
             connection_requests,
             files: incoming_files(state.list_files())?,
             ssh_enabled: settings.ssh_enabled,
+            v4_bridge_enabled: settings.v4_bridge,
             ssh_rules: settings
                 .networks
                 .iter()

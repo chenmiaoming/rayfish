@@ -1,38 +1,56 @@
-//! SSH for the macOS app, outside NetworkExtension's socket policy.
+//! Host TCP services for the macOS app, outside NetworkExtension's socket policy.
 //!
 //! launchd owns a root-only Unix socket and starts the bundled CLI helper. The
-//! packet tunnel connects, supplies its mesh address, then authorizes each TCP
-//! connection using its live peer registry. No policy snapshot is cached here.
+//! packet tunnel supplies its mesh address and authorizes SSH connections using
+//! its live peer registry. Bridged IPv4 connections pass its mesh firewall before
+//! reaching the helper. No authorization snapshot is cached here.
 //! Both ends check the Unix peer UID. The helper owns every TCP socket and login
 //! process; EOF on the control stream closes listeners and sessions. This is a
 //! private, versioned local protocol, not mesh or CLI IPC.
 
+#[cfg(target_os = "macos")]
 use std::ffi::{c_char, c_int};
-use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpStream as StdTcpStream};
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "macos")]
+use std::net::IpAddr;
+use std::net::{Ipv6Addr, Shutdown, SocketAddr, TcpStream as StdTcpStream};
+use std::os::fd::AsFd;
+#[cfg(target_os = "macos")]
+use std::os::fd::{FromRawFd, OwnedFd};
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+#[cfg(target_os = "macos")]
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use iroh::EndpointId;
-use russh::keys::{PrivateKey, ssh_key::LineEnding};
+use russh::keys::PrivateKey;
+#[cfg(target_os = "macos")]
+use russh::keys::ssh_key::LineEnding;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixListener, UnixStream};
+#[cfg(target_os = "macos")]
+use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixStream};
 use tokio::task::JoinSet;
-use tokio::time::{sleep, timeout};
+#[cfg(target_os = "macos")]
+use tokio::time::sleep;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Config, LOGIN_GRACE, Origin, SSH_LISTEN_PORT, SshAuthz, SshHandler, UserPolicy, auth_banner,
-    disable_nagle, load_host_key, resolve_user_policy_with_hostnames, serve, server_config,
+    Config, LOGIN_GRACE, Origin, SSH_LISTEN_PORT, SshHandler, UserPolicy, disable_nagle, serve,
+    server_config,
 };
+#[cfg(target_os = "macos")]
+use super::{SshAuthz, auth_banner, load_host_key, resolve_user_policy_with_hostnames};
+#[cfg(target_os = "macos")]
 use crate::daemon::NetworkRegistry;
 
+#[cfg(target_os = "macos")]
 const SOCKET: &str = "/var/run/com.rayfish.app.ssh.sock";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_SESSIONS: usize = 128;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,10 +59,16 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 struct Hello {
     version: u32,
     address: Ipv6Addr,
+    service: Service,
+}
+
+#[derive(Serialize, Deserialize)]
+enum Service {
     // Sent only after authenticating the root helper. Discovery stays in the
     // provider to preserve its app-group fallback key, without touching the
     // standalone daemon's state. Never include this message in diagnostics.
-    host_key: Vec<u8>,
+    Ssh { host_key: Vec<u8> },
+    V4Bridge { ssh_port: u16 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,6 +126,7 @@ fn validate_hello(hello: &Hello) -> Result<()> {
 }
 
 /// Called only for an OS-owned macOS tunnel. The daemon keeps its own listener.
+#[cfg(target_os = "macos")]
 pub(crate) fn spawn(
     address: Ipv6Addr,
     registry: Arc<NetworkRegistry>,
@@ -129,12 +154,34 @@ pub(crate) fn spawn(
     });
 }
 
+#[cfg(target_os = "macos")]
 async fn authorize_connections(
     address: Ipv6Addr,
     registry: &NetworkRegistry,
     authz: &SshAuthz,
 ) -> Result<()> {
-    let mut control = timeout(CONTROL_TIMEOUT, async {
+    let mut control = connect_service(
+        address,
+        Service::Ssh {
+            host_key: load_host_key()?
+                .to_openssh(LineEnding::LF)?
+                .as_bytes()
+                .to_vec(),
+        },
+    )
+    .await?;
+    crate::forward::set_ssh_nat_active(true);
+    tracing::info!(%address, "macOS app SSH helper ready");
+    loop {
+        let request: Authorize = receive(&mut control).await?;
+        let grant = grant_for(request.client, address, registry, authz);
+        timeout(CONTROL_TIMEOUT, send(&mut control, &grant)).await??;
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn connect_service(address: Ipv6Addr, service: Service) -> Result<UnixStream> {
+    let control = timeout(CONTROL_TIMEOUT, async {
         let meta = tokio::fs::symlink_metadata(SOCKET).await?;
         ensure!(
             meta.file_type().is_socket() && meta.uid() == 0 && meta.mode() & 0o077 == 0,
@@ -147,10 +194,7 @@ async fn authorize_connections(
             &Hello {
                 version: VERSION,
                 address,
-                host_key: load_host_key()?
-                    .to_openssh(LineEnding::LF)?
-                    .as_bytes()
-                    .to_vec(),
+                service,
             },
         )
         .await?;
@@ -159,15 +203,46 @@ async fn authorize_connections(
         Ok::<_, anyhow::Error>(stream)
     })
     .await??;
-    crate::forward::set_ssh_nat_active(true);
-    tracing::info!(%address, "macOS app SSH helper ready");
-    loop {
-        let request: Authorize = receive(&mut control).await?;
-        let grant = grant_for(request.client, address, registry, authz);
-        timeout(CONTROL_TIMEOUT, send(&mut control, &grant)).await??;
-    }
+    Ok(control)
 }
 
+/// Keep the bridge in the helper while the external tunnel is attached.
+#[cfg(target_os = "macos")]
+pub(crate) fn spawn_v4_bridge(address: Ipv6Addr, token: CancellationToken) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return,
+                result = bridge_connections(address) => {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "macOS IPv4 bridge helper unavailable; enable Rayfish in Login Items & Extensions");
+                    }
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return,
+                _ = sleep(CONTROL_TIMEOUT) => {}
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+async fn bridge_connections(address: Ipv6Addr) -> Result<()> {
+    let ssh_port = crate::config::load()?.ssh_port;
+    let mut control = connect_service(address, Service::V4Bridge { ssh_port }).await?;
+    tracing::info!("macOS app IPv4 bridge helper ready");
+    let mut byte = [0];
+    ensure!(
+        control.read(&mut byte).await? == 0,
+        "IPv4 bridge helper sent unexpected data"
+    );
+    bail!("IPv4 bridge helper control connection closed")
+}
+
+#[cfg(target_os = "macos")]
 fn grant_for(
     client: SocketAddr,
     local: Ipv6Addr,
@@ -202,34 +277,64 @@ fn grant_for(
 }
 
 /// Entry point for the app's hidden CLI command, launched by SMAppService.
+#[cfg(target_os = "macos")]
 pub async fn run() -> Result<()> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "SSH helper must run as root through launchd"
     );
     let listener = activated_listener()?;
+    let mut services = JoinSet::new();
     loop {
-        let (mut control, _) = listener.accept().await?;
+        let (control, _) = tokio::select! {
+            result = services.join_next(), if !services.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "macOS app helper service failed");
+                }
+                // Let launchd start the current bundled helper on reconnect.
+                if services.is_empty() {
+                    return Ok(());
+                }
+                continue;
+            }
+            accepted = listener.accept(), if services.len() < 2 => accepted?,
+        };
         if let Err(error) = require_root_peer(&control) {
             tracing::warn!(%error, "SSH helper refused control connection");
             continue;
         }
-        let result = async {
-            let hello: Hello = timeout(CONTROL_TIMEOUT, receive(&mut control)).await??;
-            validate_hello(&hello)?;
-            // Do not enable SO_REUSEPORT: another listener must never share these
-            // identity-authorized sessions, even when a helper is being replaced.
+        services.spawn(async move {
+            if let Err(error) = serve_control(control).await {
+                tracing::warn!(%error, "macOS app helper service stopped");
+            }
+        });
+    }
+}
+
+async fn serve_control(mut control: UnixStream) -> Result<()> {
+    let hello: Hello = timeout(CONTROL_TIMEOUT, receive(&mut control)).await??;
+    validate_hello(&hello)?;
+    match hello.service {
+        Service::Ssh { host_key } => {
+            // Identity-authorized sessions must not share a listener.
             let tcp = TcpListener::bind((hello.address, SSH_LISTEN_PORT)).await?;
-            let config = Arc::new(server_config(PrivateKey::from_openssh(&hello.host_key)?));
+            let config = Arc::new(server_config(PrivateKey::from_openssh(&host_key)?));
             run_listener(control, tcp, config).await
         }
-        .await;
-        if let Err(error) = result {
-            tracing::warn!(%error, "macOS SSH helper session stopped");
+        Service::V4Bridge { ssh_port } => {
+            let token = CancellationToken::new();
+            let _cancel = token.clone().drop_guard();
+            crate::v4bridge::V4Bridge::new(hello.address)
+                .with_ssh_port(ssh_port)
+                .spawn(token);
+            send(&mut control, &Ready { version: VERSION }).await?;
+            let mut byte = [0];
+            ensure!(
+                control.read(&mut byte).await? == 0,
+                "IPv4 bridge control sent unexpected data"
+            );
+            Ok(())
         }
-        // launchd starts the current bundled executable on the next connection.
-        // Do not retain an old helper across an app update or VPN reconnect.
-        return Ok(());
     }
 }
 
@@ -289,6 +394,7 @@ async fn run_listener(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn activated_listener() -> Result<UnixListener> {
     unsafe extern "C" {
         fn launch_activate_socket(
@@ -363,7 +469,9 @@ mod tests {
                 validate_hello(&Hello {
                     version: VERSION,
                     address,
-                    host_key: Vec::new(),
+                    service: Service::Ssh {
+                        host_key: Vec::new()
+                    },
                 })
                 .is_err()
             );
@@ -373,7 +481,9 @@ mod tests {
             validate_hello(&Hello {
                 version: VERSION,
                 address,
-                host_key: Vec::new(),
+                service: Service::Ssh {
+                    host_key: Vec::new()
+                },
             })
             .is_ok()
         );
@@ -381,7 +491,9 @@ mod tests {
             validate_hello(&Hello {
                 version: VERSION + 1,
                 address,
-                host_key: Vec::new(),
+                service: Service::Ssh {
+                    host_key: Vec::new()
+                },
             })
             .is_err()
         );
@@ -395,6 +507,27 @@ mod tests {
             require_root_peer(&control).is_ok(),
             unsafe { libc::geteuid() } == 0
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bridge_service_starts_without_ssh_and_stops_on_control_eof() -> Result<()> {
+        let (control, mut provider) = UnixStream::pair()?;
+        let task = tokio::spawn(serve_control(control));
+        send(
+            &mut provider,
+            &Hello {
+                version: VERSION,
+                address: "200::beef".parse()?,
+                service: Service::V4Bridge { ssh_port: 22 },
+            },
+        )
+        .await?;
+        let ready: Ready = timeout(CONTROL_TIMEOUT, receive(&mut provider)).await??;
+        assert_eq!(ready.version, VERSION);
+        assert!(!task.is_finished());
+        drop(provider);
+        timeout(CONTROL_TIMEOUT, task).await???;
         Ok(())
     }
 

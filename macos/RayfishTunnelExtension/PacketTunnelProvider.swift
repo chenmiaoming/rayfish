@@ -245,6 +245,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func status(from status: NodeStatus) -> ProviderStatus {
         ProviderStatus(
+            v4BridgeEnabled: status.v4BridgeEnabled,
             active: status.active,
             ipv6: status.ipv6,
             networks: status.networks.map { network in
