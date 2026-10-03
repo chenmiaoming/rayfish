@@ -203,42 +203,46 @@ do_teardown(){
       echo "Tear it down with: E2E_BACKEND=digitalocean tests/e2e.sh <scenario> teardown" >&2
       return 1
     fi
+  fi
 
-    local id ip label z
-    while read -r id ip label z; do
-      [[ -n "$id" ]] || continue
-      echo ">> removing $label  name=$id  ip=$ip"
-      docker rm -f "$id" >/dev/null 2>&1 || { echo "   (removal failed for $id)" >&2; failed=1; }
-    done < "$SERVERS"
+  # A retry can find containers already removed by a partially successful
+  # teardown. Only a successful list query establishes that they are absent.
+  local all_containers
+  if all_containers="$(docker ps -a --format '{{.Names}}' 2>&1)"; then
+    if [[ -f "$SERVERS" ]]; then
+      local id ip label z
+      while read -r id ip label z; do
+        [[ -n "$id" ]] || continue
+        if grep -qxF -- "$id" <<< "$all_containers"; then
+          echo ">> removing $label  name=$id  ip=$ip"
+          docker rm -f "$id" >/dev/null 2>&1 || { echo "   (removal failed for $id)" >&2; failed=1; }
+        fi
+      done < "$SERVERS"
 
-    if [[ "$failed" == 0 ]]; then
-      if rm -f "$SERVERS"; then
-        echo "Removed $SERVERS."
+      if [[ "$failed" == 0 ]]; then
+        if rm -f "$SERVERS"; then
+          echo "Removed $SERVERS."
+        else
+          echo "Failed to remove $SERVERS." >&2
+          failed=1
+        fi
       else
-        echo "Failed to remove $SERVERS." >&2
-        failed=1
+        echo "Left $SERVERS in place: some containers could not be removed." >&2
       fi
-    else
-      echo "Left $SERVERS in place: some containers could not be removed." >&2
-    fi
-  elif [[ ${#NAMES[@]} -gt 0 ]]; then
-    # No .servers — query Docker for existing containers by name.
-    # The list query must itself succeed; its failure means we cannot
-    # establish absence and must report a cleanup failure.
-    local all_containers
-    if all_containers="$(docker ps -a --format '{{.Names}}' 2>&1)"; then
+    elif [[ ${#NAMES[@]} -gt 0 ]]; then
+      local name
       for name in "${NAMES[@]}"; do
-        if echo "$all_containers" | grep -qxF "$name"; then
+        if grep -qxF -- "$name" <<< "$all_containers"; then
           echo ">> removing name=$name (fallback without .servers)"
           docker rm -f "$name" >/dev/null 2>&1 || { echo "   (removal failed for $name)" >&2; failed=1; }
         fi
       done
     else
-      echo "Failed to query Docker for containers (API unavailable?)." >&2
-      failed=1
+      echo "No $SERVERS — nothing to tear down."
     fi
   else
-    echo "No $SERVERS — nothing to tear down."
+    echo "Failed to query Docker for containers (API unavailable?)." >&2
+    failed=1
   fi
 
   # Drop the bridge once the last fleet is gone.

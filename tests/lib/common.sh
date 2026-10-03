@@ -125,11 +125,20 @@ deploy_all(){
   done
 }
 
-# wait_daemons <ip...> : poll until `ray status` responds on each host.
+# daemon_ready <ip> : require an IPC-backed status response. `ray status` exits
+# successfully even when the daemon is absent and prints its config fallback.
+# Standby daemons are ready too: .active must be boolean, not necessarily true.
+daemon_ready(){
+  local json
+  json="$(status_json "$1")" || return 1
+  echo "$json" | jq -e 'type == "object" and (.active | type == "boolean")' >/dev/null 2>&1
+}
+
+# wait_daemons <ip...> : poll until IPC responds on each host.
 wait_daemons(){
   local ip
   for ip in "$@"; do
-    if retry_until 30 "on '$ip' 'ray status' >/dev/null 2>&1"; then pass "daemon up on $ip"; else fail "daemon not responding on $ip"; fi
+    if retry_until 30 "daemon_ready '$ip'"; then pass "daemon up on $ip"; else fail "daemon not responding on $ip"; fi
   done
 }
 
@@ -138,7 +147,7 @@ wait_daemons(){
 activate_daemons(){
   local ip
   for ip in "$@"; do
-    if ! retry_until 60 "on '$ip' 'ray status' >/dev/null 2>&1"; then
+    if ! retry_until 60 "daemon_ready '$ip'"; then
       fail "daemon not responding on $ip"; return 1
     fi
     if ! on "$ip" 'ray up'; then
@@ -160,7 +169,8 @@ activate_daemons(){
 # ---------------------------------------------------------------------------
 
 # status_json <ip> : echo `ray status --json` from a host (raw JSON).
-status_json(){ on "$1" 'ray status --json' 2>/dev/null; }
+# A stuck daemon response must not prevent retry_until from making progress.
+status_json(){ on "$1" 'timeout --kill-after=2s 10s ray status --json' 2>/dev/null; }
 
 # my_ip <ip> [net] : this node's own mesh IPv6, for the named network or the
 # first if omitted. Fatal when absent, for the same reason as `own_ip`.
@@ -327,11 +337,18 @@ wait_roster(){
 # ---------------------------------------------------------------------------
 
 # tcp_probe <from-ip> <dst-vpn-ip> <port> : echo OPEN if a TCP SYN handshake
-# completes, CLOSED otherwise. A pure connect (no payload), so conntrack on the
-# sender isn't a factor.
+# completes, CLOSED on refusal/timeout, ERROR if the probe cannot execute.
+# A pure connect (no payload), so conntrack on the sender isn't a factor.
 tcp_probe(){
-  on "$1" "timeout 5 bash -c 'exec 3<>/dev/tcp/$2/$3' && echo OPEN || echo CLOSED" \
-    2>/dev/null | strip | tr -d '[:space:]'
+  local result
+  if ! result="$(on "$1" "if timeout 5 bash -c 'exec 3<>/dev/tcp/$2/$3'; then echo OPEN; else rc=\$?; case \$rc in 1|124) echo CLOSED ;; *) echo ERROR; exit 1 ;; esac; fi" 2>/dev/null)"; then
+    echo ERROR; return 1
+  fi
+  result="$(echo "$result" | strip | tr -d '[:space:]')"
+  case "$result" in
+    OPEN|CLOSED) echo "$result" ;;
+    *) echo ERROR; return 1 ;;
+  esac
 }
 
 # start_tcp_listener <ip> <port> / stop_tcp_listener <ip> <port> : a detached
@@ -345,10 +362,25 @@ tcp_probe(){
 # so these probes stay about the packet path. The bridge has its own scenario
 # (tests/e2e/v4bridge), which is where a `0.0.0.0` listener belongs.
 start_tcp_listener(){
-  on "$1" "setsid python3 -m http.server $2 --bind :: >/tmp/lst_$2.log 2>&1 </dev/null & sleep 1" \
-    >/dev/null 2>&1 || true
+  local ip="$1" port="$2" state end
+  stop_tcp_listener "$ip" "$port"
+  if on "$ip" "setsid python3 -c 'import http.server, os, socket; open(\"/tmp/lst_pid_$port\",\"w\").write(str(os.getpid())); http.server.ThreadingHTTPServer.address_family=socket.AF_INET6; server=http.server.ThreadingHTTPServer((\"::\",$port),http.server.SimpleHTTPRequestHandler); open(\"/tmp/lst_ready_$port\",\"w\").write(\"1\"); server.serve_forever()' >/tmp/lst_$port.log 2>&1 </dev/null &" >/dev/null 2>&1; then
+    end=$((SECONDS + 5))
+    while (( SECONDS < end )); do
+      if ! state="$(on "$ip" "if [ -f /tmp/lst_ready_$port ] && kill -0 \$(cat /tmp/lst_pid_$port) 2>/dev/null; then echo READY; elif [ -f /tmp/lst_pid_$port ] && ! kill -0 \$(cat /tmp/lst_pid_$port) 2>/dev/null; then echo ERROR; else echo WAIT; fi" 2>/dev/null)"; then break; fi
+      state="$(echo "$state" | tr -d '[:space:]')"
+      [[ "$state" == READY ]] && return 0
+      [[ "$state" == WAIT ]] || break
+      sleep 0.1
+    done
+  fi
+  stop_tcp_listener "$ip" "$port"
+  fail "TCP listener did not bind on $ip:$port"
+  return 1
 }
-stop_tcp_listener(){ on "$1" "pkill -f 'http.server $2'" >/dev/null 2>&1 || true; }
+stop_tcp_listener(){
+  on "$1" "[ -f /tmp/lst_pid_$2 ] && kill \$(cat /tmp/lst_pid_$2) 2>/dev/null || true; rm -f /tmp/lst_ready_$2 /tmp/lst_pid_$2" >/dev/null 2>&1 || true
+}
 
 # _cleanup_udp_receiver <dst-pub-ip> <port> : kill any running UDP test receiver
 # on the host and remove all marker/pid files.
@@ -364,14 +396,15 @@ _cleanup_udp_receiver(){
 # route the VPN range); the datagram itself is addressed to <dst-vpn-ip> so it
 # rides the TUN and is subject to the firewall.
 # A one-shot python receiver on the destination drops a readiness marker on successful
-# IPv6 socket bind, and a received marker on first packet.
+# IPv6 socket bind, and a received marker on first packet. It self-times out
+# after 60s so an interrupted runner cannot leave recvfrom blocked forever.
 udp_probe(){
   local from_pub="$1" dst_pub="$2" dst_vpn="$3" port="$4"
   # AF_INET6 on both ends: <dst-vpn-ip> is a mesh address and there is no other
   # family to fall back to, so an AF_INET socket here never sees the datagram.
   if ! on "$dst_pub" "[ -f /tmp/udp_pid_$port ] && kill \$(cat /tmp/udp_pid_$port) 2>/dev/null || true; rm -f /tmp/udp_ready_$port /tmp/udp_got_$port /tmp/udp_error_$port /tmp/udp_pid_$port; setsid python3 -c 'import socket, os, sys; open(\"/tmp/udp_pid_$port\",\"w\").write(str(os.getpid()));
 try:
- s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); s.bind((\"::\",$port)); open(\"/tmp/udp_ready_$port\",\"w\").write(\"1\")
+ s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); s.settimeout(60); s.bind((\"::\",$port)); open(\"/tmp/udp_ready_$port\",\"w\").write(\"1\")
 except Exception: sys.exit(1)
 try:
  s.recvfrom(64); open(\"/tmp/udp_got_$port\",\"w\").write(\"1\")
@@ -419,7 +452,8 @@ except Exception: open(\"/tmp/udp_error_$port\",\"w\").write(\"1\"); sys.exit(1)
   while (( SECONDS < end )); do
     local obs
     # A dead/broken receiver cannot prove that the firewall denied the packet.
-    # Keep it alive until cleanup rather than letting its timeout race SSH/send.
+    # Its 60s self-timeout bounds leaks after runner interruption while leaving
+    # ample time for readiness, dispatch, and this observation window.
     if ! obs="$(on "$dst_pub" "if [ -f /tmp/udp_got_$port ]; then echo GOT; elif [ ! -f /tmp/udp_error_$port ] && kill -0 \$(cat /tmp/udp_pid_$port) 2>/dev/null; then echo WAIT; else echo ERROR; fi" 2>/dev/null)"; then
       _cleanup_udp_receiver "$dst_pub" "$port"
       echo "ERROR"

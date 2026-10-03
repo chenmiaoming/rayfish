@@ -190,17 +190,19 @@ dump_diagnostics(){
   echo "==================== DIAGNOSTICS: $scn ===================="
   if [[ "$E2E_BACKEND" == "docker" ]]; then
     echo "--- Docker containers ---"
-    docker ps -a --filter "network=${E2E_DOCKER_NET:-rayfish-e2e}" 2>&1 || true
+    # Connection timeouts do not bound a connected SSH session or Docker RPC.
+    # Diagnostics must finish so an unresponsive node cannot prevent teardown.
+    timeout --kill-after=2s 10s docker ps -a --filter "network=${E2E_DOCKER_NET:-rayfish-e2e}" 2>&1 || true
     if [[ -f "$SERVERS" ]]; then
       local id ip label z
       while read -r id ip label z; do
         [[ -n "$id" ]] || continue
         echo "--- Host: $label ($id, $ip) ---"
         echo "  [ray status]"
-        ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no \
+        timeout --kill-after=2s 10s ssh -n -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no \
           -i "${SSH_KEY:-$HOME/.ssh/id_ed25519}" "root@$ip" 'ray status' 2>&1 || true
         echo "  [journalctl -u rayfish]"
-        docker exec "$id" journalctl -u rayfish -n 50 --no-pager 2>&1 || true
+        timeout --kill-after=2s 10s docker exec "$id" journalctl -u rayfish -n 50 --no-pager 2>&1 || true
       done < "$SERVERS"
     fi
   fi

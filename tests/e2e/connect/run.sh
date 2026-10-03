@@ -22,6 +22,45 @@ SERVERS="$DIR/.servers"
 source "$ROOT/tests/lib/common.sh"
 SR_PREFIX=/tmp/c   # temp-file prefix for send_recv
 
+# check_offline_contact <from> <to> <old-contact-id> : prove that a fresh,
+# unpublished contact id returns the expected lookup error within a deadline.
+check_offline_contact(){
+  local from="$1" to="$2" old_contact_id="$3"
+  if ! on "$to" 'ray down' >/dev/null 2>&1; then
+    fail "could not put srv-b in standby"; return 1
+  fi
+  if retry_until 10 "status_json '$to' | jq -e '.active == false' >/dev/null 2>&1"; then
+    pass "srv-b entered standby (inactive)"
+  else
+    fail "srv-b did not enter standby after ray down"; return 1
+  fi
+
+  # Rotation in standby must succeed without publishing the new contact record.
+  local rotated_json new_contact_id
+  if ! rotated_json="$(on "$to" 'ray contact rotate --json' 2>/dev/null)"; then
+    fail "could not rotate srv-b's contact id"; return 1
+  fi
+  if ! new_contact_id="$(printf '%s\n' "$rotated_json" | jq -er '
+    .contact_id | select(type == "string" and test("^[A-Za-z0-9]{20,}$"))')" \
+     || [[ "$new_contact_id" == "$old_contact_id" ]]; then
+    fail "contact rotation did not return a valid new id"; return 1
+  fi
+
+  local offline_out offline_rc=0
+  offline_out="$(on "$from" "timeout --kill-after=5s 30s ray connect $new_contact_id" 2>&1 | strip)" \
+    || offline_rc=$?
+  printf '%s\n' "$offline_out" | sed 's/^/   a| /'
+  # The CLI exits 1 for this daemon error. Timeout, SSH/IPC errors, and a
+  # successful command must fail even if their output mentions an offline peer.
+  if [[ "$offline_rc" == 1 ]] && printf '%s\n' "$offline_out" \
+      | grep -qE '^[[:space:]]*contact offline or unknown \(could not resolve contact id\)[[:space:]]*$'; then
+    pass "connect to offline/unknown contact errors cleanly"
+  else
+    fail "connect to offline contact did not return the expected lookup error (exit=$offline_rc)"
+    return 1
+  fi
+}
+
 [[ -f "$SERVERS" ]] || { echo "No $SERVERS — run $DIR/provision.sh first"; exit 1; }
 
 A="$(server_ip "$SERVERS" srv-a || true)"
@@ -197,25 +236,9 @@ fi
 
 # ---------------------------------------------------------------------------
 step "9. negative — connecting to an offline contact fails cleanly"
-# Put srv-b on standby so its contact record stops being published / endpoint
-# is unreachable. A fresh connect from A to B's (now stale) contact id should
-# error, not hang.
-on "$B" 'ray down' >/dev/null 2>&1 || true
-if retry_until 10 "status_json '$B' | jq -e '.active == false' >/dev/null 2>&1"; then
-  pass "srv-b entered standby (inactive)"
-else
-  fail "srv-b did not enter standby after ray down"
-fi
-# Rotate B's contact id so A's lookup of the NEW id can't resolve at all
-# (deterministic "offline/unknown" rather than racing the TTL).
-NEW_B_CID="$(on "$B" 'ray contact rotate' 2>/dev/null | strip | grep -oE '[A-Za-z0-9]{20,}' | head -1)"
-OFFLINE_OUT="$(on "$A" "ray connect ${NEW_B_CID:-$B_CID}" 2>&1 | strip)"
-echo "$OFFLINE_OUT" | sed 's/^/   a| /'
-if echo "$OFFLINE_OUT" | grep -qiE 'offline|unknown|could not resolve|failed'; then
-  pass "connect to offline/unknown contact errors cleanly"
-else
-  fail "connect to offline contact did not produce a clean error"
-fi
+# Stop publication, then rotate the contact id so lookup cannot race a cached
+# record's TTL or reuse the already-established direct network.
+check_offline_contact "$A" "$B" "$B_CID"
 on "$B" 'ray up' >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
