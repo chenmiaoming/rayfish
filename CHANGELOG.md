@@ -39,6 +39,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `.ray` names resolve on hosts with systemd-resolved `DNSOverTLS=yes`. Rayfish
+  now turns DNS over TLS off on its own interface, since Magic DNS answers plain
+  UDP only; lookups used to time out.
+
 - `ray apply` accepts target exclusions containing aliases with no joined
   devices. Rules go only to concrete targets, so later user devices receive no
   grant before reapplying. Peer exclusions still require joined devices.
