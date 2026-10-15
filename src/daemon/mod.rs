@@ -1644,18 +1644,23 @@ async fn open_and_send(conn: &Connection, net: Option<EndpointId>, msg: &Control
     control::send_msg(&mut send, net, msg).await
 }
 
-/// Send `ControlMsg::LeaveNetwork` on a fresh stream and wait until the peer has
-/// acknowledged all of it. `ray leave` tears the network down right after, which
-/// closes every link sharing no other network, and a close discards whatever is
-/// still unsent (the same wait as `send_welcome`).
-async fn send_leave(conn: &Connection, net_pubkey: EndpointId) -> Result<()> {
+/// Send one control message on a fresh stream and wait until the peer has
+/// acknowledged all of it. For a sender about to close the link: `ray leave`
+/// tears the network down right after, which closes every link sharing no other
+/// network, and a close discards whatever is still unsent (the same wait as
+/// `send_welcome`).
+async fn send_confirmed(
+    conn: &Connection,
+    net: Option<EndpointId>,
+    msg: &ControlMsg,
+) -> Result<()> {
     let (mut send, _recv) = conn.open_bi().await.context("open control stream")?;
-    control::send_msg(&mut send, Some(net_pubkey), &ControlMsg::LeaveNetwork).await?;
+    control::send_msg(&mut send, net, msg).await?;
     // A reader that took the frame but not the FIN stops the stream with code 0.
-    if let Some(code) = send.stopped().await.context("await leave delivery")?
+    if let Some(code) = send.stopped().await.context("await delivery")?
         && code != VarInt::from_u32(0)
     {
-        anyhow::bail!("peer stopped the leave stream: {code}");
+        anyhow::bail!("peer stopped the stream: {code}");
     }
     Ok(())
 }

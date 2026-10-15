@@ -319,10 +319,12 @@ pub enum ControlMsg {
     /// the primary holds the network key that signs the blob's nullifier set.
     /// Payload-free: the requesting device is the connection's authenticated remote.
     /// The primary acts only when the remote is one of its own paired secondaries
-    /// (a stranger is a no-op). Best-effort, sent while the link is still up; if it
-    /// is not delivered the device still self-tears-down and the primary can revoke
-    /// it later with `ray unpair`. Added after `LeaveNetwork`, so an older peer that
-    /// cannot decode this variant simply skips the frame (the pre-fix behavior).
+    /// (a stranger is a no-op). Sent before the device tears itself down, dialing
+    /// the primary when no link is up; a request the primary cannot receive then
+    /// is saved and retried until it has (`NetworkRegistry::request_unpair`). The
+    /// device tears itself down either way. Added after `LeaveNetwork`, so an
+    /// older peer that cannot decode this variant simply skips the frame (the
+    /// pre-fix behavior).
     RequestUnpair,
     /// Coordinator to member: you have been removed from *this* network (`ray
     /// kick`), the network scoped by the frame's `net`. A trigger, not authority:

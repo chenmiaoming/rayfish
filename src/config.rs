@@ -692,6 +692,12 @@ pub struct AppConfig {
     /// here when it re-pairs (re-auth). See `Daemon::unpair`/`reauth_device`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked_devices: Vec<String>,
+    /// The primary this device asked to revoke it when it unpaired itself, saved
+    /// while the primary has not received the request (`ControlMsg::RequestUnpair`).
+    /// The daemon retries it until the primary has, then clears it. A device that
+    /// pairs again drops it unsent. See `NetworkRegistry::request_unpair`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_unpair_request: Option<EndpointId>,
     /// Remote controllers authorized by this machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controllers: Vec<ControllerGrant>,
@@ -735,6 +741,7 @@ impl Default for AppConfig {
             pending_joins: Vec::new(),
             cert_generation: 0,
             revoked_devices: Vec::new(),
+            pending_unpair_request: None,
             controllers: Vec::new(),
             managed_machines: Vec::new(),
             forgotten_machines: Vec::new(),
@@ -907,6 +914,8 @@ struct Settings {
     cert_generation: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     revoked_devices: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_unpair_request: Option<EndpointId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     controllers: Vec<ControllerGrant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1469,6 +1478,7 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         pending_joins: settings.pending_joins,
         cert_generation: settings.cert_generation,
         revoked_devices: settings.revoked_devices,
+        pending_unpair_request: settings.pending_unpair_request,
         controllers: settings.controllers,
         managed_machines: settings.managed_machines,
         forgotten_machines: settings.forgotten_machines,
@@ -1545,6 +1555,7 @@ fn settings_toml(config: &AppConfig) -> Result<String> {
         pending_joins: config.pending_joins.clone(),
         cert_generation: config.cert_generation,
         revoked_devices: config.revoked_devices.clone(),
+        pending_unpair_request: config.pending_unpair_request,
         controllers: config.controllers.clone(),
         managed_machines: config.managed_machines.clone(),
         forgotten_machines: config.forgotten_machines.clone(),

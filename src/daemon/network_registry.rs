@@ -205,6 +205,13 @@ pub(crate) struct NetworkRegistry {
     /// The cost of a missed nudge is one tick of staleness, which is what the
     /// poll was for anyway.
     pub(crate) poll_nudge: Arc<Notify>,
+    /// Wakes [`Self::run_unpair_retries`] when an unpair request is saved.
+    pub(crate) unpair_nudge: Arc<Notify>,
+    /// Held while this device pairs or unpairs itself, and across each retry of
+    /// a saved unpair request, so a retry never sees either half done: the cert
+    /// of an unpair still under way would pass for a new pairing and drop the
+    /// request, and a pairing completed under a retry would be revoked by it.
+    pub(crate) unpair_lock: AsyncMutex<()>,
 }
 
 /// One saved network the restore supervisor found missing from the live map,
@@ -312,6 +319,8 @@ impl NetworkRegistry {
             restore_errors: Arc::new(DashMap::new()),
             restore_nudge: Arc::new(Notify::new()),
             poll_nudge: Arc::new(Notify::new()),
+            unpair_nudge: Arc::new(Notify::new()),
+            unpair_lock: AsyncMutex::new(()),
         }
     }
 
@@ -721,7 +730,7 @@ impl NetworkRegistry {
                 .peers
                 .conn_for_ip(&ip)
                 .context("the link closed before the leave was sent")?;
-            send_leave(&conn, net_pubkey).await
+            send_confirmed(&conn, Some(net_pubkey), &ControlMsg::LeaveNetwork).await
         })
     }
 

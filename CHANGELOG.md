@@ -70,6 +70,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Leaving a network could close a peer connection that a concurrent reconnect
   had just reused for another network.
 
+- A device that unpairs itself, such as a phone in the Android app, now gets
+  its request to the primary when no connection between them is open, which
+  on-demand mode makes the usual case. While the primary is offline, the device
+  retries for as long as Rayfish runs on it. A missed request used to leave the
+  device's certificate unrevoked and, with the primary offline, the device still
+  listed in its networks until someone ran `ray unpair` there.
+
 - Turning mDNS discovery off while a window was opening could leave the mDNS
   sockets open and still answering lookups.
 

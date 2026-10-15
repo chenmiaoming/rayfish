@@ -68,6 +68,10 @@ impl Daemon {
         endpoint_id: EndpointId,
         secret: Vec<u8>,
     ) -> IpcMessage {
+        // A request this device saved when it last unpaired would revoke the
+        // pairing made here. A retry drops it once it finds the new cert; this
+        // keeps one from checking before the cert is stored and sending after.
+        let _guard = self.registry.unpair_lock.lock().await;
         let addr: iroh::EndpointAddr = endpoint_id.into();
         tracing::info!(primary = %endpoint_id.fmt_short(), "dialing primary device for pairing");
         // `Endpoint::connect` has no built-in timeout: if a path to the primary
@@ -336,30 +340,22 @@ impl Daemon {
         }
     }
 
-    /// Best-effort `ControlMsg::RequestUnpair` to our primary over a shared live
-    /// mesh connection, asking it to write the authoritative nullifier for this
-    /// device. Sent while the link is up, before we tear ourselves down. If it is
-    /// not delivered (we are offline from the primary) the primary keeps a stale
-    /// roster entry until someone runs `ray unpair` on it; the local teardown still
-    /// happens either way. A device with no cert (a primary) has no primary to ask.
-    async fn request_primary_nullify(&self) {
-        let Some(cert) = self.registry.current_device_cert() else {
-            return;
-        };
-        self.send_control_once(cert.user_identity, &ControlMsg::RequestUnpair)
-            .await;
-    }
-
     /// Unpair *this* device from its primary. First asks the primary to write the
-    /// authoritative nullifier (`request_primary_nullify`, best-effort while the
-    /// link is up), then locally deletes the stored device cert and leaves networks
-    /// first joined with that certificate, closing each
+    /// authoritative nullifier ([`NetworkRegistry::request_unpair`], which dials
+    /// the primary when no link is up and saves the request for a retry when it
+    /// cannot be reached), then locally deletes the stored device cert and leaves
+    /// networks first joined with that certificate, closing each
     /// connection with the leave code so coordinators prune us and every peer drops
     /// us right away (rather than waiting on the revocation floor). Used by the
     /// phone's "unpair this device" control. A device with no cert (a primary) has
     /// nothing to unpair.
     pub async fn unpair_self(&self) -> IpcMessage {
-        self.request_primary_nullify().await;
+        // Held to the end: a retry of an earlier saved request must not find the
+        // cert still on disk and take it for a new pairing.
+        let _guard = self.registry.unpair_lock.lock().await;
+        if let Some(cert) = self.registry.current_device_cert() {
+            self.registry.request_unpair(cert.user_identity).await;
+        }
         self.registry.unpair_self().await
     }
 }

@@ -623,6 +623,10 @@ async fn build_daemon_inner(
                 .await;
         });
     }
+    // Retries an unpair request this device saved because its primary could not
+    // be reached. Spawned here too, so the mobile embedder gets it: a phone is
+    // what unpairs itself.
+    tokio::spawn(Arc::clone(&registry).run_unpair_retries());
 
     // Idle teardown is per-connection now: each `MeshConnection` closes itself when
     // it goes idle (see its run loop), gated on `on_demand` + the peer advertising

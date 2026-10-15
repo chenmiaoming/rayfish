@@ -27,6 +27,7 @@ mod reconverge;
 mod rename;
 mod runtime;
 mod select;
+mod unpair;
 
 // The join handshake (`join`) and the background-task / reconvergence modules
 // (split out of the former `background.rs`: `publish`, `reconverge`,
