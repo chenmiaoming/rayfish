@@ -441,6 +441,9 @@ impl Daemon {
                 .await
             }
             IpcMessage::Leave { name } => self.leave_network(&name).await,
+            IpcMessage::RenameNetwork { network, new_name } => {
+                self.registry.rename_network(&network, &new_name).await
+            }
             IpcMessage::Nuke { name, force } => self.registry.nuke_network(&name, force).await,
             IpcMessage::Kick {
                 network,

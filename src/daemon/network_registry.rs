@@ -30,6 +30,11 @@ const LAZY_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// hold up `ray leave`.
 const LEAVE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long `ray rename` waits for a coordinator network to come back under its
+/// new name before replying. Restoring one is local, so this is only a bound;
+/// past it the restore carries on in the background.
+const RENAME_RESTORE_WAIT: Duration = Duration::from_secs(10);
+
 /// Keep the persisted hint set small and bounded.  A hint is only a speed-up;
 /// the endpoint id in the QUIC certificate remains the authentication boundary.
 const MAX_WARM_ENDPOINT_HINTS: usize = 64;
@@ -599,6 +604,14 @@ impl NetworkRegistry {
     /// static, so (unlike the old `refresh_alpns`) only the search domains need
     /// updating here.
     pub(crate) async fn teardown_network_runtime(&self, name: &str) -> bool {
+        self.teardown_network_runtime_closing(name, forward::LEAVE_CODE, b"leave")
+            .await
+    }
+
+    /// [`Self::teardown_network_runtime`], closing the links it leaves unused with
+    /// `code`. The leave code tells a coordinator we left; a network restarted
+    /// under a new name ([`Self::rename_network`]) has not.
+    async fn teardown_network_runtime_closing(&self, name: &str, code: u32, reason: &[u8]) -> bool {
         let Some(handle) = self.networks.remove(name).map(|(_, v)| v) else {
             return false;
         };
@@ -609,10 +622,11 @@ impl NetworkRegistry {
 
         // Drop this network from every peer's routing. A peer left sharing no
         // network at all is fully disconnected, so close its now-unused link with
-        // the leave code (the peer treats it as intentional and stops reconnecting);
-        // a peer we still share another network with keeps its connection.
+        // `code` (on the leave code the peer treats it as intentional and stops
+        // reconnecting); a peer we still share another network with keeps its
+        // connection.
         for (_ip, conn) in self.peers.remove_by_network(name) {
-            conn.close(VarInt::from_u32(forward::LEAVE_CODE), b"leave");
+            conn.close(VarInt::from_u32(code), reason);
         }
         self.dns.clear_network(name).await;
         self.route_map.remove_network(name);
@@ -744,6 +758,84 @@ impl NetworkRegistry {
             }
         };
         was_active || removed_from_config
+    }
+
+    /// Rename a network on this node only (`ray rename`). The name is local: it
+    /// is the config's file name, the Magic DNS zone (`<host>.<name>.ray`) and
+    /// the key every runtime structure files the network under. Peers know the
+    /// network by its key, and the signed blob carries its own name
+    /// (`group_name`), so neither notices.
+    ///
+    /// A live network is restarted under the new name, as a daemon restart
+    /// would bring it back, rather than rekeyed in place, which would mean
+    /// finding every structure and task that holds the name. Its links close with
+    /// the idle code: a peer lets an idle link go without reconnecting, and a
+    /// coordinator does not take it for a departure the way it takes the leave
+    /// code, so nobody prunes us.
+    pub(crate) async fn rename_network(self: &Arc<Self>, from: &str, to: &str) -> IpcMessage {
+        if !crate::hostname::is_valid_hostname(to) {
+            return ipc_err(format!(
+                "invalid network name '{to}': use 1-63 lowercase ASCII letters, digits, or hyphens (no leading/trailing hyphen)"
+            ));
+        }
+        if from == to {
+            return ipc_err(format!("network '{from}' already has that name"));
+        }
+        match config::load_network(from) {
+            Ok(Some(_)) => {}
+            Ok(None) => return ipc_err(format!("network '{from}' not found")),
+            Err(e) => return ipc_err(format!("{e:#}")),
+        }
+        match self.name_owner(to) {
+            Ok(NameOwner::Free) => {}
+            Ok(_) => {
+                return ipc_err(format!(
+                    "network name '{to}' belongs to another network on this node; choose another name"
+                ));
+            }
+            Err(e) => return ipc_err(format!("{e:#}")),
+        }
+        // Holding the restore guard keeps the supervisor from restoring the old
+        // name while the network moves. A restore already under way would bring
+        // the network up under the old name after the move, so wait for it.
+        if !self.restoring.insert(from.to_string()) {
+            return ipc_err(format!(
+                "network '{from}' is still being restored; try again once it is up"
+            ));
+        }
+        self.teardown_network_runtime_closing(from, forward::IDLE_CODE, b"rename")
+            .await;
+        let moved = config::rename_network(from, to).and_then(|_| config::load_network(to));
+        self.restoring.remove(from);
+        let net = match moved {
+            Ok(Some(net)) => net,
+            // Left meanwhile, so there is nothing to bring back.
+            Ok(None) => return ipc_err(format!("network '{from}' not found")),
+            Err(e) => {
+                // Still saved under its old name: restore it there now rather
+                // than at the supervisor's next tick.
+                self.nudge_restore();
+                return ipc_err(format!("{e:#}"));
+            }
+        };
+        if let Some(rules) = self.firewall.rename_network(from, to)
+            && let Err(e) = firewall::save_firewall(&rules)
+        {
+            tracing::warn!(error = %e, "failed to save firewall rules for renamed network");
+        }
+        self.restore_errors.remove(from);
+        if net.network_secret_key.is_some() {
+            // Local and quick, so `ray status` right after shows the new name.
+            if let Some(restore) = self.spawn_coordinator_restore(&net) {
+                let _ = tokio::time::timeout(RENAME_RESTORE_WAIT, restore).await;
+            }
+        } else {
+            self.spawn_member_restore(&net);
+        }
+        tracing::info!(from, to, "renamed network");
+        IpcMessage::Ok {
+            message: format!("renamed network '{from}' to '{to}'"),
+        }
     }
 
     /// Look up an active network we coordinate, returning its public key and

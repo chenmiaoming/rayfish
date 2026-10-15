@@ -143,7 +143,7 @@ pub(crate) mod destruction;
 mod write;
 
 pub use write::{restrict_perms, write_file};
-use write::{sync_file_and_parent, write_atomic};
+use write::{sync_dir, sync_file_and_parent, write_atomic};
 
 /// Info about a member in a saved network config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1756,6 +1756,44 @@ fn delete_network_unlocked(dir: &Path, name: &str) -> Result<bool> {
     }
 }
 
+/// Save a network's config under a new local name: `networks/<from>.toml`
+/// becomes `networks/<to>.toml`, and the name inside it follows. Returns false
+/// when no network is saved as `from`, and refuses a `to` that is taken.
+///
+/// The file is moved, not copied and then deleted: a crash between a copy and
+/// the delete would leave the network saved twice, under two names that would
+/// both restore it. A crash between the move and the rewrite after it instead
+/// leaves a file whose inner name lags its file name, which `update_network`
+/// refuses (`apply_network_update`) rather than guess which name is meant.
+pub fn rename_network(from: &str, to: &str) -> Result<bool> {
+    rename_network_in(&config_dir()?, from, to)
+}
+
+fn rename_network_in(dir: &Path, from: &str, to: &str) -> Result<bool> {
+    ensure_not_in_network_update()?;
+    validate_net_name(to)?;
+    let _guard = NETWORK_CONFIG_LOCK
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(mut net) = load_network_unlocked(dir, from)? else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        net.name == from,
+        "network config {from:?} contains mismatched name {:?}",
+        net.name
+    );
+    let ndir = dir.join(NETWORKS_SUBDIR);
+    let target = ndir.join(format!("{to}.toml"));
+    anyhow::ensure!(!target.exists(), "a network is already saved as {to:?}");
+    std::fs::rename(ndir.join(format!("{from}.toml")), &target)
+        .with_context(|| format!("renaming network config {from:?} to {to:?}"))?;
+    sync_dir(&ndir)?;
+    net.name = to.to_string();
+    save_network_unlocked(dir, &net)?;
+    Ok(true)
+}
+
 /// Add or update a network in the config. If a network with the same name
 /// already exists, it is replaced.
 pub fn upsert_network(config: &mut AppConfig, network: NetworkConfig) {
@@ -2344,6 +2382,53 @@ name = "test"
         let after = load_in(dir).unwrap();
         assert_eq!(after.networks.len(), 1);
         assert_eq!(after.networks[0].name, "genesis");
+    }
+
+    /// A rename moves the whole config, keys and node-local settings included,
+    /// and leaves nothing saved under the old name.
+    #[test]
+    fn rename_moves_a_network_to_its_new_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let mut home = net("homelab");
+        home.aliases.insert("alice".into(), "id-alice".into());
+        save_network_unlocked(dir, &home).unwrap();
+
+        assert!(rename_network_in(dir, "homelab", "lab").unwrap());
+        assert!(load_network_unlocked(dir, "homelab").unwrap().is_none());
+        let lab = load_network_unlocked(dir, "lab").unwrap().unwrap();
+        let expected = NetworkConfig {
+            name: "lab".into(),
+            ..home
+        };
+        assert_eq!(
+            ::toml::to_string(&lab).unwrap(),
+            ::toml::to_string(&expected).unwrap()
+        );
+        // The name inside the file moved too, so updates under the new name work.
+        assert!(update_network_in(dir, "lab", |_| Ok(())).unwrap().is_some());
+        assert_eq!(load_in(dir).unwrap().networks.len(), 1);
+        assert!(!rename_network_in(dir, "homelab", "office").unwrap());
+    }
+
+    /// A rename never replaces the config of a network already saved under the
+    /// new name, whose secret key would go with it.
+    #[test]
+    fn rename_refuses_a_name_another_network_is_saved_under() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (homelab, genesis) = (net("homelab"), net("genesis"));
+        save_network_unlocked(dir, &homelab).unwrap();
+        save_network_unlocked(dir, &genesis).unwrap();
+
+        assert!(rename_network_in(dir, "homelab", "genesis").is_err());
+        for kept in [&homelab, &genesis] {
+            let saved = load_network_unlocked(dir, &kept.name).unwrap().unwrap();
+            assert_eq!(
+                ::toml::to_string(&saved).unwrap(),
+                ::toml::to_string(kept).unwrap()
+            );
+        }
     }
 
     #[test]
