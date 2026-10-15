@@ -22,6 +22,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Updated peer connections to iroh 1.3 with upstream connection setup and
+  protocol routing fixes.
+
 - Standalone forwarding uses a 16 KiB QUIC send queue instead of 1 MiB so
   excess traffic is dropped sooner rather than building a long backlog.
 

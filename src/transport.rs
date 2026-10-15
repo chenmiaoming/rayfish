@@ -12,7 +12,7 @@ use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey,
     address_lookup::{PkarrPublisher, PkarrResolver},
-    dns::{DnsProtocol, DnsResolver},
+    dns::{DnsResolver, NameserverConfig},
     endpoint::Connection,
     endpoint::presets,
     endpoint::{BindOpts, Builder, DirectAddrFilter, QuicTransportConfig, SocketConfigurator},
@@ -312,7 +312,7 @@ async fn bind_endpoint(cfg: &BindConfig<'_>, port: u16) -> Result<Endpoint> {
     // with it, and a resolv.conf that already points at our magic IP (a restart
     // before the revert, a crash) makes the control plane wait on the data plane
     // it exists to bring up. Not setting `with_system_defaults` is deliberate:
-    // hickory then never reads the file, so neither can come back.
+    // the resolver never reads the file, so neither can come back.
     //
     // Empty means we had no way to read the host's resolvers (Android reads them
     // over JNI, and its own resolver honours the device's Private DNS), so leave
@@ -320,10 +320,10 @@ async fn bind_endpoint(cfg: &BindConfig<'_>, port: u16) -> Result<Endpoint> {
     if !nameservers.is_empty() {
         builder = builder.dns_resolver(
             DnsResolver::builder()
-                .with_nameservers(
+                .add_nameserver_configs(
                     nameservers
                         .iter()
-                        .map(|ip| (SocketAddr::from((*ip, 53u16)), DnsProtocol::Udp)),
+                        .map(|ip| NameserverConfig::udp(IpAddr::V4(*ip))),
                 )
                 .build(),
         );
