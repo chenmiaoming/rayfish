@@ -314,6 +314,27 @@ impl Default for FirewallConfig {
     }
 }
 
+impl FirewallConfig {
+    /// Follow a network renamed on this node from `from` to `to`: rules scoped
+    /// to it and rules installed from its suggestions name it by its local name,
+    /// and without this a scoped rule would stop matching while the suggested
+    /// ones were never replaced again. Returns whether any rule named it.
+    pub fn rename_network(&mut self, from: &str, to: &str) -> bool {
+        let mut renamed = false;
+        for rule in &mut self.rules {
+            if rule.network.as_deref() == Some(from) {
+                rule.network = Some(to.to_string());
+                renamed = true;
+            }
+            if matches!(&rule.origin, RuleOrigin::Network(n) if n == from) {
+                rule.origin = RuleOrigin::Network(to.to_string());
+                renamed = true;
+            }
+        }
+        renamed
+    }
+}
+
 /// How long an idle TCP flow stays "established" (return traffic still allowed).
 const TCP_FLOW_TIMEOUT: Duration = Duration::from_secs(300);
 /// UDP is connectionless: use a short window so return traffic for a recent
@@ -669,25 +690,11 @@ impl SharedFirewall {
         config
     }
 
-    /// Follow a network renamed on this node from `from` to `to`: rules scoped
-    /// to it and rules installed from its suggestions name it by its local name,
-    /// and without this a scoped rule would stop matching while the suggested
-    /// ones were never replaced again. Returns the updated config for
-    /// persistence, or `None` when no rule names the network.
+    /// [`FirewallConfig::rename_network`] on the live rules. Returns the updated
+    /// config for persistence, or `None` when no rule names the network.
     pub fn rename_network(&self, from: &str, to: &str) -> Option<FirewallConfig> {
         let mut config = (*self.get_config()).clone();
-        let mut renamed = false;
-        for rule in &mut config.rules {
-            if rule.network.as_deref() == Some(from) {
-                rule.network = Some(to.to_string());
-                renamed = true;
-            }
-            if matches!(&rule.origin, RuleOrigin::Network(n) if n == from) {
-                rule.origin = RuleOrigin::Network(to.to_string());
-                renamed = true;
-            }
-        }
-        if !renamed {
+        if !config.rename_network(from, to) {
             return None;
         }
         self.update(config.clone());

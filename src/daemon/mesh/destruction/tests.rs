@@ -280,6 +280,164 @@ async fn rename_restarts_a_live_network_under_its_new_name() {
     daemon.shutdown_and_close().await;
 }
 
+/// What restarting a network does not rebuild moves to its new name: the exit
+/// policy a gateway forwards by, a full tunnel's exit selection, the SSH
+/// allow-lists, and the peers pruned from the network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn rename_moves_live_state_filed_under_the_name() {
+    let _lock = config::CONFIG_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let _env = ConfigDir::set(dir.path());
+    let relay = Relay::start().await;
+    relay.configure();
+    let daemon = build_headless(false).await.unwrap();
+    create(&daemon, "home").await;
+    let user = SecretKey::generate().public();
+    config::update_network("home", |net| {
+        net.exit_allow = vec!["*".to_string()];
+        net.ssh_allow = vec![config::SshRule {
+            peer: "*".to_string(),
+            users: Vec::new(),
+        }];
+        Ok(())
+    })
+    .unwrap()
+    .unwrap();
+    // As `ray up` loads them, then a full tunnel through a peer on the network.
+    assert!(daemon.registry.reload_exit_state().is_none());
+    #[cfg(feature = "desktop")]
+    daemon.rebuild_ssh_authz();
+    daemon
+        .registry
+        .exit_client
+        .set(Some(crate::exit_node::ExitSelection {
+            peer_user: user,
+            ipv6: derive_ipv6(&user),
+            network: "home".into(),
+            carries: crate::membership::ExitFamilies::V6,
+        }));
+    daemon
+        .registry
+        .pruned_peers
+        .insert(("home".to_string(), user));
+    assert!(daemon.registry.exit_server.allows("home", &user));
+
+    let rename = IpcMessage::RenameNetwork {
+        network: "home".to_string(),
+        new_name: "lab".to_string(),
+    };
+    let result = daemon
+        .handle_authorized_request(rename, None, Vec::new())
+        .await;
+    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
+    assert!(daemon.registry.exit_server.allows("lab", &user));
+    assert!(!daemon.registry.exit_server.allows("home", &user));
+    assert_eq!(
+        daemon
+            .registry
+            .exit_client
+            .selection()
+            .map(|s| s.network.clone()),
+        Some("lab".into())
+    );
+    #[cfg(feature = "desktop")]
+    {
+        let authz = daemon.ssh_authz.load();
+        assert!(authz.contains_key("lab"));
+        assert!(!authz.contains_key("home"));
+    }
+    assert!(
+        daemon
+            .registry
+            .pruned_peers
+            .contains(&("lab".to_string(), user))
+    );
+    assert!(
+        !daemon
+            .registry
+            .pruned_peers
+            .contains(&("home".to_string(), user))
+    );
+    daemon.shutdown_and_close().await;
+}
+
+/// A crash between moving a network's file and rewriting the name inside it
+/// leaves the network listed under a name that cannot load it. The next start
+/// finishes the rename from its saved intent before restoring anything, firewall
+/// rules included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
+async fn a_restart_finishes_an_interrupted_rename() {
+    let _lock = config::CONFIG_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let _env = ConfigDir::set(dir.path());
+    let relay = Relay::start().await;
+    relay.configure();
+    let daemon = build_headless(false).await.unwrap();
+    let net_pubkey = create(&daemon, "home")
+        .await
+        .network_secret_key
+        .unwrap()
+        .public();
+    let mut rules = firewall::load_firewall().unwrap();
+    rules.rules.push(firewall::FirewallRule {
+        direction: firewall::Direction::In,
+        action: firewall::Action::Deny,
+        protocol: firewall::Protocol::Tcp,
+        port: Some(firewall::PortRange { start: 22, end: 22 }),
+        peer: firewall::PeerFilter::Any,
+        network: Some("home".to_string()),
+        origin: firewall::RuleOrigin::Local,
+    });
+    firewall::save_firewall(&rules).unwrap();
+    daemon.shutdown_and_close().await;
+
+    // The intent saved and the file moved, but the old name still inside it and
+    // the firewall rules not yet renamed.
+    let moved = config::rename_network("home", "lab").unwrap().unwrap();
+    let unrewritten = config::NetworkConfig {
+        name: "home".to_string(),
+        ..moved
+    };
+    std::fs::write(
+        dir.path().join("networks").join("lab.toml"),
+        ::toml::to_string_pretty(&unrewritten).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config::load().unwrap().networks[0].name, "home");
+    assert!(config::load_network("home").unwrap().is_none());
+
+    let daemon = build_headless(false).await.unwrap();
+    assert_eq!(
+        daemon.registry.networks.get("lab").map(|h| h.network_key),
+        Some(net_pubkey)
+    );
+    assert!(!daemon.registry.networks.contains_key("home"));
+    assert!(config::rename_intent().unwrap().is_none());
+    assert_eq!(config::load_network("lab").unwrap().unwrap().name, "lab");
+    assert_eq!(config::load().unwrap().networks.len(), 1);
+    let scoped_to = |rules: &[firewall::FirewallRule]| {
+        rules
+            .iter()
+            .filter_map(|r| r.network.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        scoped_to(&daemon.registry.firewall.get_config().rules),
+        ["lab"]
+    );
+    assert_eq!(
+        scoped_to(&firewall::load_firewall().unwrap().rules),
+        ["lab"]
+    );
+    daemon.shutdown_and_close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn last_coordinator_nuke_delivers_proof_and_preserves_shared_links() {

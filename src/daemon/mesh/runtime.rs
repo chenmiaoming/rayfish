@@ -915,14 +915,18 @@ impl NetworkRegistry {
 
     /// Start a member network's restore loop, unless one is already running for
     /// it. The [`restoring`](NetworkRegistry::restoring) guard is what lets the
-    /// startup path and the supervisor's sweep both call this freely.
-    pub(crate) fn spawn_member_restore(self: &Arc<Self>, net: &config::NetworkConfig) {
+    /// startup path and the supervisor's sweep both call this freely. Returns
+    /// the loop's handle, for a caller with work to do once it ends.
+    pub(crate) fn spawn_member_restore(
+        self: &Arc<Self>,
+        net: &config::NetworkConfig,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let Some(net_pubkey) = net.network_public_key.map(|k| k.to_string()) else {
             tracing::warn!(network = %net.name, "no network public key in config, skipping restore");
-            return;
+            return None;
         };
         if !self.restoring.insert(net.name.clone()) {
-            return;
+            return None;
         }
         let me = Arc::clone(self);
         let guard = net.name.clone();
@@ -935,10 +939,10 @@ impl NetworkRegistry {
             cached_hash: net.last_group_hash,
             cached_is_published: net.last_group_hash_published,
         };
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             Arc::clone(&me).restore_member_network(saved).await;
             me.restoring.remove(&guard);
-        });
+        }))
     }
 
     /// Start a coordinator network's restore, unless one is already running for
