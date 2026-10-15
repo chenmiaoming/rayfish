@@ -6,14 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-10-15
+
 ### Added
-
-- Experimental `ray config set quic-engine fq-codel` gives inner flows
-  separate queues and favors sparse traffic over bulk transfers. It combines
-  CoDel queue management with loss-tolerant congestion control and applies after restarting the daemon.
-
-- `ray files auto-accept add/remove <peer>` saves trusted file senders; `list`
-  shows their identities. The macOS Files page can add and remove them too.
 
 - `ray firewall test <peer> <proto:port>` shows whether the firewall would let a
   packet through and which rule or default decides, without sending anything.
@@ -34,11 +29,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after joining another network. On busy Wi-Fi the open sockets received every mDNS
   packet on the LAN, which drained Android batteries. LAN sightings now expire
   after two missed windows.
-
-- `quic-engine` replaces `quic-congestion`, with `standalone` (default) and
-  `fq-codel` choices. Both use loss-tolerant congestion control. Saved controller
-  settings migrate to the corresponding engine. macOS Settings and Android You
-  offer an engine selector and a reconnect or restart action.
 
 ### Fixed
 
@@ -82,12 +72,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - SSH to your own mesh address permits your local account without a password.
   Root may select any account; mesh SSH grants do not apply to local callers.
 
-- Peer send queue metrics include the FQ-CoDel backlog and use the selected
-  engine's QUIC buffer size.
-
-- Network-scoped firewall rules apply to peers sharing that network, regardless
-  of which shared network carries their packets.
-
 - `ray leave` reaches the network's coordinator even when the connection to it
   had gone idle, as it usually has on a phone. The device no longer stays on the
   roster holding its hostname until someone runs `ray kick`.
@@ -109,6 +93,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over a large offloaded packet that Rayfish could not split ("too many GSO
   segments"). Rayfish now drops that one packet, counts it as a `TunRead` drop,
   and keeps forwarding.
+
+- The Linux systemd service starts the daemon as root again so it can
+  configure the interface and manage DNS.
+
+## [0.5.8] - 2026-10-04
+
+### Added
+
+- Experimental `ray config set quic-engine fq-codel` gives inner flows
+  separate queues and favors sparse traffic over bulk transfers. It combines
+  CoDel queue management with loss-tolerant congestion control and applies after restarting the daemon.
+
+- `ray files auto-accept add/remove <peer>` saves trusted file senders; `list`
+  shows their identities. The macOS Files page can add and remove them too.
+
+### Changed
+
+- `quic-engine` replaces `quic-congestion`, with `standalone` (default) and
+  `fq-codel` choices. Both use loss-tolerant congestion control. Saved controller
+  settings migrate to the corresponding engine. macOS Settings and Android You
+  offer an engine selector and a reconnect or restart action.
+
+### Fixed
+
+- Peer send queue metrics include the FQ-CoDel backlog and use the selected
+  engine's QUIC buffer size.
+
+- Network-scoped firewall rules apply to peers sharing that network, regardless
+  of which shared network carries their packets.
 
 ## [0.5.7] - 2026-10-03
 
@@ -2752,7 +2765,10 @@ First public release.
 - **Optional transports / export**: `--features tor` (Tor transport) and
   `--features otel` (OTLP span export).
 
-[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.9...HEAD
+[0.5.9]: https://github.com/rayfish/rayfish/compare/v0.5.8...v0.5.9
+[0.5.8]: https://github.com/rayfish/rayfish/compare/v0.5.7...v0.5.8
+[0.5.7]: https://github.com/rayfish/rayfish/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/rayfish/rayfish/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/rayfish/rayfish/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/rayfish/rayfish/compare/v0.5.3...v0.5.4
