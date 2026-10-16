@@ -1542,7 +1542,8 @@ mod tests {
     }
 
     /// Only real interfaces at `accept_ra=1` are raised: not the templates, not
-    /// loopback, not our TUN, and not one already at 0 or 2.
+    /// loopback, not our TUN, not one already at 0 or 2, and not one that was
+    /// already forwarding.
     #[cfg(target_os = "linux")]
     #[test]
     fn accept_ra_is_raised_only_where_forwarding_would_silence_it() {
@@ -1560,8 +1561,13 @@ mod tests {
         .map(|(n, v)| (n.to_string(), v.to_string()))
         .collect();
         assert_eq!(
-            ra_interfaces_to_raise(&current, "tun-rayfish"),
+            ra_interfaces_to_raise(&current, "tun-rayfish", &[]),
             ["eth0", "enp3s0"]
+        );
+        // An interface that was forwarding on its own already ignored RAs.
+        assert_eq!(
+            ra_interfaces_to_raise(&current, "tun-rayfish", &["enp3s0".to_string()]),
+            ["eth0"]
         );
     }
 

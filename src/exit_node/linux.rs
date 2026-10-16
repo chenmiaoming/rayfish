@@ -208,7 +208,17 @@ fn keep_accepting_ras(tun_name: &str, snap: &mut Snapshot, path: &Path) -> Resul
             (name, value)
         })
         .collect();
-    let raise = ra_interfaces_to_raise(&current, tun_name);
+    // The values from before we turned `all/forwarding` on, which rewrote
+    // every interface's own: on a re-enable the live ones all read 1.
+    let forwarding: Vec<String> = current
+        .iter()
+        .filter(|(name, _)| {
+            let own = ipv6_conf(name, "forwarding");
+            snap.extra.iter().any(|s| s.path == own && s.value == "1")
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let raise = ra_interfaces_to_raise(&current, tun_name, &forwarding);
     if raise.is_empty() {
         return Ok(());
     }
@@ -242,13 +252,22 @@ fn accept_ra_path(name: &str) -> String {
 }
 
 /// Which of `(interface, accept_ra)` need raising to 2: those at exactly 1,
-/// other than the `all`/`default` templates, loopback and our own TUN.
+/// other than the `all`/`default` templates, loopback, our own TUN, and the
+/// ones in `forwarding`, which were already forwarding on their own and so had
+/// already chosen to ignore RAs.
 #[cfg(target_os = "linux")]
-pub(super) fn ra_interfaces_to_raise(current: &[(String, String)], tun_name: &str) -> Vec<String> {
+pub(super) fn ra_interfaces_to_raise(
+    current: &[(String, String)],
+    tun_name: &str,
+    forwarding: &[String],
+) -> Vec<String> {
     current
         .iter()
         .filter(|(name, value)| {
-            value == "1" && !matches!(name.as_str(), "all" | "default" | "lo") && name != tun_name
+            value == "1"
+                && !matches!(name.as_str(), "all" | "default" | "lo")
+                && name != tun_name
+                && !forwarding.contains(name)
         })
         .map(|(name, _)| name.clone())
         .collect()
