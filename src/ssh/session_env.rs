@@ -5,6 +5,14 @@ use std::io::{Error, ErrorKind};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
+use std::thread;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -111,10 +119,59 @@ fn scope_tools() -> Option<ScopeTools> {
             .map(|dir| Path::new(dir).join(name))
             .find(|path| is_executable(path))
     };
-    Some(ScopeTools {
+    let tools = ScopeTools {
         systemd_run: find("systemd-run")?,
         setpriv: find("setpriv")?,
-    })
+    };
+    // The binaries can exist while scopes still fail (no access to PID 1 in
+    // a container, an SELinux denial). The wrapper would then exit 1 after
+    // the session started, so check once that a scope really starts.
+    static SCOPES_WORK: OnceLock<bool> = OnceLock::new();
+    SCOPES_WORK
+        .get_or_init(|| probe_scope(&tools.systemd_run))
+        .then_some(tools)
+}
+
+/// Run `true` in a transient scope, within a short bound. This blocks, but
+/// only on the first session after the daemon starts.
+#[cfg(target_os = "linux")]
+fn probe_scope(systemd_run: &Path) -> bool {
+    const TIMEOUT: Duration = Duration::from_secs(3);
+    let spawned = Command::new(systemd_run)
+        .args(["--scope", "--quiet", "--collect", "--", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, "systemd-run unavailable, SSH sessions stay in the daemon's cgroup");
+            return false;
+        }
+    };
+    let started = Instant::now();
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < TIMEOUT => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => break Err(Error::from(ErrorKind::TimedOut)),
+            Err(error) => break Err(error),
+        }
+    };
+    match outcome {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            tracing::warn!(%status, "systemd-run --scope failed, SSH sessions stay in the daemon's cgroup");
+            false
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            tracing::warn!(%error, "systemd-run --scope failed, SSH sessions stay in the daemon's cgroup");
+            false
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
