@@ -116,6 +116,14 @@ impl DnsService {
         if !config::load().map(|c| c.dns_mode.enabled()).unwrap_or(true) {
             return;
         }
+        // Already holding a backend (`ray config set dns on` while up): undo it
+        // first. Otherwise the stale-backup sweep below would read our own live
+        // file as a crash leftover, and the old backend's re-assert watcher
+        // would keep writing its render over the new one.
+        let held = self.configurator.lock().unwrap().is_some();
+        if held {
+            self.revert(tun_name).await;
+        }
         // Configure system DNS to route .ray queries to our in-daemon resolver.
         dns_config::restore_stale_backups();
         if let Some(retry) = self.configure_retry.lock().unwrap().take() {
@@ -178,7 +186,11 @@ impl DnsService {
         #[cfg(target_os = "linux")]
         if let Some(search) = search_handle {
             let rt = tokio_util::sync::CancellationToken::new();
-            *self.reassert_token.lock().unwrap() = Some(rt.clone());
+            // Cancel what this replaces, as the macOS branch below does: a token
+            // dropped from the cell uncancelled leaves its watcher running.
+            if let Some(old) = self.reassert_token.lock().unwrap().replace(rt.clone()) {
+                old.cancel();
+            }
             // Weak: the watcher outlives nothing. A shutdown that never got to
             // `revert` should not be held open by a task waiting on a 30s tick.
             let me = Arc::downgrade(self);
