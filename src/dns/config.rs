@@ -537,7 +537,9 @@ pub(crate) use linux_backend::system_nameservers;
 #[cfg(any(target_os = "linux", test))]
 use linux_backend::*;
 #[cfg(target_os = "linux")]
-pub use linux_backend::{Recapture, emergency_restore_resolv_conf, run_resolv_reassert};
+pub use linux_backend::{
+    Recapture, emergency_restore_resolv_conf, emergency_withdraw_resolvconf, run_resolv_reassert,
+};
 #[cfg(target_os = "linux")]
 use resolv_file::{backup_resolv_file, exists_no_follow, restore_resolv_backup, write_resolv_file};
 
@@ -545,6 +547,11 @@ use resolv_file::{backup_resolv_file, exists_no_follow, restore_resolv_backup, w
 /// to restore.
 #[cfg(not(target_os = "linux"))]
 pub fn emergency_restore_resolv_conf() {}
+
+/// No-op off Linux: no other platform registers a resolvconf stanza that a
+/// crash can leave behind (FreeBSD's goes through local_unbound).
+#[cfg(not(target_os = "linux"))]
+pub fn emergency_withdraw_resolvconf() {}
 
 #[cfg(test)]
 mod tests {

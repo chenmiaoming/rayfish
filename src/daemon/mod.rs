@@ -230,15 +230,17 @@ pub use mesh::{CleanupOutcome, cleanup_after_exit};
 /// behind, for the panic hook and `ray daemon --cleanup`. Synchronous and
 /// best-effort, and each step is a no-op when its state is absent.
 ///
-/// - Hand DNS back to the OS: restore the backed-up resolv.conf and drop the
-///   NetworkManager `dns=none` snippet, so the host does not keep pointing at a
-///   dead resolver (which would blackhole all DNS until a restart).
+/// - Hand DNS back to the OS: restore the backed-up resolv.conf, drop the
+///   NetworkManager `dns=none` snippet and withdraw any resolvconf stanza, so
+///   the host does not keep pointing at a dead resolver (which would blackhole
+///   all DNS until a restart).
 /// - Remove the exit-node forwarding and NAT, restoring the sysctls, so the host
 ///   is not left an open router.
 /// - Remove the client full-tunnel rules, which would otherwise outlive the TUN
 ///   they point at.
 pub fn restore_host_state() {
     crate::dns::config::emergency_restore_resolv_conf();
+    crate::dns::config::emergency_withdraw_resolvconf();
     crate::exit_node::disable();
     crate::exit_node::teardown_client_routing();
 }

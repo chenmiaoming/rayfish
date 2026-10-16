@@ -490,6 +490,33 @@ pub(super) enum ResolvconfVariant {
 }
 
 #[cfg(target_os = "linux")]
+impl ResolvconfVariant {
+    /// Tell the two apart by what `--version` prints. Anything that does not
+    /// name openresolv, a failed run included, reads as Debian.
+    fn from_version_output(stdout: &[u8], stderr: &[u8]) -> Self {
+        let says_openresolv = |out: &[u8]| String::from_utf8_lossy(out).contains("openresolv");
+        if says_openresolv(stdout) || says_openresolv(stderr) {
+            Self::Openresolv
+        } else {
+            Self::Debian
+        }
+    }
+
+    /// The record our stanza is registered under. Debian's resolvconf wants
+    /// `<interface>.<program>`; openresolv takes the bare interface.
+    fn record(&self) -> &'static str {
+        match self {
+            Self::Debian => "tun-rayfish.inet",
+            Self::Openresolv => "tun-rayfish",
+        }
+    }
+}
+
+/// The places a real `resolvconf` is installed.
+#[cfg(target_os = "linux")]
+const RESOLVCONF_PATHS: [&str; 2] = ["/sbin/resolvconf", "/usr/sbin/resolvconf"];
+
+#[cfg(target_os = "linux")]
 pub(super) struct Resolvconf {
     variant: ResolvconfVariant,
     /// The domains our stanza carries, so a join/leave can re-register it.
@@ -499,20 +526,11 @@ pub(super) struct Resolvconf {
 #[cfg(target_os = "linux")]
 pub(super) fn try_resolvconf() -> Option<Resolvconf> {
     use std::process::Command;
-    let paths = ["/sbin/resolvconf", "/usr/sbin/resolvconf"];
-    if !paths.iter().any(|p| Path::new(p).exists()) {
+    if !RESOLVCONF_PATHS.iter().any(|p| Path::new(p).exists()) {
         return None;
     }
     let variant = match Command::new("resolvconf").arg("--version").output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stdout.contains("openresolv") || stderr.contains("openresolv") {
-                ResolvconfVariant::Openresolv
-            } else {
-                ResolvconfVariant::Debian
-            }
-        }
+        Ok(output) => ResolvconfVariant::from_version_output(&output.stdout, &output.stderr),
         Err(_) => ResolvconfVariant::Debian,
     };
     Some(Resolvconf {
@@ -524,10 +542,7 @@ pub(super) fn try_resolvconf() -> Option<Resolvconf> {
 #[cfg(target_os = "linux")]
 impl Resolvconf {
     fn iface_name(&self) -> &str {
-        match self.variant {
-            ResolvconfVariant::Debian => "tun-rayfish.inet",
-            ResolvconfVariant::Openresolv => "tun-rayfish",
-        }
+        self.variant.record()
     }
 
     /// (Re-)register our stanza with the current search domains. resolvconf
@@ -1336,6 +1351,62 @@ pub fn emergency_restore_resolv_conf() {
     }
 }
 
+/// Withdraw our resolvconf stanza after a daemon that died without its own
+/// revert, for the panic hook and `ray daemon --cleanup`. Without it the
+/// merged `/etc/resolv.conf` keeps naming a resolver that no longer answers.
+/// Skipped when there is no real resolvconf (systemd's `resolvectl` shim
+/// forgets the link with the interface). Deleting a record that was never
+/// added is a no-op for both variants, so this is safe when nothing was set
+/// up. Bounded and warn-only.
+#[cfg(target_os = "linux")]
+pub fn emergency_withdraw_resolvconf() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    if !RESOLVCONF_PATHS.iter().any(|p| Path::new(p).exists()) || resolvconf_is_resolved_shim() {
+        return;
+    }
+    let variant = Command::new("resolvconf")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()
+        .and_then(|mut child| {
+            crate::child::wait_bounded(&mut child, TIMEOUT).ok()?;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut out) = child.stdout.take() {
+                let _ = out.read_to_end(&mut stdout);
+            }
+            if let Some(mut err) = child.stderr.take() {
+                let _ = err.read_to_end(&mut stderr);
+            }
+            Some(ResolvconfVariant::from_version_output(&stdout, &stderr))
+        })
+        .unwrap_or(ResolvconfVariant::Debian);
+    // openresolv reports a record it does not have as an error unless told
+    // not to; Debian's has no such flag and ignores a missing one anyway.
+    let args: &[&str] = match variant {
+        ResolvconfVariant::Openresolv => &["-f", "-d", variant.record()],
+        ResolvconfVariant::Debian => &["-d", variant.record()],
+    };
+    let result = Command::new("resolvconf")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .and_then(|mut child| crate::child::wait_bounded(&mut child, TIMEOUT));
+    match result {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::warn!(%status, "resolvconf -d failed; our stanza may remain"),
+        Err(error) => tracing::warn!(%error, "could not run resolvconf -d; our stanza may remain"),
+    }
+}
+
 /// [`nm_reload`] for a caller with no async runtime to use, such as the panic
 /// hook. Only the `nmcli` path, since the D-Bus client here is async, and
 /// bounded so a hung NM cannot stall the abort.
@@ -1863,5 +1934,22 @@ impl DnsConfigurator for DirectResolvConf {
 
     fn shared_resolver(&self) -> Option<Ipv4Addr> {
         self.foreign_resolver
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::ResolvconfVariant;
+
+    /// The record a crash cleanup deletes must be the one `apply` added, for
+    /// whichever resolvconf is installed.
+    #[test]
+    fn resolvconf_variant_and_record_follow_the_version_banner() {
+        let openresolv = ResolvconfVariant::from_version_output(b"openresolv 3.13.2\n", b"");
+        assert_eq!(openresolv.record(), "tun-rayfish");
+        let debian = ResolvconfVariant::from_version_output(b"Debian resolvconf 1.91\n", b"");
+        assert_eq!(debian.record(), "tun-rayfish.inet");
+        let failed = ResolvconfVariant::from_version_output(b"", b"unknown option\n");
+        assert_eq!(failed.record(), "tun-rayfish.inet");
     }
 }
