@@ -554,7 +554,7 @@ pub fn emergency_restore_resolv_conf() {}
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use super::{
         MAX_NAMESERVERS, NmQuietOutcome, Reassert, SearchDomain, StaleBackup, first_nameserver,
@@ -1086,7 +1086,7 @@ mod tests {
     /// everything else, so dropping one drops what the stub tries next.
     #[test]
     fn render_direct_resolv_conf_carries_every_server_up_to_maxns() {
-        let servers: Vec<std::net::IpAddr> = ["100.100.100.100", "192.168.1.1", "9.9.9.9"]
+        let servers: Vec<IpAddr> = ["100.100.100.100", "192.168.1.1", "9.9.9.9"]
             .iter()
             .map(|s| s.parse().unwrap())
             .collect();
@@ -1132,7 +1132,7 @@ mod tests {
                  nameserver fe80::1%eth0\n";
         assert_eq!(
             parse_resolv_nameservers_v6(c),
-            vec!["2001:db8::53".parse::<std::net::Ipv6Addr>().unwrap()]
+            vec!["2001:db8::53".parse::<Ipv6Addr>().unwrap()]
         );
         let out = render_direct_resolv_conf(&[], &["2001:db8::53".parse().unwrap()]);
         assert!(out.contains("nameserver 200::53\nnameserver 2001:db8::53\n"));

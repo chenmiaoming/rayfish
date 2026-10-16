@@ -19,7 +19,7 @@ pub(crate) use linux::{overlay_route_warnings, spawn_repair_watcher};
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 use crate::membership::ExitFamilies;
 use std::future::Future;
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "android"))]
 use std::io::Error as IoError;
 #[cfg(target_os = "macos")]
 use std::mem::{size_of, zeroed};
@@ -165,7 +165,7 @@ const PREFERRED_TUN_MTU: u16 = MIN_TUN_MTU;
 const PREFERRED_TUN_MTU: u16 = TUN_MTU;
 
 #[cfg(not(target_os = "android"))]
-fn configure_mtu(preferred: u16, mut set: impl FnMut(u16) -> std::io::Result<()>) -> Result<u16> {
+fn configure_mtu(preferred: u16, mut set: impl FnMut(u16) -> Result<(), IoError>) -> Result<u16> {
     match set(preferred) {
         Ok(()) => Ok(preferred),
         Err(error) if preferred > MIN_TUN_MTU => {
@@ -404,7 +404,7 @@ const LINUX_TUN_NAME: &str = "rayfish%d";
 /// interface are the steps that fail in a container or under a service unit
 /// without the capability, and the bare errno says neither.
 #[cfg(target_os = "linux")]
-fn linux_create_error(error: std::io::Error) -> anyhow::Error {
+fn linux_create_error(error: IoError) -> anyhow::Error {
     let hint = match error.raw_os_error() {
         Some(libc::ENOENT) | Some(libc::ENODEV) | Some(libc::ENXIO) => Some(
             "/dev/net/tun is missing: load the tun module (modprobe tun), or in a \
@@ -1107,21 +1107,25 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_failed_tun_open_names_the_device_or_the_capability() {
-        let missing = super::linux_create_error(std::io::Error::from_raw_os_error(libc::ENOENT));
+        use super::IoError;
+
+        let missing = super::linux_create_error(IoError::from_raw_os_error(libc::ENOENT));
         assert!(format!("{missing:#}").contains("/dev/net/tun is missing"));
-        let denied = super::linux_create_error(std::io::Error::from_raw_os_error(libc::EPERM));
+        let denied = super::linux_create_error(IoError::from_raw_os_error(libc::EPERM));
         assert!(format!("{denied:#}").contains("CAP_NET_ADMIN"));
-        let other = super::linux_create_error(std::io::Error::from_raw_os_error(libc::EBUSY));
+        let other = super::linux_create_error(IoError::from_raw_os_error(libc::EBUSY));
         assert!(format!("{other:#}").starts_with("create tun-rs device"));
     }
 
     #[cfg(not(target_os = "android"))]
     #[test]
     fn a_minimum_preferred_mtu_is_set_once() {
+        use std::io::ErrorKind;
+
         let mut attempts = Vec::new();
         let result = super::configure_mtu(super::MIN_TUN_MTU, |mtu| {
             attempts.push(mtu);
-            Err(std::io::ErrorKind::PermissionDenied.into())
+            Err(ErrorKind::PermissionDenied.into())
         });
         assert!(result.is_err());
         assert_eq!(attempts, [1280]);

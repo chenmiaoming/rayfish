@@ -1132,15 +1132,12 @@ pub fn config_dir() -> Result<PathBuf> {
 pub fn blobs_dir() -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     if effective_override().is_none() {
+        use std::fs::DirBuilder;
         use std::os::unix::fs::DirBuilderExt;
 
         let old = config_dir()?.join("blobs");
         let state = Path::new(LINUX_STATE_DIR);
-        let dir = match std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(state)
-        {
+        let dir = match DirBuilder::new().recursive(true).mode(0o700).create(state) {
             Ok(()) => migrate_blobs(&old, &state.join("blobs")),
             Err(error) => {
                 tracing::warn!(dir = LINUX_STATE_DIR, %error, "cannot create the state directory; keeping blobs in the config directory");

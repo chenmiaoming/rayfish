@@ -8,6 +8,8 @@
 //! (a descendant of `daemon`) so they can still construct `Daemon` and reach
 //! its private fields without widening visibility.
 
+#[cfg(unix)]
+use std::fs::File;
 use std::sync::Mutex;
 
 #[cfg(windows)]
@@ -909,7 +911,7 @@ impl Drop for IpcSocket {
 /// removed; the lock dies with the descriptor, including on a crash.
 #[cfg(unix)]
 pub(crate) struct DaemonLock {
-    _file: std::fs::File,
+    _file: File,
 }
 
 #[cfg(unix)]
@@ -921,12 +923,13 @@ pub(crate) fn daemon_lock_path(socket: &Path) -> PathBuf {
 impl DaemonLock {
     /// Take the lock, or `None` when another live process holds it.
     pub(crate) fn try_acquire(socket: &Path) -> Result<Option<Self>> {
+        use std::fs::OpenOptions;
         use std::io::{Error, ErrorKind};
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
 
         let path = daemon_lock_path(socket);
-        let file = std::fs::OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)

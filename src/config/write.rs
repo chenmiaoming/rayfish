@@ -1,6 +1,8 @@
 //! Durable, atomic writes for configuration files.
 
 #[cfg(not(windows))]
+use std::fs::File;
+#[cfg(not(windows))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs::OpenOptions, path::Path};
 
@@ -107,7 +109,7 @@ fn stage_mode(secret: bool) -> u32 {
 /// reused after a reboot), so remove it and try once more rather than writing
 /// into a file someone else may hold open.
 #[cfg(not(windows))]
-fn create_stage(path: &Path, secret: bool) -> Result<std::fs::File> {
+fn create_stage(path: &Path, secret: bool) -> Result<File> {
     use std::io::ErrorKind;
 
     let open = || {
@@ -174,6 +176,7 @@ pub fn restrict_perms(path: &Path, secret: bool) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
 
     fn mode(path: &Path) -> u32 {
@@ -201,8 +204,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir is creatable in tests");
         let tmp = dir.path().join(".key.tmp.1.0");
         std::fs::write(&tmp, b"stale").expect("seed leftover");
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))
-            .expect("chmod leftover");
+        std::fs::set_permissions(&tmp, Permissions::from_mode(0o644)).expect("chmod leftover");
         stage_temp(&tmp, b"fresh", true).expect("stage over a leftover succeeds");
         assert_eq!(mode(&tmp), 0o600);
         assert_eq!(std::fs::read(&tmp).expect("readable"), b"fresh");

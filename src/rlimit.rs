@@ -6,6 +6,7 @@
 //! shells mesh SSH spawns get the limit a login would give them: a soft limit
 //! above 1024 breaks programs that still pass descriptors to `select(2)`.
 
+use std::io::Error;
 use std::sync::OnceLock;
 
 /// Upper bound for the raised soft limit, however high the hard limit is.
@@ -40,7 +41,7 @@ pub fn raise_nofile_limit() {
     }
     // SAFETY: setrlimit reads one rlimit from memory we own.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
-        let error = std::io::Error::last_os_error();
+        let error = Error::last_os_error();
         tracing::debug!(%error, "could not raise the open-file limit");
         return;
     }
@@ -53,13 +54,13 @@ pub fn raise_nofile_limit() {
 
 /// Put back the limit the daemon started with. Called between fork and exec,
 /// so it only makes the one async-signal-safe syscall.
-pub fn restore_nofile_limit() -> std::io::Result<()> {
+pub fn restore_nofile_limit() -> Result<(), Error> {
     let Some(original) = ORIGINAL.get() else {
         return Ok(());
     };
     // SAFETY: setrlimit reads one rlimit from memory that lives for the process.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, original) } != 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(Error::last_os_error());
     }
     Ok(())
 }

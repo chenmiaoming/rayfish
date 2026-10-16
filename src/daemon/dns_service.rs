@@ -15,6 +15,7 @@
 
 use super::*;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::PoisonError;
 
 /// First and last backoff step for the OS-DNS configuration retry loop.
 const DNS_CONFIG_RETRY_MIN: Duration = Duration::from_secs(5);
@@ -137,7 +138,11 @@ impl DnsService {
         // first. Otherwise the stale-backup sweep below would read our own live
         // file as a crash leftover, and the old backend's re-assert watcher
         // would keep writing its render over the new one.
-        let held = self.configurator.lock().unwrap().is_some();
+        let held = self
+            .configurator
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
         if held {
             self.revert(tun_name).await;
         }
@@ -209,7 +214,12 @@ impl DnsService {
             let rt = tokio_util::sync::CancellationToken::new();
             // Cancel what this replaces, as the macOS branch below does: a token
             // dropped from the cell uncancelled leaves its watcher running.
-            if let Some(old) = self.reassert_token.lock().unwrap().replace(rt.clone()) {
+            if let Some(old) = self
+                .reassert_token
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .replace(rt.clone())
+            {
                 old.cancel();
             }
             // Weak: the watcher outlives nothing. A shutdown that never got to

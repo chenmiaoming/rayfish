@@ -13,6 +13,7 @@ use russh::Sig;
 use russh::server::{Handle, Msg};
 use russh::{Channel, ChannelId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::login::LoginInfo;
@@ -292,7 +293,7 @@ pub(super) async fn run_pipe_session(
         ..
     } = spec;
     let launch = shell_launch(&info, command.as_deref());
-    let mut cmd = tokio::process::Command::new(&launch.program);
+    let mut cmd = Command::new(&launch.program);
     cmd.args(&launch.args)
         .current_dir(&info.home)
         .env_clear()

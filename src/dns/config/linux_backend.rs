@@ -97,6 +97,9 @@ pub(super) async fn set_search_domains_linux(
 /// list cannot say (it always carries `.ray`).
 #[cfg(target_os = "linux")]
 pub(super) async fn revert_resolved_link(tun_name: &str) {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
     let Some(idx) = linux::get_ifindex(tun_name) else {
         return; // the link is gone, and resolved forgot it with it
     };
@@ -114,10 +117,10 @@ pub(super) async fn revert_resolved_link(tun_name: &str) {
     {
         return;
     }
-    let _ = tokio::process::Command::new("resolvectl")
+    let _ = Command::new("resolvectl")
         .args(["revert", tun_name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await;
 }
@@ -163,9 +166,12 @@ where
 /// The `resolvectl` counterpart of [`resolved_best_effort`].
 #[cfg(target_os = "linux")]
 async fn resolvectl_best_effort(args: &[&str]) {
-    match tokio::process::Command::new("resolvectl")
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    match Command::new("resolvectl")
         .args(args)
-        .stdout(std::process::Stdio::null())
+        .stdout(Stdio::null())
         .status()
         .await
     {
@@ -1122,6 +1128,8 @@ pub(super) fn nm_present() -> bool {
 /// the method (it arrived in 1.22).
 #[cfg(target_os = "linux")]
 pub(super) async fn nm_reload() {
+    use tokio::process::Command;
+
     if let Ok(conn) = Connection::system().await
         && conn
             .call_method(
@@ -1136,7 +1144,7 @@ pub(super) async fn nm_reload() {
     {
         return;
     }
-    let reloaded = tokio::process::Command::new("nmcli")
+    let reloaded = Command::new("nmcli")
         .args(["general", "reload"])
         .status()
         .await

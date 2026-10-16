@@ -7,6 +7,7 @@ use super::super::*;
 // desktop feature (the ray-mobile host build) still needs the import.
 #[cfg(any(feature = "desktop", target_os = "macos"))]
 use std::net::IpAddr;
+use std::sync::PoisonError;
 use std::sync::RwLock;
 #[cfg(target_os = "linux")]
 use tokio::time::MissedTickBehavior;
@@ -1328,7 +1329,12 @@ impl Daemon {
             #[cfg(target_os = "linux")]
             {
                 let token = CancellationToken::new();
-                if let Some(old) = self.tun_watch_token.lock().unwrap().replace(token.clone()) {
+                if let Some(old) = self
+                    .tun_watch_token
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .replace(token.clone())
+                {
                     old.cancel();
                 }
                 tun::spawn_repair_watcher(tun_name.clone(), my_v6, Arc::clone(&self.active), token);
@@ -1947,7 +1953,12 @@ impl Daemon {
 
         // First, so the watcher does not undo the link-down below.
         #[cfg(target_os = "linux")]
-        if let Some(token) = self.tun_watch_token.lock().unwrap().take() {
+        if let Some(token) = self
+            .tun_watch_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
             token.cancel();
         }
 
