@@ -916,9 +916,9 @@ pub struct Daemon {
     #[cfg(feature = "desktop")]
     ssh_authz: crate::ssh::SshAuthz,
     /// Cancellation token for the running SSH listeners (`None` when off / on
-    /// standby). Set by [`Daemon::start_ssh`], cleared by `stop_ssh`, which are
-    /// the only readers and are desktop-only, so the field does not exist on an
-    /// Android build at all.
+    /// standby). Set by [`Daemon::start_ssh`], cleared by `stop_ssh`, and read
+    /// by the periodic host-firewall check, all desktop-only, so the field does
+    /// not exist on an Android build at all.
     #[cfg(feature = "desktop")]
     ssh_token: Mutex<Option<CancellationToken>>,
     /// Only an OS-owned macOS tunnel delegates SSH to the app's launchd helper.

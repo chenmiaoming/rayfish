@@ -22,6 +22,7 @@ use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::packet_route::link::{LinkAttribute, LinkFlags};
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteType};
 use rtnetlink::{MulticastGroup, RouteMessageBuilder};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use super::{OVERLAY, OVERLAY_LEN, tun_link_index, with_tun_link};
@@ -76,15 +77,18 @@ fn route_oif(route: &RouteMessage) -> Option<u32> {
 /// Watches the TUN until `token` is cancelled and puts the link, our `/128` and
 /// the `200::/7` route back whenever the kernel reports one of them gone.
 /// `active` is checked again before each repair, so a `ray down` that races a
-/// notification is never undone.
+/// notification is never undone. A link that went down also took the exit
+/// client's default route through the TUN, so each repair nudges
+/// `exit_reapply` to put that back too.
 pub(crate) fn spawn_repair_watcher(
     tun_name: String,
     v6: Ipv6Addr,
     active: Arc<AtomicBool>,
+    exit_reapply: Arc<Notify>,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
-        if let Err(error) = watch(&tun_name, v6, &active, &token).await {
+        if let Err(error) = watch(&tun_name, v6, &active, &exit_reapply, &token).await {
             tracing::warn!(error = %format!("{error:#}"), tun = %tun_name,
                 "TUN watcher stopped; a link, address or route removed by something else will not be restored until the next `ray up`");
         }
@@ -95,6 +99,7 @@ async fn watch(
     tun_name: &str,
     v6: Ipv6Addr,
     active: &AtomicBool,
+    exit_reapply: &Notify,
     token: &CancellationToken,
 ) -> Result<()> {
     let (connection, handle, mut messages) = rtnetlink::new_multicast_connection(&[
@@ -128,8 +133,9 @@ async fn watch(
             tracing::warn!(tun = %tun_name, "TUN lost its link, address or route; restoring");
             tokio::select! {
                 _ = token.cancelled() => return Ok(()),
-                result = repair(tun_name, v6) => if let Err(error) = result {
-                    tracing::warn!(error = %format!("{error:#}"), tun = %tun_name, "failed to restore the TUN");
+                result = repair(tun_name, v6) => match result {
+                    Ok(()) => exit_reapply.notify_one(),
+                    Err(error) => tracing::warn!(error = %format!("{error:#}"), tun = %tun_name, "failed to restore the TUN"),
                 },
             }
         }

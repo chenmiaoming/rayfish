@@ -1338,7 +1338,13 @@ impl Daemon {
                 {
                     old.cancel();
                 }
-                tun::spawn_repair_watcher(tun_name.clone(), my_v6, Arc::clone(&self.active), token);
+                tun::spawn_repair_watcher(
+                    tun_name.clone(),
+                    my_v6,
+                    Arc::clone(&self.active),
+                    Arc::clone(&self.registry.exit_reapply),
+                    token,
+                );
             }
 
             // Another VPN's kill switch ends in a catch-all block, and its
@@ -1524,7 +1530,8 @@ impl Daemon {
     /// them without telling us: a gateway then forwards without masquerading, and
     /// a client's tunnel quietly stops. Every [`EXIT_KERNEL_CHECK`] this re-applies
     /// whatever went missing, re-reads the gateway's own addresses, and re-adds
-    /// the host-firewall forwarding exceptions a reload dropped. Linux only, the
+    /// the host-firewall forwarding exceptions and mesh SSH accept a reload
+    /// dropped. Linux only, the
     /// one platform whose exit state another tool commonly flushes.
     #[cfg(target_os = "linux")]
     pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {
@@ -1541,6 +1548,8 @@ impl Daemon {
                 }
                 if daemon.active.load(Ordering::SeqCst) {
                     daemon.check_exit_kernel_state().await;
+                    #[cfg(feature = "desktop")]
+                    daemon.reassert_ssh_host_firewall().await;
                 }
             }
         });
@@ -1548,6 +1557,29 @@ impl Daemon {
 
     #[cfg(not(target_os = "linux"))]
     pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {}
+
+    /// The same tick puts back the mesh SSH host-firewall accept `ray up` added,
+    /// which the same reload drops. Quiet: `ray up` already warned with the fix.
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    async fn reassert_ssh_host_firewall(&self) {
+        if self
+            .ssh_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+        {
+            return;
+        }
+        let tun_name = self.tun_name.load().as_str().to_owned();
+        let port = crate::forward::SSH_LISTEN_PORT;
+        if let Ok(Some(warning)) = tokio::task::spawn_blocking(move || {
+            crate::hostfw::ensure_inbound_tcp(&tun_name, port).warning(port)
+        })
+        .await
+        {
+            tracing::debug!(warning, "host firewall still blocks mesh SSH");
+        }
+    }
 
     /// One pass of [`spawn_exit_kernel_watch`](Self::spawn_exit_kernel_watch).
     /// The read-only probe runs without the reconcile lock, so a clean pass
