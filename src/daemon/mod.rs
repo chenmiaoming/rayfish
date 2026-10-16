@@ -750,6 +750,74 @@ impl TunTasks {
     }
 }
 
+/// A failure that should end the daemon process with an error, so the service
+/// manager restarts it (the unit uses `Restart=on-failure`). Armed only by
+/// [`run_daemon`]: an embedder owns its own lifecycle and gets a log line
+/// instead of a cancelled node.
+///
+/// The case it exists for is the TUN read loop stopping on a device error, for
+/// example after the interface was deleted out from under us. Nothing restarts
+/// that loop, so without this the daemon would keep its links up and report the
+/// VPN as up while carrying nothing in either direction.
+#[derive(Default)]
+pub(crate) struct FatalExit {
+    armed: AtomicBool,
+    reason: Mutex<Option<String>>,
+}
+
+impl FatalExit {
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Record `reason` and cancel `token`, which ends [`run_daemon`]. Returns
+    /// false, doing nothing, when not armed. The first reason wins.
+    pub(crate) fn trigger(&self, token: &CancellationToken, reason: String) -> bool {
+        if !self.armed.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert(reason);
+        token.cancel();
+        true
+    }
+
+    pub(crate) fn take(&self) -> Option<String> {
+        self.reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+#[cfg(test)]
+mod fatal_exit_tests {
+    use super::*;
+
+    /// An embedder never armed it, so a failed TUN loop must not cancel its node.
+    #[test]
+    fn an_unarmed_fatal_exit_leaves_the_daemon_running() {
+        let fatal = FatalExit::default();
+        let token = CancellationToken::new();
+        assert!(!fatal.trigger(&token, "gone".into()));
+        assert!(!token.is_cancelled());
+        assert_eq!(fatal.take(), None);
+    }
+
+    #[test]
+    fn an_armed_fatal_exit_stops_the_daemon_with_the_first_reason() {
+        let fatal = FatalExit::default();
+        fatal.arm();
+        let token = CancellationToken::new();
+        assert!(fatal.trigger(&token, "first".into()));
+        assert!(fatal.trigger(&token, "second".into()));
+        assert!(token.is_cancelled());
+        assert_eq!(fatal.take().as_deref(), Some("first"));
+    }
+}
+
 pub struct Daemon {
     /// Recent RTT samples per peer, shared by successive status requests.
     connection_history: Mutex<mesh::diagnostics::ConnectionHistory>,
@@ -799,6 +867,8 @@ pub struct Daemon {
     /// Handles for the packet-forwarding tasks spawned by
     /// [`Daemon::attach_tun`], kept so a future `down()`/detach can stop them.
     tun_tasks: Mutex<Option<TunTasks>>,
+    /// Set when the data plane fails in a way only a restart repairs.
+    pub(crate) fatal: Arc<FatalExit>,
     /// Serializes exit-node reconciles. `apply_exit_node` runs from the IPC
     /// dispatcher, `activate()`, and the reconverge reapply listener, each on its
     /// own task, and the kernel enable underneath is check-then-write (the sysctl
@@ -1037,6 +1107,8 @@ impl Daemon {
             // idle-closes.
             let dialer = Some(Arc::clone(&self.registry));
             let local_ipv6 = self.transport.identity.local_ipv6();
+            let fatal = Arc::clone(&self.fatal);
+            let shutdown = self.shutdown_token.clone();
             tokio::spawn(async move {
                 if let Err(e) = (forward::MeshForwarder {
                     tun: reader,
@@ -1052,7 +1124,12 @@ impl Daemon {
                 .run()
                 .await
                 {
-                    tracing::warn!(error = %e, "mesh forwarding loop exited with error");
+                    let reason = format!("TUN read loop stopped: {e:#}");
+                    if fatal.trigger(&shutdown, reason) {
+                        tracing::error!(error = %e, "TUN read loop stopped; exiting so the service manager restarts the daemon");
+                    } else {
+                        tracing::warn!(error = %e, "mesh forwarding loop exited with error");
+                    }
                 }
             })
         };

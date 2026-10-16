@@ -16,6 +16,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -1063,6 +1064,41 @@ fn send_peer_reply(conn: &Connection, handle: u16, reply: &[u8]) {
     }
 }
 
+/// Minimum gap between two TUN write failure warnings.
+const WRITE_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Lets one log line through per `interval` and counts the rest, so a failure
+/// that repeats at packet rate still shows up, once, with how often it happened.
+struct LogBudget {
+    interval: Duration,
+    last: Option<Instant>,
+    suppressed: u64,
+}
+
+impl LogBudget {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: None,
+            suppressed: 0,
+        }
+    }
+
+    /// `Some(n)` when a line may be logged now, `n` being how many were
+    /// swallowed since the last one.
+    fn allow(&mut self, now: Instant) -> Option<u64> {
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < self.interval)
+        {
+            self.suppressed += 1;
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
 /// Spawns a task that consumes packets from `tun_rx` and writes them to the TUN
 /// device. Single instance per session, serializes writes without a Mutex.
 /// `active` is the data-plane gate: while it is false (standby, after `ray
@@ -1085,6 +1121,7 @@ pub fn spawn_tun_writer<W: crate::tun::TunWrite>(
             .tun_udp_gso_enabled
             .set(i64::from(tun.udp_gso_enabled()));
         let mut batch = Vec::with_capacity(batch_size);
+        let mut write_error_log = LogBudget::new(WRITE_ERROR_LOG_INTERVAL);
         while let Some(packet) = tun_rx.recv().await {
             batch.clear();
             for packet in std::iter::once(packet)
@@ -1112,7 +1149,11 @@ pub fn spawn_tun_writer<W: crate::tun::TunWrite>(
                 && let Err(e) = tun.write_packets(&batch).await
             {
                 stats.tun_write_errors.inc();
-                tracing::warn!(error = %e, packets = batch.len(), "TUN batch write failed");
+                // A device that has gone away fails every batch; one line per
+                // batch would flood the journal at packet rate.
+                if let Some(suppressed) = write_error_log.allow(Instant::now()) {
+                    tracing::warn!(error = %e, packets = batch.len(), suppressed, "TUN batch write failed");
+                }
             } else if !batch.is_empty() {
                 stats.tun_write_batches.inc();
                 stats.tun_write_packets.inc_by(batch.len() as u64);
@@ -1226,6 +1267,18 @@ mod tests {
         assert!(firewall::is_icmp_echo_reply(info.protocol, info.icmp_type));
         info.icmp_type = 8;
         assert!(!firewall::is_icmp_echo_reply(info.protocol, info.icmp_type));
+    }
+
+    #[test]
+    fn write_failures_log_once_per_interval_with_a_count() {
+        let start = Instant::now();
+        let mut budget = LogBudget::new(Duration::from_secs(10));
+        assert_eq!(budget.allow(start), Some(0));
+        for i in 1..=5 {
+            assert_eq!(budget.allow(start + Duration::from_secs(i)), None);
+        }
+        assert_eq!(budget.allow(start + Duration::from_secs(10)), Some(5));
+        assert_eq!(budget.allow(start + Duration::from_secs(11)), None);
     }
 
     fn test_peer(seed: u8) -> EndpointId {
