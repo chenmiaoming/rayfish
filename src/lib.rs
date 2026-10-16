@@ -99,6 +99,8 @@ pub mod onepassword;
 pub mod peers;
 pub mod ratelimit;
 pub mod reject;
+#[cfg(target_os = "linux")]
+pub mod rlimit;
 pub mod shutdown;
 #[cfg(feature = "desktop")]
 #[cfg(unix)]

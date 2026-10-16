@@ -1117,6 +1117,77 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Where the daemon keeps its content-addressed blob store: membership
+/// snapshots and file transfers in flight. Created if missing.
+///
+/// On Linux it lives under `/var/lib/rayfish`, not the config tree: transfers
+/// can be large, `/etc` is often on a small or read-only root filesystem, and
+/// the store is state, not configuration. A store left in `/etc/rayfish/blobs`
+/// by an older release is moved on first start. Elsewhere, and whenever
+/// `RAYFISH_CONFIG_DIR` is set, it stays inside the config directory.
+pub fn blobs_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if effective_override().is_none() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let old = config_dir()?.join("blobs");
+        let state = Path::new(LINUX_STATE_DIR);
+        let dir = match std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(state)
+        {
+            Ok(()) => migrate_blobs(&old, &state.join("blobs")),
+            Err(error) => {
+                tracing::warn!(dir = LINUX_STATE_DIR, %error, "cannot create the state directory; keeping blobs in the config directory");
+                old
+            }
+        };
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        return Ok(dir);
+    }
+    let dir = config_dir()?.join("blobs");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_STATE_DIR: &str = "/var/lib/rayfish";
+
+/// Move a blob store from `old` to `new` and return the one to use. A rename
+/// across filesystems is not attempted by hand (the store can be gigabytes,
+/// and a half-finished copy is worse than none), so in that case, or on any
+/// other failure, the old location stays in use.
+#[cfg(any(target_os = "linux", test))]
+fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
+    if !old.is_dir() {
+        return new.to_path_buf();
+    }
+    if new.exists() {
+        tracing::warn!(
+            old = %old.display(),
+            new = %new.display(),
+            "both blob store locations exist; using the new one and leaving the old one alone"
+        );
+        return new.to_path_buf();
+    }
+    match std::fs::rename(old, new) {
+        Ok(()) => {
+            tracing::info!(old = %old.display(), new = %new.display(), "moved the blob store");
+            new.to_path_buf()
+        }
+        Err(error) => {
+            tracing::warn!(
+                old = %old.display(),
+                new = %new.display(),
+                %error,
+                "could not move the blob store; it stays where it is"
+            );
+            old.to_path_buf()
+        }
+    }
+}
+
 /// [`config_dir`] for a reader: same directory, never created.
 ///
 /// A missing directory is not an error here — it reads as an empty config, which
@@ -1784,6 +1855,42 @@ pub(crate) static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn blob_store_moves_to_the_state_directory_once() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        let new = root.path().join("var-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        std::fs::write(old.join("blobs.db"), b"db").expect("seed old store");
+
+        assert_eq!(migrate_blobs(&old, &new), new);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("moved"), b"db");
+        // Second start: nothing left to move.
+        assert_eq!(migrate_blobs(&old, &new), new);
+    }
+
+    #[test]
+    fn blob_store_migration_never_overwrites_the_new_location() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        let new = root.path().join("var-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        std::fs::create_dir(&new).expect("create new store");
+        assert_eq!(migrate_blobs(&old, &new), new);
+        assert!(old.exists());
+    }
+
+    #[test]
+    fn blob_store_stays_put_when_it_cannot_move() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        let new = root.path().join("missing-parent").join("blobs");
+        assert_eq!(migrate_blobs(&old, &new), old);
+        assert!(old.exists());
+    }
     use std::net::Ipv6Addr;
 
     use iroh::EndpointId;

@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -39,6 +41,8 @@ const BLOB_GC_INTERVAL: Duration = Duration::from_secs(600);
 
 pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) -> Result<()> {
     let overrides = Overrides::default();
+    #[cfg(target_os = "linux")]
+    crate::rlimit::raise_nofile_limit();
 
     // Claim the process-wide IPC endpoint before constructing anything that
     // changes host state. In particular, a second daemon must fail before it
@@ -89,6 +93,8 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
     tokio::spawn(Arc::clone(&daemon.registry).run_restore_supervisor());
     daemon.spawn_exit_reapply_listener();
     daemon.spawn_exit_kernel_watch();
+    #[cfg(target_os = "linux")]
+    spawn_resume_watch(Arc::clone(&daemon));
     // A failed activation returns its reason to whoever asked, and at service
     // start that is nobody: log it here, or a daemon that never got its data
     // plane up says nothing about why in `ray logs`. (Warnings from a partial
@@ -278,8 +284,7 @@ async fn build_daemon_inner(
     let transfers = Arc::new(transfers::TransferRegistry::new());
 
     // --- Content-addressed blob store (membership/file transfer) ---
-    let blobs_dir = config::config_dir()?.join("blobs");
-    std::fs::create_dir_all(&blobs_dir)?;
+    let blobs_dir = config::blobs_dir()?;
     // GC is what actually frees a transfer's bytes: `Blobs::delete` is private
     // ("users should rely only on garbage collection"), so dropping a tag only
     // marks the blob collectable and this periodic sweep is what reclaims it.
@@ -881,6 +886,9 @@ struct IpcSocket {
     listener: UnixListener,
     path: PathBuf,
     inode: u64,
+    /// The daemon lock, held for as long as the socket is served. Declared
+    /// last so it is released only after `Drop` has removed the socket file.
+    _lock: DaemonLock,
 }
 
 #[cfg(unix)]
@@ -893,6 +901,86 @@ impl Drop for IpcSocket {
     }
 }
 
+/// An exclusive `flock` on the lock file beside the IPC socket.
+///
+/// Probing the socket alone cannot tell two daemons starting together apart:
+/// both see a dead or missing socket, and the slower one unlinks the socket the
+/// faster one just bound. The lock serializes them. The file itself is never
+/// removed; the lock dies with the descriptor, including on a crash.
+#[cfg(unix)]
+pub(crate) struct DaemonLock {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+pub(crate) fn daemon_lock_path(socket: &Path) -> PathBuf {
+    socket.with_extension("lock")
+}
+
+#[cfg(unix)]
+impl DaemonLock {
+    /// Take the lock, or `None` when another live process holds it.
+    pub(crate) fn try_acquire(socket: &Path) -> Result<Option<Self>> {
+        use std::io::{Error, ErrorKind};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = daemon_lock_path(socket);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        // SAFETY: flock on a descriptor we own.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = Error::last_os_error();
+            if error.kind() == ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| format!("failed to lock {}", path.display()));
+        }
+        Ok(Some(Self { _file: file }))
+    }
+}
+
+/// What `ray daemon --cleanup` did.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    Cleaned,
+    /// A daemon holds the lock, so its state is live and was left alone.
+    DaemonRunning,
+}
+
+/// Undo the host changes a daemon can leave behind when it dies without its
+/// own teardown (SIGKILL, OOM, a stop timeout): the direct-mode resolv.conf
+/// and NetworkManager drop-in, exit-node forwarding and NAT, and the client
+/// full-tunnel rules. The same calls the panic hook makes, run by the service
+/// manager after the daemon has exited. Each one is a no-op when its state is
+/// absent, which is the usual case after a clean stop.
+///
+/// Skipped while a daemon holds the lock: a service start that failed because
+/// a hand-started `ray daemon` already owns the socket must not tear that
+/// daemon's routing and DNS down.
+#[cfg(unix)]
+pub fn cleanup_after_exit() -> Result<CleanupOutcome> {
+    let socket = ipc::socket_path();
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let Some(_lock) = DaemonLock::try_acquire(&socket)? else {
+        return Ok(CleanupOutcome::DaemonRunning);
+    };
+    crate::dns::config::emergency_restore_resolv_conf();
+    crate::exit_node::disable();
+    crate::exit_node::teardown_client_routing();
+    Ok(CleanupOutcome::Cleaned)
+}
+
 #[cfg(unix)]
 async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
     use std::io::ErrorKind;
@@ -901,6 +989,8 @@ async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let lock =
+        DaemonLock::try_acquire(path)?.context("another rayfish daemon is already running")?;
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         anyhow::ensure!(metadata.file_type().is_socket(), "IPC path is not a socket");
         match UnixStream::connect(path).await {
@@ -920,8 +1010,24 @@ async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
         listener,
         path: path.to_path_buf(),
         inode,
+        _lock: lock,
     })
 }
+
+/// Most IPC connections served at once. The socket is open to every local
+/// user, and each connection costs a task, a descriptor, a request buffer of up
+/// to a frame and any descriptors it carries, so an unbounded count lets one
+/// user exhaust the daemon's fd table. Past the cap the daemon stops accepting
+/// and new clients wait in the listen backlog.
+#[cfg(unix)]
+const MAX_IPC_CLIENTS: usize = 64;
+
+/// How long a client gets to deliver its request, and the daemon to deliver a
+/// single-frame reply. Bounds how long a client that connects and then stalls
+/// can hold one of the [`MAX_IPC_CLIENTS`] slots. The `ray logs` stream is not
+/// covered: it runs after the request and gives its slot back first.
+#[cfg(unix)]
+const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(unix)]
 async fn accept_ipc(
@@ -930,7 +1036,14 @@ async fn accept_ipc(
     token: CancellationToken,
     host: IpcHost,
 ) -> Result<()> {
+    let slots = Arc::new(Semaphore::new(MAX_IPC_CLIENTS));
     loop {
+        let permit = tokio::select! {
+            _ = token.cancelled() => {
+                return Ok(());
+            }
+            permit = Arc::clone(&slots).acquire_owned() => permit?,
+        };
         tokio::select! {
             _ = token.cancelled() => {
                 return Ok(());
@@ -939,7 +1052,7 @@ async fn accept_ipc(
                 Ok((stream, _)) => {
                     let daemon = Arc::clone(daemon);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_ipc_client(stream, &daemon, host).await {
+                        if let Err(e) = handle_ipc_client(stream, &daemon, host, permit).await {
                             tracing::debug!(error = %e, "IPC client error");
                         }
                     });
@@ -1030,11 +1143,18 @@ mod embedded_ipc_tests {
         let path = dir.path().join("ray.sock");
         let socket = bind_ipc_socket(&path).await.unwrap();
         std::fs::remove_file(&path).unwrap();
-        let replacement = bind_ipc_socket(&path).await.unwrap();
+        // A second daemon is refused by the lock even with the socket gone.
+        let error = bind_ipc_socket(&path).await.err().unwrap();
+        assert!(format!("{error:#}").contains("another rayfish daemon"));
+        // Whatever took the path since is not ours to remove.
+        let replacement = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        replacement.bind(&SockAddr::unix(&path).unwrap()).unwrap();
         drop(socket);
-        assert!(UnixStream::connect(&path).await.is_ok());
+        assert!(path.exists());
         drop(replacement);
-        assert!(!path.exists());
+        // The lock went with the first socket, so a new daemon can start.
+        std::fs::remove_file(&path).unwrap();
+        assert!(bind_ipc_socket(&path).await.is_ok());
     }
 
     struct ConfigEnv(Option<OsString>);
@@ -1155,14 +1275,22 @@ fn truncate(s: &str) -> String {
 }
 
 #[cfg(unix)]
-async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHost) -> Result<()> {
+async fn handle_ipc_client(
+    stream: UnixStream,
+    daemon: &Arc<Daemon>,
+    host: IpcHost,
+    slot: OwnedSemaphorePermit,
+) -> Result<()> {
     let peer_cred = stream.peer_cred().ok().map(|c| PeerIdentity::Unix {
         uid: c.uid(),
         gid: c.gid(),
     });
     // The request is read fd-aware: `SendFileFd` arrives with the file as
     // SCM_RIGHTS ancillary data, which a plain framed read would drop.
-    let (req, fds) = match ipc::recv_with_fds(&stream).await {
+    let received = tokio::time::timeout(IPC_IO_TIMEOUT, ipc::recv_with_fds(&stream))
+        .await
+        .context("timed out waiting for the IPC request")?;
+    let (req, fds) = match received {
         Ok(v) => v,
         // A request this build cannot decode (a settings key it does not know, a
         // variant from a newer `ray`) gets the reason back rather than a bare
@@ -1182,7 +1310,8 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
             let msg = truncate(&format!("{e:#}"));
             tracing::debug!(error = %msg, "undecodable IPC request");
             let mut framed = ipc::framed(stream);
-            let _ = ipc::send(&mut framed, ipc_err(msg)).await;
+            let _ =
+                tokio::time::timeout(IPC_IO_TIMEOUT, ipc::send(&mut framed, ipc_err(msg))).await;
             return Ok(());
         }
     };
@@ -1193,6 +1322,8 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
     // open read tier, alongside `Status` and `Report`.
     if let IpcMessage::Logs { since, follow } = &req {
         let (since, follow) = (*since, *follow);
+        // A follow stream can run for days; it must not hold a client slot.
+        drop(slot);
         let mut framed = ipc::framed(stream);
         if let Some(denied) = host.check_authorized(&req, peer_cred.as_ref()) {
             let _ = ipc::send(&mut framed, denied).await;
@@ -1238,7 +1369,10 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
         }
     };
     let mut framed = ipc::framed(stream);
-    ipc::send(&mut framed, resp).await?;
+    tokio::time::timeout(IPC_IO_TIMEOUT, ipc::send(&mut framed, resp))
+        .await
+        .context("timed out sending the IPC response")??;
+    drop(slot);
     Ok(())
 }
 
@@ -1605,6 +1739,80 @@ const AUTO_UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 #[cfg(feature = "desktop")]
 const AUTO_UPDATE_BACKOFF_SECS: i64 = 24 * 60 * 60;
 
+/// How often the resume watch compares clocks.
+#[cfg(target_os = "linux")]
+const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Time the system clock may run ahead of the monotonic one between two checks
+/// before the gap counts as a suspend. Well above scheduling jitter, well below
+/// any sleep worth reacting to.
+#[cfg(target_os = "linux")]
+const SUSPEND_THRESHOLD: Duration = Duration::from_secs(10);
+
+/// Whether the host was suspended between two checks. `CLOCK_BOOTTIME` keeps
+/// counting through suspend and `CLOCK_MONOTONIC` (tokio's `Instant`) does not,
+/// so the difference between their deltas is the time spent asleep.
+#[cfg(target_os = "linux")]
+fn slept_between(boot_elapsed: Duration, monotonic_elapsed: Duration) -> bool {
+    boot_elapsed.saturating_sub(monotonic_elapsed) >= SUSPEND_THRESHOLD
+}
+
+#[cfg(target_os = "linux")]
+fn boottime() -> Option<Duration> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one timespec into memory we own.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) } != 0 {
+        return None;
+    }
+    Some(Duration::new(
+        u64::try_from(now.tv_sec).ok()?,
+        u32::try_from(now.tv_nsec).ok()?,
+    ))
+}
+
+/// Rebind after a suspend. netwatch looks for time jumps with `Instant`, which
+/// on Linux is `CLOCK_MONOTONIC` and stops during suspend, so it never sees
+/// one. A laptop that resumes on the same network then keeps its stale sockets
+/// and relay connection until a route change or timeout. Comparing against
+/// `CLOCK_BOOTTIME` catches it and takes the same path as a host-reported
+/// network change.
+#[cfg(target_os = "linux")]
+fn spawn_resume_watch(daemon: Arc<Daemon>) {
+    tokio::spawn(async move {
+        let token = daemon.shutdown_token.clone();
+        let Some(mut last_boot) = boottime() else {
+            return;
+        };
+        let mut last_monotonic = tokio::time::Instant::now();
+        let mut ticks = tokio::time::interval(RESUME_CHECK_INTERVAL);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => return,
+                _ = ticks.tick() => {}
+            }
+            let Some(boot) = boottime() else {
+                continue;
+            };
+            let monotonic = tokio::time::Instant::now();
+            let boot_elapsed = boot.saturating_sub(last_boot);
+            let monotonic_elapsed = monotonic.duration_since(last_monotonic);
+            last_boot = boot;
+            last_monotonic = monotonic;
+            if slept_between(boot_elapsed, monotonic_elapsed) {
+                tracing::info!(
+                    asleep_secs = boot_elapsed.saturating_sub(monotonic_elapsed).as_secs(),
+                    "host resumed from suspend; rebinding endpoint"
+                );
+                daemon.network_changed().await;
+            }
+        }
+    });
+}
+
 /// Opt-in automatic updates: a single daemon-wide task that periodically checks
 /// GitHub for a newer stable release and, when found, swaps the binary and
 /// restarts the service onto it. All errors are logged and swallowed so the task
@@ -1714,6 +1922,19 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_suspend_is_the_gap_between_boottime_and_monotonic() {
+        let secs = Duration::from_secs;
+        assert!(!slept_between(secs(5), secs(5)));
+        // Scheduling delay moves both clocks together.
+        assert!(!slept_between(secs(9), secs(9)));
+        assert!(!slept_between(secs(14), secs(5)));
+        assert!(slept_between(secs(3605), secs(5)));
+        // A clock that reads behind never counts.
+        assert!(!slept_between(secs(1), secs(5)));
+    }
 
     /// The decode-error reply quotes the request, and a frame may carry up to
     /// `MAX_FRAME_LEN` of it. Bounding the reply is what keeps a client that

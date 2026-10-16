@@ -223,6 +223,8 @@ pub use mesh::run_daemon;
 pub use mesh::build_headless;
 #[cfg(unix)]
 pub use mesh::start_embedded_ipc;
+#[cfg(unix)]
+pub use mesh::{CleanupOutcome, cleanup_after_exit};
 
 /// Legacy name for [`Daemon`], kept so embedders (`ray-mobile`) that were
 /// written against `DaemonState` compile unchanged after the daemon refactor.
@@ -3914,7 +3916,7 @@ mod headless_tests {
         // (background tasks hold their own clones and wind down on their own
         // schedule), so releasing the store has to be something the call itself
         // guarantees before it returns.
-        let blobs_dir = config::config_dir().unwrap().join("blobs");
+        let blobs_dir = config::blobs_dir().unwrap();
         let reopened = tokio::time::timeout(
             Duration::from_secs(10),
             iroh_blobs::store::fs::FsStore::load(&blobs_dir),
