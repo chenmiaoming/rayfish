@@ -1374,6 +1374,57 @@ mod tests {
         }
     }
 
+    /// The client marks are OR'd in under a mask, only for traffic to this host,
+    /// and the reply mark only goes onto packets nobody else marked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_client_marks_never_clobber_another_tools_bits() {
+        let script = client_nft_script("tun-rayfish");
+        assert!(
+            script.contains("fib daddr type local ct mark set ct mark | 0x7261"),
+            "{script}"
+        );
+        assert!(
+            script.contains("fib daddr type local meta mark set meta mark | 0x7261"),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "meta mark == 0 ct mark & 0x7261 == 0x7261 meta mark set meta mark | 0x7261"
+            ),
+            "{script}"
+        );
+        assert!(
+            !script.contains("mark set 0x"),
+            "no bare assignment: {script}"
+        );
+    }
+
+    /// The bypass rule matches the mark under its mask, add and del alike, and the
+    /// batch carries one command per line without the family.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_bypass_rule_is_masked_and_batched() {
+        assert_eq!(
+            bypass_rule_args("add"),
+            strs(&[
+                "rule",
+                "add",
+                "fwmark",
+                "0x7261/0x7261",
+                "table",
+                "main",
+                "pref",
+                PREF_BYPASS
+            ])
+        );
+        assert_eq!(bypass_rule_args("del")[1], "del");
+        assert_eq!(
+            batch_script(&[bypass_rule_args("add"), strs(&["rule", "del", "pref", "1"])]),
+            "rule add fwmark 0x7261/0x7261 table main pref 100\nrule del pref 1\n"
+        );
+    }
+
     /// The Linux twin of the above, and the same argument: `nft_load` never runs in
     /// CI either, so the ruleset text is pinned rather than exercised.
     #[cfg(target_os = "linux")]

@@ -187,10 +187,19 @@ pub(super) fn bypass_source_addrs(family: &str) -> Vec<IpAddr> {
 /// host from *outside* the tunnel answering out the interface they arrived on, so a
 /// headless box does not cut itself off the instant it starts using an exit node.
 ///
-/// `prerouting` tags anything arriving on a non-TUN interface (and marks the packet
-/// itself, so the reverse-path check resolves against `main`); `output` puts that
-/// mark back on the locally-generated replies, and `type route` forces a re-route
-/// once it is set.
+/// `prerouting` tags connections arriving on a non-TUN interface for this host
+/// (and marks the packet itself, so the reverse-path check resolves against
+/// `main`); `output` puts that mark back on the locally-generated replies, and
+/// `type route` forces a re-route once it is set.
+///
+/// Every mark is OR'd in and matched under a mask, never assigned: other tools
+/// (wg-quick, Mullvad, kube-proxy) keep their own bits in the same mark, and
+/// overwriting them breaks their routing. `fib daddr type local` keeps forwarded
+/// traffic (containers, VMs) out of it: that is not a connection to this host, and
+/// marking it would send it around the tunnel. `output` only touches packets
+/// without a mark of their own, because a socket that sets one (a WireGuard
+/// socket, say) is matched exactly by its owner's rules and must reach them as it
+/// was sent.
 ///
 /// This covers connections that arrive *after* the tunnel is up. Ones that predate
 /// it cannot be handled here at all: loading this table is what loads conntrack, so
@@ -207,12 +216,12 @@ pub(super) fn client_nft_script(tun_name: &str) -> String {
          \tchain prerouting {{\n\
          \t\ttype filter hook prerouting priority mangle; policy accept;\n\
          \t\tiifname \"{tun}\" return\n\
-         \t\tct mark set {mark}\n\
-         \t\tmeta mark set {mark}\n\
+         \t\tfib daddr type local ct mark set ct mark | {mark}\n\
+         \t\tfib daddr type local meta mark set meta mark | {mark}\n\
          \t}}\n\
          \tchain output {{\n\
          \t\ttype route hook output priority mangle; policy accept;\n\
-         \t\tct mark {mark} meta mark set {mark}\n\
+         \t\tmeta mark == 0 ct mark & {mark} == {mark} meta mark set meta mark | {mark}\n\
          \t}}\n\
          }}\n",
         reset = drop_table(CLIENT_TABLE),
@@ -271,7 +280,6 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
             let _ = run_ip(&[family, "route", "flush", "table", EXIT_TABLE]);
         }
     }
-    let mark = format!("{SOCKET_MARK:#x}");
     for family in tunnel_families(carries).iter().copied() {
         // Give the tunnel table the prefixes another VPN serves out of a table of
         // its own, or our catch-all rule swallows them (see the fn docs).
@@ -279,8 +287,8 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         run_ip(&[
             family, "route", "replace", "default", "dev", tun_name, "table", EXIT_TABLE,
         ])?;
-        // Keeps the catch-all standing: everything below is a rebuild, and the
-        // rules are re-added one `ip` process at a time. See [`RuleSweep`].
+        // Keeps the catch-all standing: everything below is a rebuild, deleted
+        // and re-added in two `ip` processes. See [`RuleSweep`].
         remove_client_rules(family, RuleSweep::KeepCatchAll);
         // The three bypasses go back **first**, because the catch-all now stays up
         // across the rebuild. That closed the window where traffic leaked out the
@@ -290,8 +298,8 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         // own QUIC underlay is routed into the tunnel it is carrying, along with
         // every pre-existing physical-sourced connection. That is precisely what
         // `PREF_BYPASS` and `PREF_SRC` exist to prevent, and it kills the mesh
-        // rather than leaking past it. Each of these is a separate `ip` process,
-        // so the window is real even now that it is a handful of them.
+        // rather than leaking past it. So they go in as one `ip -batch` process,
+        // which shrinks the window to the netlink round trips themselves.
         //
         // Ahead of everything else: traffic sourced from one of this host's own
         // physical addresses leaves the way it always did. That is every connection
@@ -304,32 +312,23 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         // connections are untracked at that moment and get registered with their
         // direction inverted. Traffic bound for the tunnel is sourced from the
         // overlay address instead, so it does not match.
-        for addr in bypass_source_addrs(family) {
-            run_ip(&[
-                family,
-                "rule",
-                "add",
-                "from",
-                &addr.to_string(),
-                "table",
-                "main",
-                "pref",
-                PREF_SRC,
-            ])?;
-        }
-        run_ip(&[
-            family,
-            "rule",
-            "add",
-            "fwmark",
-            &mark,
-            "table",
-            "main",
-            "pref",
-            PREF_BYPASS,
-        ])?;
-        run_ip(&[
-            family,
+        let mut adds: Vec<Vec<String>> = bypass_source_addrs(family)
+            .into_iter()
+            .map(|addr| {
+                argv(&[
+                    "rule",
+                    "add",
+                    "from",
+                    &addr.to_string(),
+                    "table",
+                    "main",
+                    "pref",
+                    PREF_SRC,
+                ])
+            })
+            .collect();
+        adds.push(bypass_rule_args("add"));
+        adds.push(argv(&[
             "rule",
             "add",
             "table",
@@ -338,7 +337,7 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
             "0",
             "pref",
             PREF_MAIN,
-        ])?;
+        ]));
         // The mirrored destinations, in one rule. It outranks the two `main`
         // rules above, because neither of them can find a co-resident VPN's
         // prefixes: those live in its own table, and `PREF_MAIN`'s
@@ -366,8 +365,9 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         // rule exists for the traffic that would otherwise stop at `PREF_SRC` or
         // `PREF_BYPASS` above and look up `main`.
         if mirrored > 0 {
-            run_ip(&foreign_rule_args(family, "add"))?;
+            adds.push(argv(&foreign_rule_args(family, "add")[1..]));
         }
+        run_ip_batch(family, &adds, false)?;
         // Only if the rebuild did not inherit it: `ip rule add` is not idempotent,
         // so adding it unconditionally would stack a duplicate on every re-apply,
         // and `remove_client_rules` deletes one match at a time. `EEXIST` is
@@ -420,8 +420,8 @@ pub fn teardown_client_routing() {
 /// [`RuleSweep::KeepCatchAll`], because the catch-all at [`PREF_TUNNEL`] is the
 /// only thing standing between tunnel-bound traffic and `main`: drop it and every
 /// packet leaves the physical uplink, sourced from this host's real address,
-/// until the rebuild puts it back. That is not instant: every rule is a separate
-/// `ip` process, and the mirrored routes that go in first are one process per
+/// until the rebuild puts it back. That is not instant: the rules are deleted and
+/// re-added by separate `ip` processes, and the mirrored routes that go in first are one process per
 /// foreign prefix, which a co-resident VPN can have hundreds of. Since the rule
 /// never varies (`table <EXIT_TABLE> pref <PREF_TUNNEL>`, no per-run content),
 /// leaving it standing across the rebuild costs nothing and closes the window:
@@ -576,17 +576,20 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
     // re-deriving the address list: a lease change between install and teardown
     // would otherwise strand a rule pointing at an address we no longer hold. Only
     // rules matching our exact shape at our pref are touched.
-    for addr in installed_source_rules(family) {
-        let _ = run_ip(&[
-            family, "rule", "del", "from", &addr, "table", "main", "pref", PREF_SRC,
-        ]);
-    }
+    let mut dels: Vec<Vec<String>> = installed_source_rules(family)
+        .into_iter()
+        .map(|addr| {
+            argv(&[
+                "rule", "del", "from", &addr, "table", "main", "pref", PREF_SRC,
+            ])
+        })
+        .collect();
     // One rule, deleted by its full spec, so this needs no readback at all.
     // While it was a rule per mirrored prefix it did, and that readback carried
     // the same bug `parse_catch_all` had: `ip rule show` prints a table *name*
     // where `/etc/iproute2/rt_tables` maps our id, and a rule whose table did not
     // match the numeric string was left behind to accumulate on every re-apply.
-    let _ = run_ip(&foreign_rule_args(family, "del"));
+    dels.push(argv(&foreign_rule_args(family, "del")[1..]));
     // Then whatever the *old* shape left behind. Kernel rules outlive the process
     // and the panic hook `abort()`s, so a host that ran a build with the per-prefix
     // rules and then swapped the binary keeps them: the del above names a spec they
@@ -600,8 +603,7 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
     // and safe only here: `remove_stray_rules` deletes only rules that look like
     // the shape we used to install, so a foreign rule parked at 98 is left alone.
     for stray in strays_at_our_pref(family) {
-        let _ = run_ip(&[
-            family,
+        dels.push(argv(&[
             "rule",
             "del",
             "to",
@@ -610,22 +612,24 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
             EXIT_TABLE,
             "pref",
             PREF_FOREIGN,
-        ]);
+        ]));
     }
-    let mark = format!("{SOCKET_MARK:#x}");
-    let _ = run_ip(&[
-        family,
+    dels.push(bypass_rule_args("del"));
+    // The unmasked spelling older builds installed. A del with no mask matches a
+    // masked rule too, so it goes after the masked one: by then that is gone, and
+    // this finds only a leftover.
+    let legacy_mark = format!("{SOCKET_MARK:#x}");
+    dels.push(argv(&[
         "rule",
         "del",
         "fwmark",
-        &mark,
+        &legacy_mark,
         "table",
         "main",
         "pref",
         PREF_BYPASS,
-    ]);
-    let _ = run_ip(&[
-        family,
+    ]));
+    dels.push(argv(&[
         "rule",
         "del",
         "table",
@@ -634,18 +638,92 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
         "0",
         "pref",
         PREF_MAIN,
-    ]);
+    ]));
     if sweep == RuleSweep::All {
-        let _ = run_ip(&[
-            family,
+        dels.push(argv(&[
             "rule",
             "del",
             "table",
             EXIT_TABLE,
             "pref",
             PREF_TUNNEL,
-        ]);
+        ]));
     }
+    // `-force` so one "not found" does not stop the rest; the exit status then
+    // reports that some failed, which for a sweep is expected.
+    let _ = run_ip_batch(family, &dels, true);
+}
+
+/// The `fwmark` selector of the [`PREF_BYPASS`] rule: our mark under its own
+/// mask, so a packet that also carries another tool's bits still matches.
+#[cfg(target_os = "linux")]
+pub(super) fn fwmark_selector() -> String {
+    format!("{SOCKET_MARK:#x}/{SOCKET_MARK:#x}")
+}
+
+/// The [`PREF_BYPASS`] rule for `ip -batch`, `verb` being `add` or `del`, so the
+/// two spell it identically.
+#[cfg(target_os = "linux")]
+pub(super) fn bypass_rule_args(verb: &str) -> Vec<String> {
+    argv(&[
+        "rule",
+        verb,
+        "fwmark",
+        &fwmark_selector(),
+        "table",
+        "main",
+        "pref",
+        PREF_BYPASS,
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn argv(args: &[&str]) -> Vec<String> {
+    args.iter().map(|a| (*a).to_string()).collect()
+}
+
+/// The stdin of `ip -batch -`: one command per line, without the leading `ip`
+/// and without the family, which [`run_ip_batch`] passes once for all of them.
+#[cfg(target_os = "linux")]
+pub(super) fn batch_script(commands: &[Vec<String>]) -> String {
+    commands.iter().map(|c| c.join(" ") + "\n").collect()
+}
+
+/// Run several `ip` commands in one process. Without `force`, `ip` stops at the
+/// first failure and so does the result.
+#[cfg(target_os = "linux")]
+pub(super) fn run_ip_batch(family: &str, commands: &[Vec<String>], force: bool) -> Result<()> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![family];
+    if force {
+        args.push("-force");
+    }
+    args.extend(["-batch", "-"]);
+    let mut child = Command::new("ip")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning `ip -batch -`")?;
+    child
+        .stdin
+        .take()
+        .context("ip stdin unavailable")?
+        .write_all(batch_script(commands).as_bytes())
+        .context("writing ip batch")?;
+    let out = child.wait_with_output().context("waiting for ip")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ip {family} -batch` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// One route, as [`parse_foreign_routes`] reads it back off `ip route show`.
