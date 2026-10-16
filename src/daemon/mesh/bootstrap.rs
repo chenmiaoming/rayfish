@@ -923,9 +923,7 @@ pub(crate) fn daemon_lock_path(socket: &Path) -> PathBuf {
 impl DaemonLock {
     /// Take the lock, or `None` when another live process holds it.
     pub(crate) fn try_acquire(socket: &Path) -> Result<Option<Self>> {
-        use std::fs::OpenOptions;
-        use std::io::{Error, ErrorKind};
-        use std::os::fd::AsRawFd;
+        use std::fs::{OpenOptions, TryLockError};
         use std::os::unix::fs::OpenOptionsExt;
 
         let path = daemon_lock_path(socket);
@@ -938,15 +936,13 @@ impl DaemonLock {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
-        // SAFETY: flock on a descriptor we own.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = Error::last_os_error();
-            if error.kind() == ErrorKind::WouldBlock {
-                return Ok(None);
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("failed to lock {}", path.display()))
             }
-            return Err(error).with_context(|| format!("failed to lock {}", path.display()));
         }
-        Ok(Some(Self { _file: file }))
     }
 }
 
@@ -962,9 +958,9 @@ pub enum CleanupOutcome {
 /// Undo the host changes a daemon can leave behind when it dies without its
 /// own teardown (SIGKILL, OOM, a stop timeout): the direct-mode resolv.conf
 /// and NetworkManager drop-in, exit-node forwarding and NAT, and the client
-/// full-tunnel rules. The same calls the panic hook makes, run by the service
-/// manager after the daemon has exited. Each one is a no-op when its state is
-/// absent, which is the usual case after a clean stop.
+/// full-tunnel rules. It runs the panic hook's
+/// [`restore_host_state`](crate::daemon::restore_host_state), from the service
+/// manager after the daemon has exited.
 ///
 /// Skipped while a daemon holds the lock: a service start that failed because
 /// a hand-started `ray daemon` already owns the socket must not tear that
@@ -978,9 +974,7 @@ pub fn cleanup_after_exit() -> Result<CleanupOutcome> {
     let Some(_lock) = DaemonLock::try_acquire(&socket)? else {
         return Ok(CleanupOutcome::DaemonRunning);
     };
-    crate::dns::config::emergency_restore_resolv_conf();
-    crate::exit_node::disable();
-    crate::exit_node::teardown_client_routing();
+    crate::daemon::restore_host_state();
     Ok(CleanupOutcome::Cleaned)
 }
 
@@ -1375,7 +1369,6 @@ async fn handle_ipc_client(
     tokio::time::timeout(IPC_IO_TIMEOUT, ipc::send(&mut framed, resp))
         .await
         .context("timed out sending the IPC response")??;
-    drop(slot);
     Ok(())
 }
 

@@ -226,6 +226,23 @@ pub use mesh::start_embedded_ipc;
 #[cfg(unix)]
 pub use mesh::{CleanupOutcome, cleanup_after_exit};
 
+/// Undo the host changes a daemon that dies without its own teardown leaves
+/// behind, for the panic hook and `ray daemon --cleanup`. Synchronous and
+/// best-effort, and each step is a no-op when its state is absent.
+///
+/// - Hand DNS back to the OS: restore the backed-up resolv.conf and drop the
+///   NetworkManager `dns=none` snippet, so the host does not keep pointing at a
+///   dead resolver (which would blackhole all DNS until a restart).
+/// - Remove the exit-node forwarding and NAT, restoring the sysctls, so the host
+///   is not left an open router.
+/// - Remove the client full-tunnel rules, which would otherwise outlive the TUN
+///   they point at.
+pub fn restore_host_state() {
+    crate::dns::config::emergency_restore_resolv_conf();
+    crate::exit_node::disable();
+    crate::exit_node::teardown_client_routing();
+}
+
 /// Legacy name for [`Daemon`], kept so embedders (`ray-mobile`) that were
 /// written against `DaemonState` compile unchanged after the daemon refactor.
 pub type DaemonState = Daemon;

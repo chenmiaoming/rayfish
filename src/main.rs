@@ -1632,17 +1632,9 @@ fn install_panic_hook() {
             eprintln!("failed to write panic log: {e}");
         }
 
-        // Hand DNS back to the OS before we abort: restore the backed-up
-        // resolv.conf and drop the NetworkManager `dns=none` snippet, so a crash
-        // can't leave the host pointing at our dead resolver (it would otherwise
-        // blackhole all DNS until the service restarts). Synchronous, best-effort.
-        rayfish::dns::config::emergency_restore_resolv_conf();
-
-        // Remove the exit-node kernel state: the forwarding/NAT (restoring the
-        // sysctls) so a crash can't leave the host an open router, and the client
-        // full-tunnel rules, which would otherwise outlive the TUN they point at.
-        rayfish::exit_node::disable();
-        rayfish::exit_node::teardown_client_routing();
+        // Hand DNS back to the OS and remove the exit-node kernel state before
+        // we abort, so a crash leaves neither a dead resolver nor an open router.
+        rayfish::daemon::restore_host_state();
 
         // Print the standard panic message to stderr (journal), then fail fast so
         // the service manager restarts the daemon cleanly.
