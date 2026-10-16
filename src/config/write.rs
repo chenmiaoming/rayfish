@@ -76,11 +76,7 @@ fn stage_temp(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let gid = if secret {
-            0
-        } else {
-            super::rayfish_gid().unwrap_or(0)
-        };
+        let gid = super::owner_gid(secret);
         if let Err(error) = std::os::unix::fs::fchown(&file, Some(0), Some(gid)) {
             // An unprivileged caller (tests, a user config dir) cannot chown to
             // root. Its file stays owned by itself with the mode above, which is

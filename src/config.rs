@@ -958,17 +958,23 @@ fn rayfish_gid() -> Option<u32> {
     }
 }
 
+/// The group a config path is owned by: `rayfish` for a non-secret path when the
+/// group exists, otherwise root.
+#[cfg(target_os = "linux")]
+fn owner_gid(secret: bool) -> u32 {
+    if secret {
+        0
+    } else {
+        rayfish_gid().unwrap_or(0)
+    }
+}
+
 /// Best-effort `chown` to root, with group `rayfish` for non-secret paths (or
 /// root for secret ones). No-op off Linux. Silent on failure so the daemon
 /// still starts if the group is missing.
 #[cfg(target_os = "linux")]
 fn set_owner(path: &Path, secret: bool) {
-    let gid = if secret {
-        Some(0)
-    } else {
-        rayfish_gid().or(Some(0))
-    };
-    if let Err(e) = std::os::unix::fs::chown(path, Some(0), gid) {
+    if let Err(e) = std::os::unix::fs::chown(path, Some(0), Some(owner_gid(secret))) {
         tracing::debug!(path = %path.display(), error = %e, "chown failed (non-fatal)");
     }
 }
@@ -1226,8 +1232,7 @@ fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
     }
     let result = (|| {
         fs::create_dir(&staging)?;
-        let mut copied = Vec::new();
-        copy_tree(old, &staging, Path::new(""), &mut copied)?;
+        copy_tree(old, &staging)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1240,8 +1245,7 @@ fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
         list_tree(&staging, Path::new(""), &mut check)?;
         original.sort();
         check.sort();
-        copied.sort();
-        if original != check || original != copied {
+        if original != check {
             return Err(io::Error::other(
                 "copied blob store does not match the original",
             ));
@@ -1260,23 +1264,21 @@ fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
 type StoreEntry = (PathBuf, u64);
 
 /// Copy the tree under `from` into the existing directory `to`, syncing each
-/// file and directory, and record every file copied.
+/// file and directory.
 #[cfg(any(target_os = "linux", test))]
-fn copy_tree(from: &Path, to: &Path, rel: &Path, out: &mut Vec<StoreEntry>) -> io::Result<()> {
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         let src = entry.path();
         let dst = to.join(entry.file_name());
-        let rel = rel.join(entry.file_name());
         if kind.is_dir() {
             fs::create_dir(&dst)?;
-            copy_tree(&src, &dst, &rel, out)?;
+            copy_tree(&src, &dst)?;
             fs::set_permissions(&dst, fs::metadata(&src)?.permissions())?;
         } else if kind.is_file() {
-            let len = fs::copy(&src, &dst)?;
+            fs::copy(&src, &dst)?;
             File::open(&dst)?.sync_all()?;
-            out.push((rel, len));
         } else {
             return Err(io::Error::new(
                 ErrorKind::Unsupported,
