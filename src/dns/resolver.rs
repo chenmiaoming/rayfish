@@ -239,15 +239,23 @@ impl Resolver {
     }
 
     /// Answer a DNS query that arrived addressed to the magic IP via the TUN.
-    /// UDP only; TCP is dropped (no userspace TCP handler yet).
+    /// UDP only. TCP is refused with a reset: answering it would need a TCP
+    /// stack in the packet path, and a dropped SYN hangs the client for its
+    /// whole connect timeout.
     pub async fn handle_tun_query(
         &self,
         pkt: &[u8],
         info: &crate::firewall::PacketInfo,
         tun_tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
     ) {
+        if info.protocol == 6 {
+            if let Some(rst) = crate::dns::packet::build_tcp_rst(info, pkt) {
+                let _ = tun_tx.send(rst).await;
+            }
+            return;
+        }
         if info.protocol != 17 {
-            return; // TCP/other: drop cleanly.
+            return; // other protocols: drop cleanly.
         }
         // UDP payload begins after the UDP header, which starts where the parser
         // found it (past IPv4 options or any IPv6 extension headers).
@@ -697,8 +705,10 @@ mod tests {
             icmp_id: 0,
             transport_offset: 20,
         };
+        // An IPv4 segment cannot be reset from the v6-only resolver, so it gets
+        // nothing (an IPv6 SYN gets a reset, see `packet::build_tcp_rst`).
         r.handle_tun_query(&[0u8; 40], &info, &tx).await;
-        assert!(rx.try_recv().is_err(), "TCP must be dropped, no reply");
+        assert!(rx.try_recv().is_err(), "no reply to an IPv4 TCP segment");
     }
 
     #[tokio::test]
