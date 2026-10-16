@@ -223,6 +223,8 @@ pub use mesh::run_daemon;
 pub use mesh::build_headless;
 #[cfg(unix)]
 pub use mesh::start_embedded_ipc;
+#[cfg(unix)]
+pub use mesh::{CleanupOutcome, cleanup_after_exit};
 
 /// Legacy name for [`Daemon`], kept so embedders (`ray-mobile`) that were
 /// written against `DaemonState` compile unchanged after the daemon refactor.

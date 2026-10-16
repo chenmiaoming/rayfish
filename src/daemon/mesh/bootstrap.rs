@@ -937,6 +937,40 @@ impl DaemonLock {
     }
 }
 
+/// What `ray daemon --cleanup` did.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    Cleaned,
+    /// A daemon holds the lock, so its state is live and was left alone.
+    DaemonRunning,
+}
+
+/// Undo the host changes a daemon can leave behind when it dies without its
+/// own teardown (SIGKILL, OOM, a stop timeout): the direct-mode resolv.conf
+/// and NetworkManager drop-in, exit-node forwarding and NAT, and the client
+/// full-tunnel rules. The same calls the panic hook makes, run by the service
+/// manager after the daemon has exited. Each one is a no-op when its state is
+/// absent, which is the usual case after a clean stop.
+///
+/// Skipped while a daemon holds the lock: a service start that failed because
+/// a hand-started `ray daemon` already owns the socket must not tear that
+/// daemon's routing and DNS down.
+#[cfg(unix)]
+pub fn cleanup_after_exit() -> Result<CleanupOutcome> {
+    let socket = ipc::socket_path();
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let Some(_lock) = DaemonLock::try_acquire(&socket)? else {
+        return Ok(CleanupOutcome::DaemonRunning);
+    };
+    crate::dns::config::emergency_restore_resolv_conf();
+    crate::exit_node::disable();
+    crate::exit_node::teardown_client_routing();
+    Ok(CleanupOutcome::Cleaned)
+}
+
 #[cfg(unix)]
 async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
     use std::io::ErrorKind;

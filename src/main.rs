@@ -307,7 +307,12 @@ pub(crate) enum Command {
     },
     /// Run the daemon in the foreground (invoked by the system service)
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        /// Undo DNS and exit-node changes a dead daemon left behind, then exit
+        /// (run by the service manager after the daemon stops)
+        #[arg(long)]
+        cleanup: bool,
+    },
     /// Serve macOS app SSH sessions (started only by launchd).
     #[cfg(all(target_os = "macos", feature = "macos-app"))]
     #[command(hide = true)]
@@ -1646,6 +1651,22 @@ fn install_panic_hook() {
     }));
 }
 
+/// `ray daemon --cleanup`: the service manager's post-stop hook.
+fn cmd_daemon_cleanup() -> Result<()> {
+    #[cfg(unix)]
+    {
+        match daemon::cleanup_after_exit()? {
+            daemon::CleanupOutcome::Cleaned => tracing::info!("post-stop cleanup done"),
+            daemon::CleanupOutcome::DaemonRunning => {
+                tracing::info!("a rayfish daemon is running; leaving its state alone")
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("ray daemon --cleanup is not used on this platform")
+}
+
 /// Append a panic record to `<log_dir>/panic.log`. Best-effort durability in case
 /// the tracing pipeline itself is implicated in the crash.
 fn append_panic_log(
@@ -1704,7 +1725,7 @@ async fn run() -> Result<()> {
         return rayfish::ssh::app_helper::run().await;
     }
     // Keep the appender guard alive for the whole process so file logs flush.
-    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon));
+    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon { .. }));
 
     match cli.command {
         Command::Leave { name, delegate } => match delegate {
@@ -1772,7 +1793,11 @@ async fn run() -> Result<()> {
         } => ipc_status(machines, with_ips).await,
         Command::Report => ipc_report().await,
         Command::Logs { since, follow } => ipc_logs(since, follow).await,
-        Command::Daemon => {
+        Command::Daemon { cleanup: true } => {
+            check_root();
+            cmd_daemon_cleanup()
+        }
+        Command::Daemon { cleanup: false } => {
             check_root();
             install_panic_hook();
             #[cfg(windows)]

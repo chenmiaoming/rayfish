@@ -17,8 +17,15 @@ error_log="/var/log/rayfish.log"
 supervisor="supervise-daemon"
 respawn_delay=5
 respawn_max=0
+# The daemon raises its soft open-file limit to this hard limit itself.
+rc_ulimit="-H -n 65536"
 
 depend() {
 	need net
-	after firewall
+	after firewall NetworkManager
+}
+
+# Undo DNS and exit-node changes when the daemon died without its own teardown.
+stop_post() {
+	"$command" daemon --cleanup
 }
