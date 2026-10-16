@@ -819,9 +819,11 @@ pub(super) async fn reassert_resolv_conf(
     let decision = reassert_decision(&current, merged_with);
     if decision == Reassert::Rewrite {
         tracing::warn!("/etc/resolv.conf was overwritten; re-asserting rayfish DNS");
-        tokio::fs::write(path, render_direct_resolv_conf(&search.load(), fallbacks))
-            .await
-            .context("re-asserting /etc/resolv.conf")?;
+        write_resolv_file(
+            path,
+            render_direct_resolv_conf(&search.load(), fallbacks).as_bytes(),
+        )
+        .context("re-asserting /etc/resolv.conf")?;
     }
     Ok(decision)
 }
@@ -867,7 +869,9 @@ pub async fn run_resolv_reassert(
     // Watch the parent directory, not the file: NetworkManager/resolvconf
     // replace resolv.conf via atomic rename, which a file-level watch stops
     // seeing after the first swap (the watched inode is gone). A directory
-    // watch catches the create/rename of a fresh `resolv.conf`.
+    // watch catches the create/rename of a fresh `resolv.conf`. It also sees
+    // every change to the file we hold, because that is a regular file in /etc
+    // even on a host where it was a symlink into /run (see `resolv_file`).
     let stream = (|| {
         use inotify::{Inotify, WatchMask};
         let inotify = Inotify::init()?;
@@ -1143,7 +1147,7 @@ pub(super) fn backup_path(original: &Path) -> PathBuf {
 #[cfg(target_os = "linux")]
 pub(super) async fn backup_file(path: &Path) -> Result<()> {
     let backup = backup_path(path);
-    if backup.exists() {
+    if exists_no_follow(&backup) {
         return Ok(());
     }
     let Ok(current) = tokio::fs::read_to_string(path).await else {
@@ -1153,12 +1157,9 @@ pub(super) async fn backup_file(path: &Path) -> Result<()> {
         tracing::info!("not backing up /etc/resolv.conf: it is one we wrote");
         return Ok(());
     }
-    // `copy`, not a write of `current`: it carries the original's mode across,
-    // and the restore copies it straight back.
-    tokio::fs::copy(path, &backup)
-        .await
-        .map(|_| ())
-        .with_context(|| format!("backing up {}", path.display()))
+    // Not a write of `current`: this carries the original's mode across, and a
+    // symlink is saved as the link itself (see `resolv_file`).
+    backup_resolv_file(path, &backup).with_context(|| format!("backing up {}", path.display()))
 }
 
 #[cfg(target_os = "linux")]
@@ -1174,11 +1175,10 @@ pub(super) async fn restore_file(path: &Path) -> Result<()> {
     {
         let stripped = strip_our_resolv_entries(&current);
         if stripped != current {
-            tokio::fs::write(path, &stripped)
-                .await
+            write_resolv_file(path, stripped.as_bytes())
                 .with_context(|| format!("removing our entries from {}", path.display()))?;
         }
-        if backup.exists() {
+        if exists_no_follow(&backup) {
             tokio::fs::remove_file(&backup).await?;
         }
         tracing::info!(
@@ -1187,11 +1187,9 @@ pub(super) async fn restore_file(path: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    if backup.exists() {
-        tokio::fs::copy(&backup, path)
-            .await
+    if exists_no_follow(&backup) {
+        restore_resolv_backup(&backup, path)
             .with_context(|| format!("restoring {}", path.display()))?;
-        tokio::fs::remove_file(&backup).await?;
         return Ok(());
     }
     // No backup (it was lost, or apply() never made one). Deleting the file was
@@ -1212,8 +1210,7 @@ pub(super) async fn restore_file(path: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    tokio::fs::write(path, strip_our_resolv_entries(&current))
-        .await
+    write_resolv_file(path, strip_our_resolv_entries(&current).as_bytes())
         .with_context(|| format!("restoring {}", path.display()))?;
     tracing::warn!(
         path = %path.display(),
@@ -1291,12 +1288,11 @@ pub fn emergency_restore_resolv_conf() {
     // ours. Subtract our lines instead and leave the backup alone.
     match std::fs::read_to_string(path) {
         Ok(current) if other_overlay_resolver(&current).is_some() => {
-            let _ = std::fs::write(path, strip_our_resolv_entries(&current));
+            let _ = write_resolv_file(path, strip_our_resolv_entries(&current).as_bytes());
             let _ = std::fs::remove_file(&backup);
         }
-        _ if backup.exists() => {
-            let _ = std::fs::copy(&backup, path);
-            let _ = std::fs::remove_file(&backup);
+        _ if exists_no_follow(&backup) => {
+            let _ = restore_resolv_backup(&backup, path);
         }
         _ => {}
     }
@@ -1722,9 +1718,22 @@ impl DnsConfigurator for DirectResolvConf {
             }
         }
         let new_content = render_direct_resolv_conf(&self.search.load(), &self.fallbacks());
-        tokio::fs::write(path, new_content)
-            .await
-            .context("writing /etc/resolv.conf")?;
+        if let Err(e) = write_resolv_file(path, new_content.as_bytes()) {
+            // The file is still the host's (the write renames into place, so a
+            // failure leaves it as it was), but NetworkManager is quieted and a
+            // backup is waiting to be restored over it. Undo both, or the host
+            // keeps a frozen file nobody regenerates while the retry loop runs.
+            let backup = backup_path(path);
+            let still_theirs = tokio::fs::read_to_string(path)
+                .await
+                .map(|c| !resolv_conf_is_ours(&c))
+                .unwrap_or(true);
+            if still_theirs && exists_no_follow(&backup) {
+                let _ = tokio::fs::remove_file(&backup).await;
+            }
+            nm_quiet_remove().await;
+            return Err(anyhow::Error::new(e).context("writing /etc/resolv.conf"));
+        }
         tracing::info!(
             upstreams = ?self.captured_upstreams.load(),
             "configured /etc/resolv.conf directly (fallback); verified upstream resolvers"
@@ -1767,11 +1776,10 @@ impl DnsConfigurator for DirectResolvConf {
         if !resolv_conf_is_ours(&current) {
             return Ok(());
         }
-        tokio::fs::write(
+        write_resolv_file(
             path,
-            render_direct_resolv_conf(&self.search.load(), &self.fallbacks()),
+            render_direct_resolv_conf(&self.search.load(), &self.fallbacks()).as_bytes(),
         )
-        .await
         .context("writing search domains to /etc/resolv.conf")
     }
 

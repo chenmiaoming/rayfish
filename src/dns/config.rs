@@ -300,7 +300,7 @@ pub fn restore_stale_backups() {
     {
         let path = PathBuf::from("/etc/resolv.conf");
         let backup = backup_path(&path);
-        if backup.exists() {
+        if exists_no_follow(&backup) {
             // A hard kill skips the panic hook, so the file left behind can be
             // one we merged into another VPN's. Copying the backup over it would
             // undo their DNS as well as ours; subtract our lines instead. Same
@@ -314,11 +314,11 @@ pub fn restore_stale_backups() {
                          removing only our entries"
                     );
                     let current = current.unwrap_or_default();
-                    let _ = std::fs::write(&path, strip_our_resolv_entries(&current));
+                    let _ = write_resolv_file(&path, strip_our_resolv_entries(&current).as_bytes());
                 }
                 StaleBackup::Restore => {
                     tracing::info!(path = %path.display(), "restoring stale DNS backup from previous crash");
-                    if let Err(e) = std::fs::copy(&backup, &path) {
+                    if let Err(e) = restore_resolv_backup(&backup, &path) {
                         tracing::warn!(error = %e, "failed to restore DNS backup");
                     }
                 }
@@ -530,12 +530,16 @@ pub fn remove_dns_config() {
 
 mod linux_backend;
 #[cfg(target_os = "linux")]
+mod resolv_file;
+#[cfg(target_os = "linux")]
 pub(crate) use linux_backend::nm_quiet_remove;
 pub(crate) use linux_backend::system_nameservers;
 #[cfg(any(target_os = "linux", test))]
 use linux_backend::*;
 #[cfg(target_os = "linux")]
 pub use linux_backend::{Recapture, emergency_restore_resolv_conf, run_resolv_reassert};
+#[cfg(target_os = "linux")]
+use resolv_file::{backup_resolv_file, exists_no_follow, restore_resolv_backup, write_resolv_file};
 
 /// No-op on non-Linux: only the direct `/etc/resolv.conf` takeover has artifacts
 /// to restore.
