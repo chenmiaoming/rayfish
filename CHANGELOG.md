@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `ray up --set KEY=VALUE` persists settings after startup, alongside controller
+  enrollment. Repeat the flag for multiple settings; `--enable` is an alias and
+  a bare key means `on`, for example `--enable v4-bridge --set dns=partial`.
+
 ## [0.5.9] - 2026-10-15
 
 ### Added
