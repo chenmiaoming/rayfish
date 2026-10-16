@@ -1335,10 +1335,11 @@ pub(super) fn strip_our_resolv_entries(contents: &str) -> String {
 }
 
 /// Synchronous emergency restore of the direct-mode DNS artifacts, safe to call
-/// from the panic hook just before `abort()`. Undoes exactly what
-/// [`DirectResolvConf`] installs: copies the backed-up `/etc/resolv.conf` back
-/// (so it stops pointing at our now-dead resolver) and removes the `dns=none`
-/// NetworkManager drop-in (so NM resumes owning DNS). No async, best-effort.
+/// from the panic hook just before `abort()`, and from `ray daemon --cleanup`
+/// after the daemon has exited. Undoes exactly what [`DirectResolvConf`]
+/// installs: puts the backed-up `/etc/resolv.conf` back (so it stops pointing at
+/// our now-dead resolver) and removes the `dns=none` NetworkManager drop-in,
+/// reloading NM so it resumes owning DNS. No async, best-effort.
 ///
 /// This is the safety net the user asked for: with NM quieting, a panic that
 /// left `dns=none` in place **and** resolv.conf pointing at 100.100.100.53 would
@@ -1349,27 +1350,67 @@ pub(super) fn strip_our_resolv_entries(contents: &str) -> String {
 pub fn emergency_restore_resolv_conf() {
     let path = Path::new("/etc/resolv.conf");
     let backup = backup_path(path);
-    // Same rule as [`restore_file`], and it matters more here: the file we would
-    // copy over is one we merged into another VPN's, and the process is about to
-    // abort, so nothing will be along to notice we took their DNS down with
-    // ours. Subtract our lines instead and leave the backup alone.
-    match std::fs::read_to_string(path) {
-        Ok(current) if other_overlay_resolver(&current).is_some() => {
-            let _ = write_resolv_file(path, strip_our_resolv_entries(&current).as_bytes());
+    // Same rule as the startup path in `restore_stale_backups`. It matters more
+    // here: after a hard kill NetworkManager may have rewritten the file, and a
+    // file we merged into another VPN's must lose only our lines, since nothing
+    // will be along afterwards to notice we took their DNS down with ours.
+    let current = std::fs::read_to_string(path).ok();
+    match stale_backup_action(current.as_deref()) {
+        StaleBackup::StripOurs(_) => {
+            let current = current.unwrap_or_default();
+            let stripped = strip_our_resolv_entries(&current);
+            if stripped != current {
+                let _ = write_resolv_file(path, stripped.as_bytes());
+            }
             let _ = std::fs::remove_file(&backup);
         }
-        _ if exists_no_follow(&backup) => {
+        StaleBackup::Restore if exists_no_follow(&backup) => {
             let _ = restore_resolv_backup(&backup, path);
         }
-        _ => {}
+        StaleBackup::Discard if exists_no_follow(&backup) => {
+            let _ = std::fs::remove_file(&backup);
+        }
+        StaleBackup::Restore | StaleBackup::Discard => {}
     }
     // Remove our NM drop-in, but only if it carries our marker (never an
-    // operator's own NM config).
+    // operator's own NM config). NM keeps `dns=none` until it rereads conf.d.
     if let Ok(c) = std::fs::read_to_string(NM_DROPIN)
         && resolv_conf_is_ours(&c)
+        && std::fs::remove_file(NM_DROPIN).is_ok()
     {
-        let _ = std::fs::remove_file(NM_DROPIN);
+        nm_reload_blocking();
     }
+}
+
+/// [`nm_reload`] for a caller with no async runtime to use, such as the panic
+/// hook. Only the `nmcli` path, since the D-Bus client here is async, and
+/// bounded so a hung NM cannot stall the abort.
+#[cfg(target_os = "linux")]
+fn nm_reload_blocking() {
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::Instant;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    let Ok(mut child) = Command::new("nmcli")
+        .args(["general", "reload"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if started.elapsed() < TIMEOUT => thread::sleep(Duration::from_millis(20)),
+            _ => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(target_os = "linux")]
