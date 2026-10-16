@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs::Permissions;
+#[cfg(any(target_os = "linux", test))]
+use std::fs::{self, File};
+#[cfg(any(target_os = "linux", test))]
+use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
@@ -1154,10 +1158,10 @@ pub fn blobs_dir() -> Result<PathBuf> {
 #[cfg(target_os = "linux")]
 const LINUX_STATE_DIR: &str = "/var/lib/rayfish";
 
-/// Move a blob store from `old` to `new` and return the one to use. A rename
-/// across filesystems is not attempted by hand (the store can be gigabytes,
-/// and a half-finished copy is worse than none), so in that case, or on any
-/// other failure, the old location stays in use.
+/// Move a blob store from `old` to `new` and return the one to use. Across
+/// filesystems (a separate `/var`) the store is copied next to `new`, checked,
+/// and only then renamed into place, so a half-finished copy is never used. On
+/// any failure the old location stays in use.
 #[cfg(any(target_os = "linux", test))]
 fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
     if !old.is_dir() {
@@ -1176,6 +1180,26 @@ fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
             tracing::info!(old = %old.display(), new = %new.display(), "moved the blob store");
             new.to_path_buf()
         }
+        Err(error) if error.kind() == ErrorKind::CrossesDevices => {
+            match copy_blob_store(old, new) {
+                Ok(()) => {
+                    tracing::info!(old = %old.display(), new = %new.display(), "copied the blob store to the state directory");
+                    if let Err(error) = fs::remove_dir_all(old) {
+                        tracing::warn!(old = %old.display(), %error, "copied the blob store but could not remove the old one");
+                    }
+                    new.to_path_buf()
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        old = %old.display(),
+                        new = %new.display(),
+                        %error,
+                        "could not copy the blob store; it stays where it is"
+                    );
+                    old.to_path_buf()
+                }
+            }
+        }
         Err(error) => {
             tracing::warn!(
                 old = %old.display(),
@@ -1186,6 +1210,99 @@ fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
             old.to_path_buf()
         }
     }
+}
+
+/// Copy the store at `old` to `new`, which must not exist, through a staging
+/// directory beside `new`. Every file and directory is synced and the copy's
+/// file list and sizes are compared with the original before the rename that
+/// makes it visible. `old` is left untouched.
+#[cfg(any(target_os = "linux", test))]
+fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
+    let parent = new
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "blob store path has no parent"))?;
+    let staging = parent.join(".blobs.migrating");
+    // A leftover from an attempt that was interrupted; never in use.
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    let result = (|| {
+        fs::create_dir(&staging)?;
+        let mut copied = Vec::new();
+        copy_tree(old, &staging, Path::new(""), &mut copied)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
+        }
+        File::open(&staging)?.sync_all()?;
+        let mut original = Vec::new();
+        list_tree(old, Path::new(""), &mut original)?;
+        let mut check = Vec::new();
+        list_tree(&staging, Path::new(""), &mut check)?;
+        original.sort();
+        check.sort();
+        copied.sort();
+        if original != check || original != copied {
+            return Err(io::Error::other(
+                "copied blob store does not match the original",
+            ));
+        }
+        fs::rename(&staging, new)?;
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// One regular file in a blob store, by path relative to the store and size.
+#[cfg(any(target_os = "linux", test))]
+type StoreEntry = (PathBuf, u64);
+
+/// Copy the tree under `from` into the existing directory `to`, syncing each
+/// file and directory, and record every file copied.
+#[cfg(any(target_os = "linux", test))]
+fn copy_tree(from: &Path, to: &Path, rel: &Path, out: &mut Vec<StoreEntry>) -> io::Result<()> {
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        let rel = rel.join(entry.file_name());
+        if kind.is_dir() {
+            fs::create_dir(&dst)?;
+            copy_tree(&src, &dst, &rel, out)?;
+            fs::set_permissions(&dst, fs::metadata(&src)?.permissions())?;
+        } else if kind.is_file() {
+            let len = fs::copy(&src, &dst)?;
+            File::open(&dst)?.sync_all()?;
+            out.push((rel, len));
+        } else {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                format!("{} is not a file or directory", src.display()),
+            ));
+        }
+    }
+    File::open(to)?.sync_all()
+}
+
+/// Every regular file under `dir`, with its size.
+#[cfg(any(target_os = "linux", test))]
+fn list_tree(dir: &Path, rel: &Path, out: &mut Vec<StoreEntry>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        let rel = rel.join(entry.file_name());
+        if metadata.is_dir() {
+            list_tree(&entry.path(), &rel, out)?;
+        } else {
+            out.push((rel, metadata.len()));
+        }
+    }
+    Ok(())
 }
 
 /// [`config_dir`] for a reader: same directory, never created.
@@ -1880,6 +1997,47 @@ mod tests {
         std::fs::create_dir(&new).expect("create new store");
         assert_eq!(migrate_blobs(&old, &new), new);
         assert!(old.exists());
+    }
+
+    #[test]
+    fn blob_store_copy_matches_and_replaces_nothing_on_failure() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        std::fs::create_dir_all(old.join("data").join("ab")).expect("create old store");
+        std::fs::write(old.join("blobs.db"), b"db").expect("seed old store");
+        std::fs::write(old.join("data").join("ab").join("blob"), vec![7u8; 70_000])
+            .expect("seed old store");
+        let new = root.path().join("var-blobs");
+
+        copy_blob_store(&old, &new).expect("copy succeeds");
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("copied"), b"db");
+        assert_eq!(
+            std::fs::metadata(new.join("data").join("ab").join("blob"))
+                .expect("copied")
+                .len(),
+            70_000
+        );
+        assert!(
+            old.join("blobs.db").exists(),
+            "the original is left for the caller"
+        );
+        assert!(!root.path().join(".blobs.migrating").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&new)
+                .expect("copied")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+
+        // Copying onto an existing store fails at the rename and leaves it be.
+        std::fs::write(new.join("blobs.db"), b"newer").expect("touch new store");
+        std::fs::write(new.join("extra"), b"x").expect("touch new store");
+        assert!(copy_blob_store(&old, &new).is_err());
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("kept"), b"newer");
+        assert!(!root.path().join(".blobs.migrating").exists());
     }
 
     #[test]
