@@ -650,7 +650,11 @@ impl Node {
     }
 
     pub fn reject_connection(&self, id: String) -> Result<(), AppleError> {
-        expect_ok(self.state()?.reject_connect(&id), "connection rejection")
+        let state = self.state()?;
+        expect_ok(
+            self.runtime.block_on(state.deny_connection(&id)),
+            "connection rejection",
+        )
     }
 
     pub fn accept_file(

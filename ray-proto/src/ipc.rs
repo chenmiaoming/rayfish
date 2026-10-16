@@ -448,6 +448,11 @@ pub enum IpcMessage {
     ApproveConnection {
         id: String,
     },
+    /// `ray connect deny <id>`: drop a pending connect request and block the
+    /// requester on the connect channel.
+    ConnectDeny {
+        id: String,
+    },
     /// `ray mdns scan`: list rayfish nodes seen on the LAN over mDNS. A sighting
     /// is not a relationship, so this is an open read.
     /// Reply: [`IpcMessage::LanPeersList`].

@@ -707,6 +707,7 @@ impl Daemon {
             IpcMessage::Connect { peer, hostname } => self.connect(&peer, hostname).await,
             IpcMessage::Connections => self.list_connections(),
             IpcMessage::ApproveConnection { id } => self.approve_connection(&id).await,
+            IpcMessage::ConnectDeny { id } => self.deny_connection(&id).await,
             IpcMessage::Ping {
                 peer,
                 count,

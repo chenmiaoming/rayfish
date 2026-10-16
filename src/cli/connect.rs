@@ -277,6 +277,10 @@ pub(crate) async fn ipc_connections(action: Option<ConnectAction>) -> Result<()>
     match action.unwrap_or(ConnectAction::List) {
         ConnectAction::List => ipc_connections_list().await,
         ConnectAction::Approve { id } => ipc_connections_approve(&id).await,
+        ConnectAction::Deny { id } => {
+            let response = ipc_request(ipc::IpcMessage::ConnectDeny { id }).await?;
+            print_ok_reply(response)
+        }
     }
 }
 
@@ -287,7 +291,7 @@ pub(crate) async fn ipc_connections_list() -> Result<()> {
         ipc::IpcMessage::PendingRequests { requests } => print_pending_requests(
             &requests,
             "no pending connection requests",
-            "approve with: ray connect approve <name>",
+            "approve with: ray connect approve <name>, or refuse with: ray connect deny <name>",
         )?,
         ipc::IpcMessage::Error { message } => fail_with("error", &message),
         other => fail_unexpected(&other),

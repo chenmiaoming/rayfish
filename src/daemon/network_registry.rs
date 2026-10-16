@@ -529,6 +529,30 @@ impl NetworkRegistry {
         }
     }
 
+    /// Whether `remote` is a member (device or user identity) or approved entry
+    /// of any network held here, or this device's paired primary. A poisoned
+    /// roster lock counts as not known for that network.
+    pub(crate) fn is_known(&self, remote: EndpointId) -> bool {
+        let in_roster = self.networks.iter().any(|network| {
+            network.state.read().is_ok_and(|state| {
+                state
+                    .members
+                    .all()
+                    .iter()
+                    .any(|m| m.matches_identity(remote))
+                    || state
+                        .approved
+                        .all()
+                        .iter()
+                        .any(|e| e.identity == remote || e.user_identity == Some(remote))
+            })
+        });
+        in_roster
+            || self
+                .current_device_cert()
+                .is_some_and(|cert| cert.user_identity == remote)
+    }
+
     /// What a person shares to reach this user: the paired user identity, or
     /// this endpoint when unpaired. Also the target of `ray connect`.
     pub(crate) fn own_identity(&self) -> EndpointId {

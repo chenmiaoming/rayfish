@@ -12,6 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enrollment. Repeat the flag for multiple settings; `--enable` is an alias and
   a bare key means `on`, for example `--enable v4-bridge --set dns=partial`.
 
+- `ray connect deny`, `ray block`, `ray unblock` and `ray blocked` control who
+  can send you connect requests; denying a request blocks its sender.
+  `ray config set inbound anyone|known|none` refuses strangers or everyone.
+  Refused peers get no reply, so they cannot tell you are online.
+
 ### Changed
 
 - `ray connect` takes the peer's identity, shown by `ray status` and

@@ -954,6 +954,13 @@ pub(crate) enum ConnectAction {
         #[arg(add = complete::connect_requests())]
         id: String,
     },
+    /// Refuse a pending request and block the requester
+    #[command(visible_alias = "reject")]
+    Deny {
+        /// Hostname or short id of the requester
+        #[arg(add = complete::connect_requests())]
+        id: String,
+    },
 }
 
 /// `--help` text for a `ray config` key argument: the lead line plus the

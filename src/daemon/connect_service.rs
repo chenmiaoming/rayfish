@@ -26,6 +26,8 @@ pub(crate) struct PendingConnect {
     pub(crate) from_endpoint: EndpointId,
     pub(crate) hostname: Option<String>,
     pub(crate) requested_at: Instant,
+    /// Not known when it arrived: counts toward the stranger quota.
+    pub(crate) stranger: bool,
 }
 
 /// Make room for a connect request from `incoming`: at the cap, drop the oldest
@@ -347,15 +349,35 @@ impl ConnectService {
             .retain(|endpoint, _| !blocked.contains(endpoint));
     }
 
-    /// Decline a pending connection request by hostname or endpoint prefix.
-    pub(crate) fn reject_connect(&self, selector: &str) -> IpcMessage {
+    /// Add `remote` to the block list and forget what it has queued.
+    pub(crate) async fn block(&self, remote: EndpointId) -> Result<()> {
+        let cfg = config::update_settings(|cfg| {
+            if !cfg.blocked.contains(&remote) {
+                cfg.blocked.push(remote);
+            }
+            Ok(())
+        })?;
+        self.drop_blocked(&cfg.blocked).await;
+        Ok(())
+    }
+
+    /// `ray connect deny`: drop a pending request by hostname or endpoint
+    /// prefix and block the requester, so it cannot simply ask again.
+    pub(crate) async fn deny_connection(&self, selector: &str) -> IpcMessage {
         let req = match self.find_pending(selector) {
             Ok(req) => req,
             Err(message) => return ipc_err(message),
         };
         self.pending_connects.remove(&req.from_endpoint);
+        if let Err(e) = self.block(req.from_endpoint).await {
+            return ipc_err(format!("request dropped, but blocking failed: {e:#}"));
+        }
         IpcMessage::Ok {
-            message: format!("declined connection request '{selector}'"),
+            message: format!(
+                "denied and blocked {} (undo with: ray unblock {})",
+                req.from_endpoint.fmt_short(),
+                req.from_endpoint
+            ),
         }
     }
 
@@ -391,8 +413,28 @@ impl ConnectService {
     /// `CONNECT_ALPN`: handle a `ray connect` friend request. Binds the request
     /// to the dialing identity, replies `Approved` if already accepted
     /// (idempotent), else queues it as `Pending` for `ray connect approve`.
+    ///
+    /// The inbound gate runs first, on the authenticated `remote_id`: a blocked
+    /// or refused dialer is closed before anything is read or written.
     pub(crate) async fn accept_connect_request(&self, conn: Connection) {
         let remote_id = conn.remote_id();
+        // An unreadable settings file must not quietly lift a block, so it
+        // refuses everyone until it is fixed.
+        let cfg = match config::load() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "connect channel closed: settings unreadable");
+                conn.close(0u32.into(), b"");
+                return;
+            }
+        };
+        let class = inbound::classify(&self.registry, &cfg, remote_id);
+        if !inbound::admits(cfg.inbound, class) {
+            tracing::debug!(peer = %remote_id.fmt_short(), ?class, "connect dial refused");
+            conn.close(0u32.into(), b"");
+            return;
+        }
+        let stranger = class == inbound::Inbound::Stranger;
         match conn.accept_bi().await {
             Ok((mut send, mut recv)) => {
                 let request: control::ConnectMsg = match control::recv_framed(&mut recv).await {
@@ -433,6 +475,13 @@ impl ConnectService {
                             coordinator,
                         }
                     } else {
+                        if stranger {
+                            inbound::evict_oldest_stranger(
+                                &self.pending_connects,
+                                from_endpoint,
+                                inbound::MAX_STRANGER_CONNECTS,
+                            );
+                        }
                         evict_oldest_connect(
                             &self.pending_connects,
                             from_endpoint,
@@ -444,6 +493,7 @@ impl ConnectService {
                                 from_endpoint,
                                 hostname,
                                 requested_at: Instant::now(),
+                                stranger,
                             },
                         );
                         tracing::info!(identity = %from_identity.fmt_short(), endpoint = %from_endpoint.fmt_short(), "connect request received");
@@ -481,6 +531,7 @@ mod pending_connect_cap_tests {
             from_endpoint: id,
             hostname: None,
             requested_at: t,
+            stranger: false,
         }
     }
 

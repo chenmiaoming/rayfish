@@ -1046,10 +1046,13 @@ impl Node {
         )
     }
 
-    /// Decline an incoming connect request.
+    /// Decline an incoming connect request and block the requester.
     pub fn reject_connect_request(&self, short_id: String) -> Result<(), RayError> {
         let state = self.state()?;
-        expect_ok(state.reject_connect(&short_id), "connections")
+        expect_ok(
+            self.runtime.block_on(state.deny_connection(&short_id)),
+            "connections",
+        )
     }
 
     /// Join requests awaiting approval on a network we coordinate.
