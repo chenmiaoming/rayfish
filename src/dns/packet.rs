@@ -1,6 +1,6 @@
 //! Synthesis of UDP reply packets injected back into the TUN, so the in-daemon
 //! Magic DNS resolver can answer queries addressed to the magic IP without a
-//! host socket, and of the TCP reset that refuses DNS over TCP. IPv6 only: the resolver is reached at [`crate::dns::MAGIC_DNS_V6`]
+//! host socket. IPv6 only: the resolver is reached at [`crate::dns::MAGIC_DNS_V6`]
 //! and nowhere else, so there is one family to synthesise for.
 
 use std::net::IpAddr;
@@ -12,14 +12,6 @@ use crate::firewall::PacketInfo;
 
 const IPV6_HEADER_LEN: usize = 40;
 const UDP_HEADER_LEN: usize = 8;
-const TCP_HEADER_LEN: usize = 20;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-
-const TCP_FIN: u8 = 0x01;
-const TCP_SYN: u8 = 0x02;
-const TCP_RST: u8 = 0x04;
-const TCP_ACK: u8 = 0x10;
 /// Keep DNS replies within IPv6's minimum MTU, even when the TUN is larger.
 const MTU: usize = 1280;
 
@@ -64,76 +56,23 @@ fn build_v6_reply(
     // checksum (udp_off+6..+8) zero while computing
     p[udp_off + UDP_HEADER_LEN..].copy_from_slice(dns_payload);
 
-    let udp_csum = transport_checksum(magic_ip, app_ip, PROTO_UDP, &p[udp_off..]);
+    let udp_csum = udp_checksum(magic_ip, app_ip, &p[udp_off..]);
     let udp_csum = if udp_csum == 0 { 0xffff } else { udp_csum };
     p[udp_off + 6..udp_off + 8].copy_from_slice(&udp_csum.to_be_bytes());
 
     Some(Bytes::from(p))
 }
 
-/// Builds the TCP reset that refuses a segment sent to the magic resolver.
-///
-/// The resolver has no TCP stack, and a silently dropped SYN leaves the client
-/// (systemd-resolved retrying a truncated answer over TCP, or `dig +tcp`)
-/// waiting out its whole connect timeout. A reset fails it at once. Built the
-/// way RFC 9293 3.10.7.1 says a closed port answers: from the segment's ACK
-/// when it has one, otherwise acknowledging what it carried. A reset is never
-/// answered, and an IPv4 segment cannot reach here (see [`build_udp_reply`]).
-pub fn build_tcp_rst(query: &PacketInfo, pkt: &[u8]) -> Option<Bytes> {
-    let (IpAddr::V6(app_ip), IpAddr::V6(magic_ip)) = (query.src_ip, query.dst_ip) else {
-        return None;
-    };
-    let tcp = pkt.get(query.transport_offset..)?;
-    if tcp.len() < TCP_HEADER_LEN {
-        return None;
-    }
-    let flags = tcp[13];
-    if flags & TCP_RST != 0 {
-        return None;
-    }
-    let their_seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
-    let their_ack = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
-    let header_len = usize::from(tcp[12] >> 4) * 4;
-    let data_len = tcp.len().saturating_sub(header_len) as u32;
-
-    let (seq, ack, out_flags) = if flags & TCP_ACK != 0 {
-        (their_ack, 0, TCP_RST)
-    } else {
-        let len = data_len + u32::from(flags & TCP_SYN != 0) + u32::from(flags & TCP_FIN != 0);
-        (0, their_seq.wrapping_add(len), TCP_RST | TCP_ACK)
-    };
-
-    let mut p = vec![0u8; IPV6_HEADER_LEN + TCP_HEADER_LEN];
-    p[0] = 0x60;
-    p[4..6].copy_from_slice(&(TCP_HEADER_LEN as u16).to_be_bytes());
-    p[6] = PROTO_TCP;
-    p[7] = 64;
-    p[8..24].copy_from_slice(&magic_ip.octets());
-    p[24..40].copy_from_slice(&app_ip.octets());
-
-    let t = IPV6_HEADER_LEN;
-    p[t..t + 2].copy_from_slice(&query.dst_port.to_be_bytes());
-    p[t + 2..t + 4].copy_from_slice(&query.src_port.to_be_bytes());
-    p[t + 4..t + 8].copy_from_slice(&seq.to_be_bytes());
-    p[t + 8..t + 12].copy_from_slice(&ack.to_be_bytes());
-    p[t + 12] = ((TCP_HEADER_LEN / 4) as u8) << 4;
-    p[t + 13] = out_flags;
-    // Window, checksum and urgent pointer stay zero until the checksum below.
-    let csum = transport_checksum(magic_ip, app_ip, PROTO_TCP, &p[t..]);
-    p[t + 16..t + 18].copy_from_slice(&csum.to_be_bytes());
-    Some(Bytes::from(p))
-}
-
-/// UDP or TCP checksum over the IPv6 pseudo-header + segment.
-fn transport_checksum(src: Ipv6Addr, dst: Ipv6Addr, protocol: u8, udp_segment: &[u8]) -> u16 {
+/// UDP checksum over the IPv6 pseudo-header + UDP header + payload.
+fn udp_checksum(src: Ipv6Addr, dst: Ipv6Addr, udp_segment: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     for ip in [src, dst] {
         for segment in ip.segments() {
             sum += segment as u32;
         }
     }
-    sum += u32::from(protocol);
-    sum += udp_segment.len() as u32; // upper-layer length
+    sum += 17u32; // protocol
+    sum += udp_segment.len() as u32; // UDP length
     let mut i = 0;
     while i + 1 < udp_segment.len() {
         sum += u16::from_be_bytes([udp_segment[i], udp_segment[i + 1]]) as u32;
@@ -193,60 +132,7 @@ mod tests {
         // Recomputing over the received segment must come out zero: the sum of
         // the pseudo-header and a segment carrying a correct checksum folds to
         // 0xffff, which the routine complements to 0.
-        assert_eq!(
-            transport_checksum(MAGIC_DNS_V6, app, PROTO_UDP, &pkt[IPV6_HEADER_LEN..]),
-            0
-        );
-    }
-
-    fn tcp_segment(app: Ipv6Addr, flags: u8, seq: u32, ack: u32) -> (PacketInfo, Vec<u8>) {
-        let mut pkt = vec![0u8; IPV6_HEADER_LEN + TCP_HEADER_LEN];
-        pkt[0] = 0x60;
-        pkt[4..6].copy_from_slice(&(TCP_HEADER_LEN as u16).to_be_bytes());
-        pkt[6] = PROTO_TCP;
-        pkt[7] = 64;
-        pkt[8..24].copy_from_slice(&app.octets());
-        pkt[24..40].copy_from_slice(&MAGIC_DNS_V6.octets());
-        let t = IPV6_HEADER_LEN;
-        pkt[t..t + 2].copy_from_slice(&41000u16.to_be_bytes());
-        pkt[t + 2..t + 4].copy_from_slice(&53u16.to_be_bytes());
-        pkt[t + 4..t + 8].copy_from_slice(&seq.to_be_bytes());
-        pkt[t + 8..t + 12].copy_from_slice(&ack.to_be_bytes());
-        pkt[t + 12] = 5 << 4;
-        pkt[t + 13] = flags;
-        let info = crate::firewall::parse_packet_info(&pkt).expect("parses");
-        (info, pkt)
-    }
-
-    /// A SYN to the resolver is refused with RST|ACK acknowledging the SYN, so
-    /// the client's connect fails at once instead of timing out.
-    #[test]
-    fn a_syn_is_answered_with_a_reset() {
-        let app: Ipv6Addr = "200::5".parse().unwrap();
-        let (info, pkt) = tcp_segment(app, TCP_SYN, 1000, 0);
-        let rst = build_tcp_rst(&info, &pkt).expect("reset");
-        let rinfo = crate::firewall::parse_packet_info(&rst).expect("parses");
-        assert_eq!(rinfo.src_ip, IpAddr::V6(MAGIC_DNS_V6));
-        assert_eq!(rinfo.dst_ip, IpAddr::V6(app));
-        assert_eq!(rinfo.src_port, 53);
-        assert_eq!(rinfo.dst_port, 41000);
-        let t = &rst[IPV6_HEADER_LEN..];
-        assert_eq!(t[13], TCP_RST | TCP_ACK);
-        assert_eq!(u32::from_be_bytes([t[8], t[9], t[10], t[11]]), 1001);
-        assert_eq!(transport_checksum(MAGIC_DNS_V6, app, PROTO_TCP, t), 0);
-    }
-
-    #[test]
-    fn an_acking_segment_is_reset_from_its_ack_and_a_reset_is_never_answered() {
-        let app: Ipv6Addr = "200::5".parse().unwrap();
-        let (info, pkt) = tcp_segment(app, TCP_ACK, 5, 777);
-        let rst = build_tcp_rst(&info, &pkt).expect("reset");
-        let t = &rst[IPV6_HEADER_LEN..];
-        assert_eq!(t[13], TCP_RST);
-        assert_eq!(u32::from_be_bytes([t[4], t[5], t[6], t[7]]), 777);
-
-        let (info, pkt) = tcp_segment(app, TCP_RST, 5, 0);
-        assert!(build_tcp_rst(&info, &pkt).is_none());
+        assert_eq!(udp_checksum(MAGIC_DNS_V6, app, &pkt[IPV6_HEADER_LEN..]), 0);
     }
 
     #[test]

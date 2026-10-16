@@ -249,7 +249,7 @@ impl Resolver {
         tun_tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
     ) {
         if info.protocol == 6 {
-            if let Some(rst) = crate::dns::packet::build_tcp_rst(info, pkt) {
+            if let Some(rst) = crate::reject::build_tcp_rst(pkt, info) {
                 let _ = tun_tx.send(rst).await;
             }
             return;
@@ -706,7 +706,7 @@ mod tests {
             transport_offset: 20,
         };
         // An IPv4 segment cannot be reset from the v6-only resolver, so it gets
-        // nothing (an IPv6 SYN gets a reset, see `packet::build_tcp_rst`).
+        // nothing (an IPv6 SYN gets a reset, see `reject::build_tcp_rst`).
         r.handle_tun_query(&[0u8; 40], &info, &tx).await;
         assert!(rx.try_recv().is_err(), "no reply to an IPv4 TCP segment");
     }
