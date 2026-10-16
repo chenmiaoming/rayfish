@@ -401,14 +401,22 @@ fn our_rule(rule: &serde_json::Value) -> Option<NftRule> {
     })
 }
 
+#[derive(Deserialize)]
+struct Ruleset {
+    nftables: Vec<serde_json::Value>,
+}
+
 fn nft_items(json: &str) -> Vec<serde_json::Value> {
-    #[derive(Deserialize)]
-    struct Ruleset {
-        nftables: Vec<serde_json::Value>,
-    }
     serde_json::from_str::<Ruleset>(json)
         .map(|r| r.nftables)
         .unwrap_or_default()
+}
+
+/// Whether this is a JSON ruleset at all. An `nft` built without JSON support
+/// (OpenWrt's) prints nothing useful for `-j`, which says nothing about which
+/// tables exist.
+pub(super) fn nft_json_readable(json: &str) -> bool {
+    serde_json::from_str::<Ruleset>(json).is_ok()
 }
 
 /// Whether `nft -j list ruleset` output has the table `family` `name`.

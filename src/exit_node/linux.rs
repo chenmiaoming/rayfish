@@ -305,9 +305,26 @@ pub(super) fn client_rules_present(show: &str) -> bool {
 }
 
 /// Whether `ruleset` (`nft -j list ruleset` output) has our `inet` table.
+/// Without a readable JSON dump (a failed run, or an `nft` built without JSON
+/// support) that is unknown rather than no, so ask `nft list table` instead:
+/// reading it as missing would re-apply the rules on every check.
 #[cfg(target_os = "linux")]
 fn nft_table_exists(ruleset: Option<&str>, table: &str) -> bool {
-    ruleset.is_some_and(|json| forward_fw::nft_has_table(json, "inet", table))
+    nft_table_exists_with(ruleset, table, || {
+        hostfw::run(&["nft", "list", "table", "inet", table]).is_some()
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn nft_table_exists_with(
+    ruleset: Option<&str>,
+    table: &str,
+    listed: impl FnOnce() -> bool,
+) -> bool {
+    match ruleset.filter(|json| forward_fw::nft_json_readable(json)) {
+        Some(json) => forward_fw::nft_has_table(json, "inet", table),
+        None => listed(),
+    }
 }
 
 /// The largest TCP MSS that fits the 1280-byte TUN: its MTU less the IPv6 and

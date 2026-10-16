@@ -1479,6 +1479,21 @@ mod tests {
         );
     }
 
+    /// A JSON dump answers for itself; without one, the plain listing does,
+    /// so an `nft` without JSON support does not read every table as gone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_table_check_without_json_falls_back_to_listing_it() {
+        let json = r#"{"nftables":[{"table":{"family":"inet","name":"rayfish-exit"}}]}"#;
+        let never = || panic!("a readable dump needs no second run");
+        assert!(nft_table_exists_with(Some(json), "rayfish-exit", never));
+        assert!(!nft_table_exists_with(Some(json), "other", never));
+        for unreadable in [None, Some(""), Some("JSON support not compiled-in")] {
+            assert!(nft_table_exists_with(unreadable, "rayfish-exit", || true));
+            assert!(!nft_table_exists_with(unreadable, "rayfish-exit", || false));
+        }
+    }
+
     /// The gateway clamps the MSS of SYNs crossing the TUN in both directions,
     /// and the chain that does it filters nothing.
     #[cfg(target_os = "linux")]
