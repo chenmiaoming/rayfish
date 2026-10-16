@@ -305,19 +305,28 @@ pub fn restore_stale_backups() {
             // one we merged into another VPN's. Copying the backup over it would
             // undo their DNS as well as ours; subtract our lines instead. Same
             // rule as `restore_file`, arrived at from the other direction.
-            let current = std::fs::read_to_string(&path).unwrap_or_default();
-            if let Some(ip) = other_overlay_resolver(&current) {
-                tracing::info!(
-                    resolver = %ip,
-                    "stale DNS backup, but another VPN's resolver is in the live file; \
-                     removing only our entries"
-                );
-                let _ = std::fs::write(&path, strip_our_resolv_entries(&current));
-            } else {
-                tracing::info!(path = %path.display(), "restoring stale DNS backup from previous crash");
-                if let Err(e) = std::fs::copy(&backup, &path) {
-                    tracing::warn!(error = %e, "failed to restore DNS backup");
+            let current = std::fs::read_to_string(&path).ok();
+            match stale_backup_action(current.as_deref()) {
+                StaleBackup::StripOurs(ip) => {
+                    tracing::info!(
+                        resolver = %ip,
+                        "stale DNS backup, but another VPN's resolver is in the live file; \
+                         removing only our entries"
+                    );
+                    let current = current.unwrap_or_default();
+                    let _ = std::fs::write(&path, strip_our_resolv_entries(&current));
                 }
+                StaleBackup::Restore => {
+                    tracing::info!(path = %path.display(), "restoring stale DNS backup from previous crash");
+                    if let Err(e) = std::fs::copy(&backup, &path) {
+                        tracing::warn!(error = %e, "failed to restore DNS backup");
+                    }
+                }
+                StaleBackup::Discard => tracing::info!(
+                    path = %path.display(),
+                    "stale DNS backup, but something else has rewritten the live file since; \
+                     discarding the backup and leaving the file alone"
+                ),
             }
             let _ = std::fs::remove_file(&backup);
         }
@@ -333,6 +342,37 @@ pub fn restore_stale_backups() {
             tracing::info!("removing stale NetworkManager dns=none drop-in from previous crash");
             let _ = std::fs::remove_file(NM_DROPIN);
         }
+    }
+}
+
+/// What a stale direct-mode backup found at startup is for.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum StaleBackup {
+    /// The live file is one we merged into another VPN's: subtract our lines.
+    StripOurs(Ipv4Addr),
+    /// The live file is ours, or gone: put the host's back.
+    Restore,
+    /// Something else wrote the file after we did (NetworkManager, DHCP, the
+    /// operator). It is newer than our backup, so the backup is dropped.
+    Discard,
+}
+
+/// Decide what to do with a stale backup given the live `/etc/resolv.conf`
+/// (`None` when it is missing). Same rule Tailscale's direct manager follows:
+/// only overwrite a file that is still ours.
+#[cfg(any(target_os = "linux", test))]
+fn stale_backup_action(current: Option<&str>) -> StaleBackup {
+    let Some(current) = current else {
+        return StaleBackup::Restore;
+    };
+    if let Some(ip) = other_overlay_resolver(current) {
+        return StaleBackup::StripOurs(ip);
+    }
+    if resolv_conf_is_ours(current) {
+        StaleBackup::Restore
+    } else {
+        StaleBackup::Discard
     }
 }
 
@@ -507,11 +547,11 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::{
-        MAX_NAMESERVERS, NmQuietOutcome, Reassert, SearchDomain, first_nameserver,
+        MAX_NAMESERVERS, NmQuietOutcome, Reassert, SearchDomain, StaleBackup, first_nameserver,
         foreign_mesh_resolver, join_domains, merge_search_domains, nm_dns_none_dropin,
         nm_quiet_outcome, other_overlay_resolver, parse_resolv_nameservers, reassert_decision,
         render_direct_resolv_conf, render_direct_resolv_conf_with, resolv_conf_is_ours,
-        resolvectl_domain_args, resolved_link_domains, search_domains_for,
+        resolvectl_domain_args, resolved_link_domains, search_domains_for, stale_backup_action,
         strip_our_resolv_entries,
     };
 
@@ -575,6 +615,27 @@ mod tests {
             ["homelab.ray", "ray"]
         );
         assert_eq!(resolvectl_domain_args(&[]), ["~ray"]);
+    }
+
+    /// A backup is only restored over a file that is still ours. Anything else
+    /// wrote the live file after the crash, so it is newer than the backup.
+    #[test]
+    fn stale_backup_only_replaces_our_own_file() {
+        let ours = "# Added by rayfish - do not edit\nnameserver 200::53\nnameserver 9.9.9.9\n";
+        assert_eq!(stale_backup_action(Some(ours)), StaleBackup::Restore);
+        assert_eq!(stale_backup_action(None), StaleBackup::Restore);
+        assert_eq!(
+            stale_backup_action(Some(
+                "# Generated by NetworkManager\nnameserver 192.168.1.1\n"
+            )),
+            StaleBackup::Discard
+        );
+        let merged =
+            "# Added by rayfish - do not edit\nnameserver 200::53\nnameserver 100.100.100.100\n";
+        assert_eq!(
+            stale_backup_action(Some(merged)),
+            StaleBackup::StripOurs(Ipv4Addr::new(100, 100, 100, 100))
+        );
     }
 
     #[test]
