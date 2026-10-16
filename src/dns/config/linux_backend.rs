@@ -4,6 +4,45 @@ use super::*;
 // Linux: search domains
 // ---------------------------------------------------------------------------
 
+/// The `(domain, routing_only)` list resolved gets for our link.
+///
+/// Each domain goes in once. resolved keys its per-link list by name and a
+/// repeat overwrites the flag of the first, so the old `~ray` followed by a
+/// plain `ray` search entry left no routing-only domain at all.
+///
+/// When `ray` is a search domain (short names on), it is sent as a plain search
+/// domain: resolved routes on search domains too, so `.ray` still comes to us,
+/// and a bare name still gets `.ray` appended. When it is not, `~ray` is sent
+/// routing-only. Tailscale makes the same choice for a domain that is both. The
+/// cost is that a link with no routing-only domain is one resolved would make a
+/// default DNS route on its own, which is why `apply` also turns DefaultRoute
+/// off explicitly.
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn resolved_link_domains(search: &[SearchDomain]) -> Vec<(String, bool)> {
+    let root = SearchDomain::root();
+    let mut domains = Vec::with_capacity(search.len() + 1);
+    if !search.contains(&root) {
+        domains.push((root.to_string(), true));
+    }
+    for d in search {
+        let entry = (d.to_string(), false);
+        if !domains.contains(&entry) {
+            domains.push(entry);
+        }
+    }
+    domains
+}
+
+/// [`resolved_link_domains`] spelled the way `resolvectl domain` takes it, a
+/// `~` prefix marking a routing-only domain.
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn resolvectl_domain_args(search: &[SearchDomain]) -> Vec<String> {
+    resolved_link_domains(search)
+        .into_iter()
+        .map(|(d, route_only)| if route_only { format!("~{d}") } else { d })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 pub(super) async fn set_search_domains_linux(
     rayfish_domains: &[SearchDomain],
@@ -15,22 +54,20 @@ pub(super) async fn set_search_domains_linux(
     if let Some(idx) = ifindex
         && let Ok(conn) = Connection::system().await
     {
-        // `.ray` is the only routing domain (~ray); bare network names are not
+        // `.ray` is the only routing domain; bare network names are not
         // registered, so a network named `dev` never captures `*.dev`.
-        let mut domains: Vec<(String, bool)> = vec![(DNS_DOMAIN.to_string(), true)];
-        for d in rayfish_domains {
-            domains.push((d.to_string(), false));
-        }
+        let domains = resolved_link_domains(rayfish_domains);
         let reply = conn
             .call_method(
-                Some("org.freedesktop.resolve1"),
-                "/org/freedesktop/resolve1",
-                Some("org.freedesktop.resolve1.Manager"),
+                Some(RESOLVED_BUS),
+                RESOLVED_PATH,
+                Some(RESOLVED_MANAGER),
                 "SetLinkDomains",
                 &(idx as i32, &domains),
             )
             .await;
         if reply.is_ok() {
+            resolved_best_effort(&conn, "FlushCaches", &()).await;
             return Ok(());
         }
     }
@@ -43,15 +80,176 @@ pub(super) async fn set_search_domains_linux(
         .is_ok_and(|o| o.status.success())
     {
         let mut args = vec!["domain".to_string(), tun_name.to_string()];
-        args.push(format!("~{DNS_DOMAIN}"));
-        args.extend(rayfish_domains.iter().map(SearchDomain::to_string));
+        args.extend(resolvectl_domain_args(rayfish_domains));
         let status = Command::new("resolvectl")
             .args(&args)
             .status()
             .context("resolvectl domain")?;
         anyhow::ensure!(status.success(), "resolvectl domain failed");
+        resolvectl_best_effort(&["flush-caches"]).await;
     }
     Ok(())
+}
+
+/// Drop everything resolved holds for our link: servers, domains, and the
+/// per-link settings `apply` made. Used on the way down, where an empty search
+/// list has to mean no `.ray` routing either, which `SetLinkDomains` with our
+/// list cannot say (it always carries `.ray`).
+#[cfg(target_os = "linux")]
+pub(super) async fn revert_resolved_link(tun_name: &str) {
+    let Some(idx) = linux::get_ifindex(tun_name) else {
+        return; // the link is gone, and resolved forgot it with it
+    };
+    if let Ok(conn) = Connection::system().await
+        && conn
+            .call_method(
+                Some(RESOLVED_BUS),
+                RESOLVED_PATH,
+                Some(RESOLVED_MANAGER),
+                "RevertLink",
+                &(idx as i32,),
+            )
+            .await
+            .is_ok()
+    {
+        return;
+    }
+    let _ = tokio::process::Command::new("resolvectl")
+        .args(["revert", tun_name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+}
+
+#[cfg(target_os = "linux")]
+const RESOLVED_BUS: &str = "org.freedesktop.resolve1";
+#[cfg(target_os = "linux")]
+const RESOLVED_PATH: &str = "/org/freedesktop/resolve1";
+#[cfg(target_os = "linux")]
+const RESOLVED_MANAGER: &str = "org.freedesktop.resolve1.Manager";
+
+/// Call a resolved manager method whose failure should not fail the apply.
+///
+/// These are the per-link settings that make the link behave, not the ones
+/// that make `.ray` reach us, so a resolved that refuses one still resolves our
+/// names. An old systemd that lacks the method entirely (DefaultRoute arrived
+/// in 240) is expected and only logged at debug.
+#[cfg(target_os = "linux")]
+async fn resolved_best_effort<B>(conn: &Connection, method: &str, body: &B)
+where
+    B: serde::Serialize + zbus::zvariant::DynamicType,
+{
+    match conn
+        .call_method(
+            Some(RESOLVED_BUS),
+            RESOLVED_PATH,
+            Some(RESOLVED_MANAGER),
+            method,
+            body,
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(zbus::Error::MethodError(name, _, _))
+            if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" =>
+        {
+            tracing::debug!("systemd-resolved has no {method}; skipping it");
+        }
+        Err(e) => tracing::warn!("{method} failed: {e}"),
+    }
+}
+
+/// The `resolvectl` counterpart of [`resolved_best_effort`].
+#[cfg(target_os = "linux")]
+async fn resolvectl_best_effort(args: &[&str]) {
+    match tokio::process::Command::new("resolvectl")
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .await
+    {
+        Ok(s) if s.success() => {}
+        r => tracing::warn!("resolvectl {} failed: {r:?}", args.join(" ")),
+    }
+}
+
+/// The per-link settings both resolved backends apply after the servers and
+/// domains, as `(D-Bus method, resolvectl verb, value)`.
+///
+/// DefaultRoute off keeps the link from becoming a default DNS route: with
+/// `ray` sent as a plain search domain (see [`resolved_link_domains`]) the link
+/// has no routing-only domain, and resolved would otherwise send every name on
+/// the host to us. DNSSEC, LLMNR and mDNS are off because the magic resolver
+/// signs nothing and has no neighbours to multicast to; a global `DNSSEC=yes`
+/// would fail every `.ray` answer. DNS over TLS is off because the magic
+/// resolver answers plain UDP only.
+#[cfg(target_os = "linux")]
+const RESOLVED_LINK_SETTINGS: [LinkSetting; 5] = [
+    LinkSetting::new(
+        "SetLinkDefaultRoute",
+        "default-route",
+        LinkValue::Bool(false),
+    ),
+    LinkSetting::new("SetLinkDNSOverTLS", "dnsovertls", LinkValue::Str("no")),
+    LinkSetting::new("SetLinkDNSSEC", "dnssec", LinkValue::Str("no")),
+    LinkSetting::new("SetLinkLLMNR", "llmnr", LinkValue::Str("no")),
+    LinkSetting::new("SetLinkMulticastDNS", "mdns", LinkValue::Str("no")),
+];
+
+#[cfg(target_os = "linux")]
+struct LinkSetting {
+    method: &'static str,
+    verb: &'static str,
+    value: LinkValue,
+}
+
+#[cfg(target_os = "linux")]
+impl LinkSetting {
+    const fn new(method: &'static str, verb: &'static str, value: LinkValue) -> Self {
+        Self {
+            method,
+            verb,
+            value,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum LinkValue {
+    Bool(bool),
+    Str(&'static str),
+}
+
+#[cfg(target_os = "linux")]
+impl LinkValue {
+    fn cli(self) -> &'static str {
+        match self {
+            Self::Bool(true) => "true",
+            Self::Bool(false) => "false",
+            Self::Str(s) => s,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn apply_link_settings_dbus(conn: &Connection, ifindex: i32) {
+    for s in &RESOLVED_LINK_SETTINGS {
+        match s.value {
+            LinkValue::Bool(b) => resolved_best_effort(conn, s.method, &(ifindex, b)).await,
+            LinkValue::Str(v) => resolved_best_effort(conn, s.method, &(ifindex, v)).await,
+        }
+    }
+    resolved_best_effort(conn, "FlushCaches", &()).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn apply_link_settings_cli(tun: &str) {
+    for s in &RESOLVED_LINK_SETTINGS {
+        resolvectl_best_effort(&[s.verb, tun, s.value.cli()]).await;
+    }
+    resolvectl_best_effort(&["flush-caches"]).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,20 +391,7 @@ impl DnsConfigurator for SystemdResolvedDBus {
         .await
         .context("SetLinkDomains failed")?;
 
-        // The magic resolver answers plain UDP only, so a global
-        // `DNSOverTLS=yes` would leave every .ray lookup timing out.
-        if let Err(e) = conn
-            .call_method(
-                Some("org.freedesktop.resolve1"),
-                "/org/freedesktop/resolve1",
-                Some("org.freedesktop.resolve1.Manager"),
-                "SetLinkDNSOverTLS",
-                &(self.ifindex, "no"),
-            )
-            .await
-        {
-            tracing::warn!("SetLinkDNSOverTLS failed: {e}");
-        }
+        apply_link_settings_dbus(&conn, self.ifindex).await;
 
         tracing::info!(
             ifindex = self.ifindex,
@@ -280,15 +465,7 @@ impl DnsConfigurator for SystemdResolvedCli {
             .context("resolvectl domain")?;
         anyhow::ensure!(status.success(), "resolvectl domain failed");
 
-        // See `SystemdResolvedDBus::apply`: the magic resolver has no DoT.
-        match Command::new("resolvectl")
-            .args(["dnsovertls", &self.tun_iface, "no"])
-            .status()
-            .await
-        {
-            Ok(s) if s.success() => {}
-            r => tracing::warn!("resolvectl dnsovertls failed: {r:?}"),
-        }
+        apply_link_settings_cli(&self.tun_iface).await;
 
         tracing::info!(
             "configured systemd-resolved (CLI) for .{DNS_DOMAIN} via {}",

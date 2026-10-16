@@ -371,7 +371,14 @@ pub async fn clear_search_domains(tun_name: &str) {
         let _ = tun_name;
         macos::remove_dns_config();
     }
-    #[cfg(not(target_os = "macos"))]
+    // Linux clears the same way, for the same reason: the set path always
+    // carries `~ray`, so an empty list sent through it re-registered `.ray` on
+    // the link right after the backend's revert dropped it. Reverting the link
+    // is what "no domains" means to resolved, and it is a no-op on a host where
+    // resolved never held it.
+    #[cfg(target_os = "linux")]
+    revert_resolved_link(tun_name).await;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     if let Err(e) = set_manager_search_domains(&[], tun_name).await {
         tracing::warn!(error = %e, "failed to clear search domains");
     }
@@ -504,7 +511,8 @@ mod tests {
         foreign_mesh_resolver, join_domains, merge_search_domains, nm_dns_none_dropin,
         nm_quiet_outcome, other_overlay_resolver, parse_resolv_nameservers, reassert_decision,
         render_direct_resolv_conf, render_direct_resolv_conf_with, resolv_conf_is_ours,
-        search_domains_for, strip_our_resolv_entries,
+        resolvectl_domain_args, resolved_link_domains, search_domains_for,
+        strip_our_resolv_entries,
     };
 
     /// Domains as the host had them, i.e. read back from its own config.
@@ -545,6 +553,28 @@ mod tests {
         assert!(names(&host(&["corp", "other.example.com"])).is_empty());
         // A deeper name under `.ray` is not a network either.
         assert!(names(&host(&["box.homelab.ray"])).is_empty());
+    }
+
+    /// resolved keys a link's domains by name, so sending `ray` twice (once
+    /// routing-only, once as a search domain) let the second flag win and left
+    /// the link with no routing-only domain. Each domain goes in once.
+    #[test]
+    fn resolved_link_domains_never_repeat_ray() {
+        let with_short_names = resolved_link_domains(&search_domains_for(&networks(&["homelab"])));
+        assert_eq!(
+            with_short_names,
+            vec![
+                ("homelab.ray".to_string(), false),
+                ("ray".to_string(), false)
+            ]
+        );
+        // Short names off: `.ray` still has to route to us, routing-only.
+        assert_eq!(resolved_link_domains(&[]), vec![("ray".to_string(), true)]);
+        assert_eq!(
+            resolvectl_domain_args(&search_domains_for(&networks(&["homelab"]))),
+            ["homelab.ray", "ray"]
+        );
+        assert_eq!(resolvectl_domain_args(&[]), ["~ray"]);
     }
 
     #[test]
