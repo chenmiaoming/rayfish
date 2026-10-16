@@ -46,6 +46,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::io::copy_bidirectional;
@@ -58,6 +60,7 @@ use tracing::{debug, info, warn};
 use crate::forward::{self, SSH_LISTEN_PORT};
 use crate::listen_events;
 use crate::listener::bind_listener;
+use crate::membership::is_cgnat_range;
 
 /// How often the host's listening sockets are re-enumerated where nothing
 /// reports a change. A service can start long after `ray up`, so this cannot be
@@ -105,11 +108,16 @@ enum PortState {
 pub struct V4Bridge {
     v6: Ipv6Addr,
     ssh_port: Option<u16>,
+    host: Arc<HostV4>,
 }
 
 impl V4Bridge {
     pub fn new(v6: Ipv6Addr) -> Self {
-        Self { v6, ssh_port: None }
+        Self {
+            v6,
+            ssh_port: None,
+            host: Arc::default(),
+        }
     }
 
     #[cfg(any(target_os = "macos", all(unix, test)))]
@@ -135,13 +143,21 @@ impl V4Bridge {
                     .map(|(port, _)| *port)
                     .collect();
                 let ssh_port = self.ssh_port.unwrap_or_else(forward::ssh_port);
-                // Reading `/proc/net/tcp*` (or running `netstat`) blocks.
+                // Reading `/proc/net/tcp*` (or running `netstat`) blocks, and
+                // so does listing the host's addresses.
                 let v6 = self.v6;
-                let found =
-                    tokio::task::spawn_blocking(move || bridgeable_ports(v6, &ours, ssh_port))
-                        .await
-                        .ok()
-                        .flatten();
+                let scan = tokio::task::spawn_blocking(move || {
+                    let found = bridgeable_ports(v6, &ours, ssh_port);
+                    (found, pick_host_v4(host_v4_addrs()))
+                })
+                .await;
+                let found = match scan {
+                    Ok((found, host)) => {
+                        self.host.set(host);
+                        found
+                    }
+                    Err(_) => None,
+                };
                 match found {
                     Some(found) => self.reconcile(&found, &mut ports, &token),
                     // Nothing readable here (an unsupported host, or a listing
@@ -209,7 +225,12 @@ impl V4Bridge {
                 }
             };
             let token = parent.child_token();
-            spawn_port(port, listener, Upstream::HostAddress, token.clone());
+            spawn_port(
+                port,
+                listener,
+                Upstream::HostAddress(self.host.clone()),
+                token.clone(),
+            );
             ports.insert(port, PortState::Bound(token));
             info!(
                 port,
@@ -243,12 +264,36 @@ fn drain(events: &mut Option<Receiver<()>>) {
     }
 }
 
+/// The host address bridged connections dial: picked on every scan pass rather
+/// than per connection, and again after a dial fails, so a DHCP renumbering is
+/// followed without listing the host's interfaces for each connection. Stored
+/// as its `u32`, with `0.0.0.0` (which [`pick_host_v4`] never picks) for none.
+#[derive(Default)]
+struct HostV4(AtomicU32);
+
+impl HostV4 {
+    fn get(&self) -> Option<Ipv4Addr> {
+        let addr = Ipv4Addr::from(self.0.load(Ordering::Relaxed));
+        (!addr.is_unspecified()).then_some(addr)
+    }
+
+    fn set(&self, addr: Option<Ipv4Addr>) {
+        let bits = addr.map_or(0, u32::from);
+        self.0.store(bits, Ordering::Relaxed);
+    }
+
+    async fn refresh(&self) {
+        if let Ok(addr) = tokio::task::spawn_blocking(|| pick_host_v4(host_v4_addrs())).await {
+            self.set(addr);
+        }
+    }
+}
+
 /// Which IPv4 address a bridged connection dials.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Upstream {
-    /// One of the host's own non-loopback addresses, looked up per connection
-    /// so a DHCP renumbering is followed. See the module docs.
-    HostAddress,
+    /// One of the host's own non-loopback addresses. See the module docs.
+    HostAddress(Arc<HostV4>),
     /// A fixed address. Tests only: there it is loopback, the one address a
     /// test host is sure to have.
     #[cfg(test)]
@@ -256,14 +301,20 @@ enum Upstream {
 }
 
 impl Upstream {
-    async fn resolve(self) -> Option<Ipv4Addr> {
+    fn resolve(&self) -> Option<Ipv4Addr> {
         match self {
-            Self::HostAddress => tokio::task::spawn_blocking(|| pick_host_v4(host_v4_addrs()))
-                .await
-                .ok()
-                .flatten(),
+            Self::HostAddress(host) => host.get(),
             #[cfg(test)]
-            Self::Fixed(addr) => Some(addr),
+            Self::Fixed(addr) => Some(*addr),
+        }
+    }
+
+    /// After a failed dial: the address may have changed since the last scan.
+    async fn refresh(&self) {
+        match self {
+            Self::HostAddress(host) => host.refresh().await,
+            #[cfg(test)]
+            Self::Fixed(_) => {}
         }
     }
 }
@@ -281,7 +332,7 @@ fn pick_host_v4(addrs: impl IntoIterator<Item = Ipv4Addr>) -> Option<Ipv4Addr> {
             || addr.is_multicast()
         {
             None
-        } else if addr.octets()[0] == 100 && addr.octets()[1] & 0xc0 == 64 {
+        } else if is_cgnat_range(*addr) {
             Some(1)
         } else {
             Some(0)
@@ -353,6 +404,7 @@ fn spawn_port(port: u16, listener: TcpListener, upstream: Upstream, token: Cance
                         }
                     };
                     let token = token.child_token();
+                    let upstream = upstream.clone();
                     tokio::spawn(async move {
                         tokio::select! {
                             _ = token.cancelled() => {},
@@ -373,25 +425,27 @@ async fn bridge_conn(mut inbound: TcpStream, from: SocketAddr, port: u16, upstre
     // direct connection, and this connection is one of two carrying the same
     // bytes.
     let _ = inbound.set_nodelay(true);
-    let Some(host) = upstream.resolve().await else {
+    let Some(host) = upstream.resolve() else {
         debug!(port, %from, "v4 bridge: this host has no IPv4 address but loopback to dial");
         return;
     };
     let target = SocketAddr::from((host, port));
-    let mut upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(target)).await {
+    let mut stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(target)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!(port, %from, error = %e, "v4 bridge: local service refused the connection");
+            upstream.refresh().await;
             return;
         }
         Err(_) => {
             debug!(port, %from, "v4 bridge: local service did not answer in time");
+            upstream.refresh().await;
             return;
         }
     };
-    let _ = upstream.set_nodelay(true);
+    let _ = stream.set_nodelay(true);
     debug!(port, %from, "v4 bridge: connection open");
-    if let Err(e) = copy_bidirectional(&mut inbound, &mut upstream).await {
+    if let Err(e) = copy_bidirectional(&mut inbound, &mut stream).await {
         debug!(port, %from, error = %e, "v4 bridge: connection ended early");
     }
 }
