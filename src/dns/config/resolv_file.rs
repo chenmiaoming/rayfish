@@ -109,12 +109,16 @@ pub(crate) fn restore_resolv_backup(backup: &Path, path: &Path) -> io::Result<()
 
 fn write_via_rename(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
     let tmp = temp_path(path);
+    // A temp file already there is a leftover from a crashed write. Created
+    // fresh and never through a link, so a planted symlink cannot redirect the
+    // write.
+    let _ = fs::remove_file(&tmp);
     let result = (|| {
         let mut f = OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&tmp)?;
         f.write_all(contents)?;
         // The umask may have narrowed the mode `open` asked for.
