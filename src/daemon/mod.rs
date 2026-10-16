@@ -928,6 +928,10 @@ pub struct Daemon {
     /// [`crate::v4bridge`].
     #[cfg(feature = "desktop")]
     v4_bridge_token: Mutex<Option<CancellationToken>>,
+    /// Stops the watcher that restores the TUN's link, address and route while
+    /// the data plane is up (see `tun::spawn_repair_watcher`).
+    #[cfg(target_os = "linux")]
+    tun_watch_token: Mutex<Option<CancellationToken>>,
 }
 
 impl Drop for Daemon {

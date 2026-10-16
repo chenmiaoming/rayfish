@@ -7,6 +7,11 @@
 
 #[cfg(target_os = "macos")]
 mod apple;
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{overlay_route_warnings, spawn_repair_watcher};
 
 // These support the desktop TUN setup (address/route/link configuration via
 // `ifconfig`/`ip`/netlink) and the CGNAT preflight, none of which compile on

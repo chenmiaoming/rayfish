@@ -1302,6 +1302,32 @@ impl Daemon {
                 warnings.push(format!("failed to route IPv6 peer range into TUN: {err}"));
             }
 
+            // Another interface routing part of `200::/7` wins over ours for
+            // that part, and the mesh just looks dead. Say which one. The
+            // metric is left alone: lowering it would break the other overlay
+            // instead, and which one should win is the operator's call.
+            #[cfg(target_os = "linux")]
+            match tun::overlay_route_warnings(&tun_name).await {
+                Ok(found) => {
+                    for w in found {
+                        tracing::warn!("{w}");
+                        warnings.push(w);
+                    }
+                }
+                Err(e) => tracing::debug!(error = %format!("{e:#}"), "cannot list IPv6 routes"),
+            }
+
+            // Something else on the host can take the link down or delete the
+            // address or route later; put them back while we are up.
+            #[cfg(target_os = "linux")]
+            {
+                let token = CancellationToken::new();
+                if let Some(old) = self.tun_watch_token.lock().unwrap().replace(token.clone()) {
+                    old.cancel();
+                }
+                tun::spawn_repair_watcher(tun_name.clone(), my_v6, Arc::clone(&self.active), token);
+            }
+
             // Another VPN's kill switch ends in a catch-all block, and its
             // allow-list names the private ranges, which `200::/7` is not one
             // of: without a pass rule of ours ahead of it the mesh dies the
@@ -1829,6 +1855,12 @@ impl Daemon {
             return IpcMessage::Ok {
                 message: "already on standby".into(),
             };
+        }
+
+        // First, so the watcher does not undo the link-down below.
+        #[cfg(target_os = "linux")]
+        if let Some(token) = self.tun_watch_token.lock().unwrap().take() {
+            token.cancel();
         }
 
         // The SSH listeners and the IPv4 bridge bind the mesh IPs, which go down

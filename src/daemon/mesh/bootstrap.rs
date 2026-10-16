@@ -740,6 +740,8 @@ async fn build_daemon_inner(
         app_ssh_helper: AtomicBool::new(false),
         #[cfg(feature = "desktop")]
         v4_bridge_token: Mutex::new(None),
+        #[cfg(target_os = "linux")]
+        tun_watch_token: Mutex::new(None),
     });
     daemon.management.bind_daemon(&daemon);
     tokio::spawn(Arc::clone(&daemon.registry).republish_destructions());
