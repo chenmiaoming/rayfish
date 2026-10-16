@@ -29,7 +29,8 @@ pub(super) struct ForwardReport {
 }
 
 /// Insert the forwarding accepts for `tun` wherever the host firewall would drop
-/// them, skipping any already present. Idempotent.
+/// them, skipping any already present. Idempotent. Rules of ours left for
+/// another TUN name (a rename, or a crash before teardown) are removed.
 pub(super) fn allow(tun: &str) -> ForwardReport {
     allow_with(tun, &mut hostfw::run)
 }
@@ -92,6 +93,16 @@ fn allow_with(tun: &str, run: &mut impl FnMut(&[&str]) -> Option<String>) -> For
     if let Some(dump) = run(&["ip6tables", "-w", "5", "-S", "FORWARD"])
         && ip6tables_forward_drops(&dump)
     {
+        for del in ip6tables_deletions(&dump) {
+            if !del
+                .windows(2)
+                .any(|w| matches!(w[0].as_str(), "-i" | "-o") && w[1] == tun)
+            {
+                let mut args = vec!["ip6tables", "-w", "5"];
+                args.extend(del.iter().map(String::as_str));
+                let _ = run(&args);
+            }
+        }
         for spec in ip6tables_specs(tun) {
             let mut check = vec!["ip6tables", "-w", "5", "-C", "FORWARD"];
             check.extend(&spec);
@@ -110,8 +121,24 @@ fn allow_with(tun: &str, run: &mut impl FnMut(&[&str]) -> Option<String>) -> For
 
     if let Some(json) = run(&["nft", "-j", "list", "ruleset"]) {
         for chain in nft_dropping_forward_chains(&json) {
+            for stale in chain.ours.iter().filter(|r| r.iface != tun) {
+                let _ = run(&[
+                    "nft",
+                    "delete",
+                    "rule",
+                    &chain.family,
+                    &chain.table,
+                    &chain.name,
+                    "handle",
+                    &stale.handle.to_string(),
+                ]);
+            }
             for (comment, rule) in nft_rules(tun) {
-                if chain.comments.iter().any(|c| c == comment) {
+                if chain
+                    .ours
+                    .iter()
+                    .any(|r| r.comment == comment && r.iface == tun)
+                {
                     continue;
                 }
                 // nft joins its arguments with spaces and parses the result, so
@@ -232,8 +259,18 @@ pub(super) struct NftChain {
     pub(super) family: String,
     pub(super) table: String,
     pub(super) name: String,
-    /// Comments on the chain's rules, to tell whether ours are already there.
-    pub(super) comments: Vec<String>,
+    /// The chain's rules that carry one of our comments, to tell whether ours
+    /// are already there and for which TUN.
+    pub(super) ours: Vec<NftOurRule>,
+}
+
+/// A rule of ours inside an [`NftChain`].
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct NftOurRule {
+    pub(super) comment: String,
+    /// The `iifname`/`oifname` it matches, empty when it names none.
+    pub(super) iface: String,
+    pub(super) handle: u64,
 }
 
 /// One rule of ours, found by its comment.
@@ -289,7 +326,7 @@ pub(super) fn nft_dropping_forward_chains(json: &str) -> Vec<NftChain> {
                     family: family.to_string(),
                     table: table.to_string(),
                     name: name.to_string(),
-                    comments: Vec::new(),
+                    ours: Vec::new(),
                 },
                 policy_drop: str_field(chain, "policy") == "drop",
                 last_rule_drops: false,
@@ -301,8 +338,15 @@ pub(super) fn nft_dropping_forward_chains(json: &str) -> Vec<NftChain> {
                     && s.chain.name == str_field(rule, "chain")
             })
         {
-            if let Some(comment) = rule.get("comment").and_then(|c| c.as_str()) {
-                seen.chain.comments.push(comment.to_string());
+            if let Some(comment) = rule.get("comment").and_then(|c| c.as_str())
+                && comment.starts_with(COMMENT_PREFIX)
+                && let Some(handle) = rule.get("handle").and_then(|h| h.as_u64())
+            {
+                seen.chain.ours.push(NftOurRule {
+                    comment: comment.to_string(),
+                    iface: rule_iface(rule).to_string(),
+                    handle,
+                });
             }
             seen.last_rule_drops = rule_drops_unconditionally(rule);
         }
@@ -312,6 +356,25 @@ pub(super) fn nft_dropping_forward_chains(json: &str) -> Vec<NftChain> {
         .filter(|s| s.policy_drop || s.last_rule_drops)
         .map(|s| s.chain)
         .collect()
+}
+
+/// The interface name a rule matches with `iifname` or `oifname`, if any.
+fn rule_iface(rule: &serde_json::Value) -> &str {
+    rule.get("expr")
+        .and_then(|e| e.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.get("match"))
+        .find(|m| {
+            matches!(
+                m.get("left")
+                    .and_then(|l| l.get("meta"))
+                    .map(|meta| str_field(meta, "key")),
+                Some("iifname" | "oifname")
+            )
+        })
+        .map(|m| str_field(m, "right"))
+        .unwrap_or_default()
 }
 
 /// Whether a rule is nothing but a drop or reject (plus counters or logging).
@@ -440,6 +503,21 @@ mod tests {
     }
 
     #[test]
+    fn ip6tables_rules_for_another_tun_are_removed() {
+        let dump = format!(
+            "{DOCKER_FORWARD}-A FORWARD -i old0 -m comment --comment rayfish-exit-in -j ACCEPT\n\
+             -A FORWARD -i tun0 -m comment --comment rayfish-exit-in -j ACCEPT\n"
+        );
+        let mut fake = Fake::new(Some(&dump), None);
+        allow_with("tun0", &mut |a| fake.run(a));
+        let deletes: Vec<&String> = fake.calls.iter().filter(|c| c.contains(" -D ")).collect();
+        assert_eq!(
+            deletes,
+            ["ip6tables -w 5 -D FORWARD -i old0 -m comment --comment rayfish-exit-in -j ACCEPT"]
+        );
+    }
+
+    #[test]
     fn an_accepting_firewall_is_left_alone() {
         let mut fake = Fake::new(Some("-P FORWARD ACCEPT\n-A FORWARD -j DOCKER-USER\n"), None);
         assert_eq!(
@@ -477,7 +555,7 @@ mod tests {
                 family: "inet".into(),
                 table: "firewalld".into(),
                 name: "filter_FORWARD".into(),
-                comments: Vec::new(),
+                ours: Vec::new(),
             }]
         );
         let mut fake = Fake::new(None, Some(FIREWALLD_JSON));
@@ -493,12 +571,27 @@ mod tests {
 {"chain": {"family": "inet", "table": "filter", "name": "forward", "handle": 1,
   "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
 {"rule": {"family": "inet", "table": "filter", "chain": "forward", "handle": 7,
-  "comment": "rayfish-exit-in", "expr": [{"accept": null}]}},
+  "comment": "rayfish-exit-in", "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "tun0"}}, {"accept": null}]}},
 {"rule": {"family": "inet", "table": "filter", "chain": "forward", "handle": 8,
-  "comment": "rayfish-exit-out", "expr": [{"accept": null}]}}
+  "comment": "rayfish-exit-out", "expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "tun0"}}, {"accept": null}]}}
 ]}"#;
         let mut fake = Fake::new(None, Some(json));
         assert_eq!(allow_with("tun0", &mut |a| fake.run(a)).added, 0);
+        assert!(!fake.calls.iter().any(|c| c.starts_with("nft delete")));
+
+        // The same rules for another TUN are stale: deleted, and ours inserted.
+        let mut fake = Fake::new(None, Some(json));
+        assert_eq!(allow_with("tun1", &mut |a| fake.run(a)).added, 2);
+        assert!(
+            fake.calls
+                .iter()
+                .any(|c| c == "nft delete rule inet filter forward handle 7")
+        );
+        assert!(
+            fake.calls
+                .iter()
+                .any(|c| c == "nft delete rule inet filter forward handle 8")
+        );
         assert_eq!(
             nft_our_rules(json)
                 .into_iter()
