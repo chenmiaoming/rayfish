@@ -1019,10 +1019,16 @@ async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
 #[cfg(unix)]
 const MAX_IPC_CLIENTS: usize = 64;
 
+/// How many `ray logs` streams may run at once. A stream gives its client slot
+/// back, since `--follow` can run for days, so it needs a cap of its own.
+#[cfg(unix)]
+const MAX_LOG_STREAMS: usize = 8;
+
 /// How long a client gets to deliver its request, and the daemon to deliver a
 /// single-frame reply. Bounds how long a client that connects and then stalls
 /// can hold one of the [`MAX_IPC_CLIENTS`] slots. The `ray logs` stream is not
-/// covered: it runs after the request and gives its slot back first.
+/// covered: it runs after the request, gives its slot back first, holds one of
+/// the [`MAX_LOG_STREAMS`] slots instead and times out each frame on its own.
 #[cfg(unix)]
 const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1034,6 +1040,7 @@ async fn accept_ipc(
     host: IpcHost,
 ) -> Result<()> {
     let slots = Arc::new(Semaphore::new(MAX_IPC_CLIENTS));
+    let log_streams = Arc::new(Semaphore::new(MAX_LOG_STREAMS));
     loop {
         let permit = tokio::select! {
             _ = token.cancelled() => {
@@ -1048,8 +1055,12 @@ async fn accept_ipc(
             result = socket.listener.accept() => match result {
                 Ok((stream, _)) => {
                     let daemon = Arc::clone(daemon);
+                    let slots = IpcSlots {
+                        client: permit,
+                        log_streams: Arc::clone(&log_streams),
+                    };
                     tokio::spawn(async move {
-                        if let Err(e) = handle_ipc_client(stream, &daemon, host, permit).await {
+                        if let Err(e) = handle_ipc_client(stream, &daemon, host, slots).await {
                             tracing::debug!(error = %e, "IPC client error");
                         }
                     });
@@ -1271,12 +1282,21 @@ fn truncate(s: &str) -> String {
     format!("{}... (truncated)", &s[..end])
 }
 
+/// What an IPC connection holds against the daemon's caps.
+#[cfg(unix)]
+struct IpcSlots {
+    /// One of the [`MAX_IPC_CLIENTS`] slots, held until the reply is sent.
+    client: OwnedSemaphorePermit,
+    /// Where a `ray logs` stream takes its slot once it gives `client` back.
+    log_streams: Arc<Semaphore>,
+}
+
 #[cfg(unix)]
 async fn handle_ipc_client(
     stream: UnixStream,
     daemon: &Arc<Daemon>,
     host: IpcHost,
-    slot: OwnedSemaphorePermit,
+    slots: IpcSlots,
 ) -> Result<()> {
     let peer_cred = stream.peer_cred().ok().map(|c| PeerIdentity::Unix {
         uid: c.uid(),
@@ -1320,12 +1340,23 @@ async fn handle_ipc_client(
     if let IpcMessage::Logs { since, follow } = &req {
         let (since, follow) = (*since, *follow);
         // A follow stream can run for days; it must not hold a client slot.
-        drop(slot);
+        let IpcSlots {
+            client,
+            log_streams,
+        } = slots;
+        drop(client);
         let mut framed = ipc::framed(stream);
         if let Some(denied) = host.check_authorized(&req, peer_cred.as_ref()) {
-            let _ = ipc::send(&mut framed, denied).await;
+            let _ = tokio::time::timeout(IPC_IO_TIMEOUT, ipc::send(&mut framed, denied)).await;
             return Ok(());
         }
+        let Ok(_stream_slot) = log_streams.try_acquire_owned() else {
+            let busy = ipc_err(format!(
+                "too many log streams open (at most {MAX_LOG_STREAMS}); close one and retry"
+            ));
+            let _ = tokio::time::timeout(IPC_IO_TIMEOUT, ipc::send(&mut framed, busy)).await;
+            return Ok(());
+        };
         #[cfg(target_os = "macos")]
         if matches!(host, IpcHost::PacketTunnel { .. }) {
             return super::diagnostics::stream_app_logs(
