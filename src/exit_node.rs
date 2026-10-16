@@ -1492,12 +1492,14 @@ mod tests {
         for dir in ["iifname", "oifname"] {
             assert!(
                 rules.contains(&format!(
-                    "{dir} \"tun-rayfish\" tcp flags & (syn | rst) == syn tcp option maxseg size set rt mtu"
+                    "{dir} \"tun-rayfish\" tcp flags & (syn | rst) == syn \
+                     tcp option maxseg size > 1220 tcp option maxseg size set 1220"
                 )),
                 "{rules}"
             );
         }
         assert!(!rules.contains(" drop"), "{rules}");
+        assert!(!rules.contains("rt mtu"), "{rules}");
     }
 
     /// The periodic check sees a full rule set as intact, and a missing piece or

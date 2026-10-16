@@ -310,6 +310,11 @@ fn nft_table_exists(ruleset: Option<&str>, table: &str) -> bool {
     ruleset.is_some_and(|json| forward_fw::nft_has_table(json, "inet", table))
 }
 
+/// The largest TCP MSS that fits the 1280-byte TUN: its MTU less the IPv6 and
+/// TCP headers.
+#[cfg(target_os = "linux")]
+pub(super) const TUN_MSS: u16 = crate::tun::MIN_TUN_MTU - 40 - 20;
+
 /// The nftables ruleset masquerading overlay traffic out of `tun_name`'s host.
 ///
 /// The BSD twin's reasoning applies here too: there is no IPv4 rule because there
@@ -318,13 +323,15 @@ fn nft_table_exists(ruleset: Option<&str>, table: &str) -> bool {
 /// IPv4 packet is dropped as spoofed long before it could get there), but a rule
 /// that cannot match is a rule that misleads whoever reads `nft list ruleset` next.
 ///
-/// The `forward` chain clamps the MSS of TCP SYNs crossing the TUN to the route's
-/// MTU (Tailscale's `--clamp-mss-to-pmtu`). The TUN is 1280 (see
-/// `tun::PREFERRED_TUN_MTU`), narrower than the 1500-byte path a remote
-/// usually has, and the gateway's own uplink can be narrower than 1500 too
-/// (PPPoE, a tunnel). A remote that drops the ICMPv6 Packet Too Big would
-/// otherwise stall every full-sized segment. It only ever lowers the MSS and
-/// its policy is `accept`, so it filters nothing.
+/// The `forward` chain clamps the MSS of TCP SYNs crossing the TUN, in both
+/// directions, to [`TUN_MSS`]. The TUN is 1280 (see `tun::PREFERRED_TUN_MTU`),
+/// narrower than the 1500-byte path a remote or a mesh client usually has, and
+/// a remote that drops the ICMPv6 Packet Too Big would otherwise stall every
+/// full-sized segment. `rt mtu` is no good here: for a SYN arriving from the
+/// TUN it reads the uplink's route, typically 1500, so a 1500-MTU client's MSS
+/// of 1440 would pass. The fixed ceiling holds for either direction, since no
+/// IPv6 uplink is narrower than 1280. It only ever lowers the MSS and its
+/// policy is `accept`, so it filters nothing.
 #[cfg(target_os = "linux")]
 pub(super) fn server_nft_ruleset(tun_name: &str) -> String {
     format!(
@@ -336,14 +343,15 @@ pub(super) fn server_nft_ruleset(tun_name: &str) -> String {
          \t}}\n\
          \tchain forward {{\n\
          \t\ttype filter hook forward priority mangle; policy accept;\n\
-         \t\tiifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size set rt mtu\n\
-         \t\toifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size set rt mtu\n\
+         \t\tiifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size > {mss} tcp option maxseg size set {mss}\n\
+         \t\toifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size > {mss} tcp option maxseg size set {mss}\n\
          \t}}\n\
          }}\n",
         reset = drop_table(SERVER_TABLE),
         t = SERVER_TABLE,
         v6 = V6_OVERLAY,
         tun = tun_name,
+        mss = TUN_MSS,
     )
 }
 
