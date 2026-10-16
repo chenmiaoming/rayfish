@@ -49,7 +49,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The mesh SSH firewall check now sees a native nftables drop on hosts that use
   iptables-nft.
 - Linux: if the TUN device fails, the daemon exits and the service manager
-  restarts it, instead of reporting the VPN as up while carrying no traffic.
+  restarts it, instead of reporting the VPN as up while carrying no traffic
+  (systemd, OpenRC and launchd restart it; SysV does not).
 - Linux: taking the Rayfish link down from outside no longer leaves the mesh
   dead until the next `ray up`.
 - Linux: `ray up` works on hosts that disable IPv6 for new interfaces, and the

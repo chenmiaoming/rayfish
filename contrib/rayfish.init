@@ -13,6 +13,11 @@
 # to /etc/init.d/rayfish with the path of the running binary substituted for
 # /usr/local/bin/ray. Plain POSIX sh: start-stop-daemon is used when present
 # (Debian and derivatives), otherwise a portable kill/pidfile fallback.
+#
+# SysV does not restart a daemon that exits. The daemon exits on a TUN failure
+# rather than run without a data plane, so on this init system a failed TUN
+# leaves rayfish stopped until `service rayfish start` (systemd, OpenRC and
+# launchd restart it on their own).
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 NAME=rayfish
@@ -42,7 +47,11 @@ do_start() {
 	fi
 	echo "Starting $NAME"
 	# The daemon raises its soft open-file limit to this hard limit itself.
-	ulimit -H -n 65536 2>/dev/null || true
+	# Only ever raise it: a host may already allow more.
+	hard=$(ulimit -H -n 2>/dev/null)
+	if [ "$hard" != unlimited ] && [ "${hard:-0}" -lt 65536 ] 2>/dev/null; then
+		ulimit -H -n 65536 2>/dev/null || true
+	fi
 	if command -v start-stop-daemon >/dev/null 2>&1; then
 		start-stop-daemon --start --quiet --background --make-pidfile \
 			--pidfile "$PIDFILE" --exec "$DAEMON" -- $DAEMON_ARGS
