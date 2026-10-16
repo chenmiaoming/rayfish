@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use super::login::LoginInfo;
-use super::session_env::{drop_privs, login_env, login_program, tty_name};
+use super::session_env::{drop_privs, login_env, login_program, shell_launch, tty_name};
 use super::{ChildProc, Origin, PtyReq};
 
 /// Everything a session runner needs beyond its SSH channel.
@@ -201,10 +201,12 @@ pub(super) async fn run_pty_session(
     let keep_open = pts.as_fd().try_clone_to_owned().ok();
 
     // An interactive non-root shell goes through `login(1)` for PAM and
-    // session accounting. Root and command sessions spawn the shell directly.
+    // session accounting. Root and command sessions spawn the shell directly,
+    // in its own systemd scope where available (see `shell_launch`).
     let handoff = (command.is_none() && info.uid != 0)
         .then(login_program)
         .flatten();
+    let mut drop_in_child = false;
     let mut cmd = match &handoff {
         Some(login) => pty_process::Command::new(login)
             .arg("-p")
@@ -212,12 +214,11 @@ pub(super) async fn run_pty_session(
             .arg(origin.client.ip().to_string())
             .arg("-f")
             .arg(&info.name),
-        None => match &command {
-            Some(command) => pty_process::Command::new(&info.shell)
-                .arg("-c")
-                .arg(command),
-            None => pty_process::Command::new(&info.shell).arg("-l"),
-        },
+        None => {
+            let launch = shell_launch(&info, command.as_deref());
+            drop_in_child = launch.drop_in_child;
+            pty_process::Command::new(&launch.program).args(&launch.args)
+        }
     };
     cmd = cmd
         .env_clear()
@@ -227,6 +228,8 @@ pub(super) async fn run_pty_session(
         .envs(env);
     if handoff.is_none() {
         cmd = cmd.current_dir(&info.home);
+    }
+    if drop_in_child {
         let drop = drop_privs(info.uid, info.gid, &info.name)?;
         // SAFETY: drops supplementary groups, group, and user before exec.
         cmd = unsafe { cmd.pre_exec(drop) };
@@ -283,22 +286,22 @@ pub(super) async fn run_pipe_session(
         child_proc,
         ..
     } = spec;
-    let drop = drop_privs(info.uid, info.gid, &info.name)?;
-    let mut cmd = tokio::process::Command::new(&info.shell);
-    match &command {
-        Some(command) => cmd.arg("-c").arg(command),
-        None => cmd.arg("-l"),
-    };
-    cmd.current_dir(&info.home)
+    let launch = shell_launch(&info, command.as_deref());
+    let mut cmd = tokio::process::Command::new(&launch.program);
+    cmd.args(&launch.args)
+        .current_dir(&info.home)
         .env_clear()
         .envs(login_env(&info.home, &info.shell, &info.name))
         .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // SAFETY: drops supplementary groups, group, and user before exec.
-    unsafe {
-        cmd.pre_exec(drop);
+    if launch.drop_in_child {
+        let drop = drop_privs(info.uid, info.gid, &info.name)?;
+        // SAFETY: drops supplementary groups, group, and user before exec.
+        unsafe {
+            cmd.pre_exec(drop);
+        }
     }
     let mut child = cmd.spawn().context("spawning command")?;
     child_proc

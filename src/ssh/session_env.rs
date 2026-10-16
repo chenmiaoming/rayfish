@@ -1,12 +1,14 @@
 //! Process setup shared by PTY and pipe SSH sessions.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::io::{Error, ErrorKind};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+use super::login::LoginInfo;
 
 /// Whether a client-controlled variable is safe to pass to a login session.
 pub(super) fn env_accepted(name: &str) -> bool {
@@ -20,11 +22,7 @@ pub(super) fn login_program() -> Option<PathBuf> {
     ["/bin/login", "/usr/bin/login"]
         .into_iter()
         .map(PathBuf::from)
-        .find(|path| {
-            std::fs::metadata(path)
-                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
-        })
+        .find(|path| is_executable(path))
 }
 
 pub(super) fn tty_name(pts: &impl AsRawFd) -> Option<String> {
@@ -35,6 +33,99 @@ pub(super) fn tty_name(pts: &impl AsRawFd) -> Option<String> {
     }
     let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
     name.to_str().ok().map(str::to_string)
+}
+
+/// How to start a session's shell when it does not go through `login(1)`.
+pub(super) struct Launch {
+    pub(super) program: PathBuf,
+    pub(super) args: Vec<OsString>,
+    /// Whether the child still runs as the daemon's user and must switch to
+    /// the session user in `pre_exec`. False once a wrapper does it.
+    pub(super) drop_in_child: bool,
+}
+
+/// Tools that start a session in its own systemd scope.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct ScopeTools {
+    systemd_run: PathBuf,
+    setpriv: PathBuf,
+}
+
+/// The shell invocation for a session, run in its own transient systemd scope
+/// when possible.
+///
+/// Without `login(1)` the shell would otherwise stay in the daemon's service
+/// cgroup, so restarting rayfish (an update, `ray down`) kills every session
+/// and any job it left running, as `KillMode=control-group` intends for the
+/// service itself. `systemd-run --scope` and `setpriv` both exec in place, so
+/// the pid we signal, the exit status, the environment and the stdio pipes are
+/// those of the shell itself, the same as a direct spawn. `setpriv` does the
+/// group and user switch in that fresh single-threaded process.
+pub(super) fn shell_launch(info: &LoginInfo, command: Option<&str>) -> Launch {
+    let shell_args: Vec<OsString> = match command {
+        Some(command) => vec!["-c".into(), command.into()],
+        None => vec!["-l".into()],
+    };
+    match scope_tools() {
+        Some(tools) => scoped_launch(&tools, info, shell_args),
+        None => Launch {
+            program: info.shell.clone(),
+            args: shell_args,
+            drop_in_child: true,
+        },
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn scoped_launch(tools: &ScopeTools, info: &LoginInfo, shell_args: Vec<OsString>) -> Launch {
+    let mut args: Vec<OsString> = vec![
+        "--scope".into(),
+        "--quiet".into(),
+        "--collect".into(),
+        format!("--description=rayfish SSH session for {}", info.name).into(),
+        "--".into(),
+        tools.setpriv.clone().into(),
+        format!("--reuid={}", info.uid).into(),
+        format!("--regid={}", info.gid).into(),
+        "--init-groups".into(),
+        "--".into(),
+        info.shell.clone().into(),
+    ];
+    args.extend(shell_args);
+    Launch {
+        program: tools.systemd_run.clone(),
+        args,
+        drop_in_child: false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn scope_tools() -> Option<ScopeTools> {
+    // Only root can create a scope in the system manager and switch users.
+    if unsafe { libc::geteuid() } != 0 || !Path::new("/run/systemd/system").is_dir() {
+        return None;
+    }
+    let find = |name: &str| {
+        ["/usr/bin", "/bin"]
+            .into_iter()
+            .map(|dir| Path::new(dir).join(name))
+            .find(|path| is_executable(path))
+    };
+    Some(ScopeTools {
+        systemd_run: find("systemd-run")?,
+        setpriv: find("setpriv")?,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn scope_tools() -> Option<ScopeTools> {
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// Build the `pre_exec` hook that switches the child to the session user.
@@ -152,6 +243,47 @@ pub(super) fn login_env<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_launch_execs_the_shell_as_the_user_inside_a_scope() {
+        let tools = ScopeTools {
+            systemd_run: "/usr/bin/systemd-run".into(),
+            setpriv: "/usr/bin/setpriv".into(),
+        };
+        let info = LoginInfo {
+            uid: 1000,
+            gid: 1001,
+            home: "/home/user".into(),
+            shell: "/bin/bash".into(),
+            name: "user".into(),
+        };
+        let launch = scoped_launch(&tools, &info, vec!["-c".into(), "echo hi".into()]);
+        assert_eq!(launch.program, Path::new("/usr/bin/systemd-run"));
+        assert!(!launch.drop_in_child);
+        let args: Vec<&str> = launch
+            .args
+            .iter()
+            .map(|arg| arg.to_str().expect("test args are UTF-8"))
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--description=rayfish SSH session for user",
+                "--",
+                "/usr/bin/setpriv",
+                "--reuid=1000",
+                "--regid=1001",
+                "--init-groups",
+                "--",
+                "/bin/bash",
+                "-c",
+                "echo hi",
+            ]
+        );
+    }
 
     #[test]
     fn group_list_includes_the_primary_group() {
