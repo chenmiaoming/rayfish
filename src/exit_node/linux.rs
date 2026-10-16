@@ -267,11 +267,11 @@ fn nft_table_exists(table: &str) -> bool {
 ///
 /// The `forward` chain clamps the MSS of TCP SYNs crossing the TUN to the route's
 /// MTU (Tailscale's `--clamp-mss-to-pmtu`). The TUN is 1280 (see
-/// `tun::PREFERRED_TUN_MTU`), so a remote on a 1500-byte path would otherwise
-/// offer segments too large for the route into the TUN, and the gateway's own
-/// uplink can be narrower still (PPPoE, a tunnel). A remote that drops the
-/// ICMPv6 Packet Too Big would stall every full-sized segment. It only ever
-/// lowers the MSS and its policy is `accept`, so it filters nothing.
+/// `tun::PREFERRED_TUN_MTU`), narrower than the 1500-byte path a remote
+/// usually has, and the gateway's own uplink can be narrower than 1500 too
+/// (PPPoE, a tunnel). A remote that drops the ICMPv6 Packet Too Big would
+/// otherwise stall every full-sized segment. It only ever lowers the MSS and
+/// its policy is `accept`, so it filters nothing.
 #[cfg(target_os = "linux")]
 pub(super) fn server_nft_ruleset(tun_name: &str) -> String {
     format!(
