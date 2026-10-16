@@ -91,6 +91,8 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
     daemon.registry.connect_all_networks().await;
     tokio::spawn(Arc::clone(&daemon.registry).run_restore_supervisor());
     daemon.spawn_exit_reapply_listener();
+    #[cfg(target_os = "linux")]
+    spawn_resume_watch(Arc::clone(&daemon));
     // A failed activation returns its reason to whoever asked, and at service
     // start that is nobody: log it here, or a daemon that never got its data
     // plane up says nothing about why in `ray logs`. (Warnings from a partial
@@ -1634,6 +1636,80 @@ const AUTO_UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 #[cfg(feature = "desktop")]
 const AUTO_UPDATE_BACKOFF_SECS: i64 = 24 * 60 * 60;
 
+/// How often the resume watch compares clocks.
+#[cfg(target_os = "linux")]
+const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Time the system clock may run ahead of the monotonic one between two checks
+/// before the gap counts as a suspend. Well above scheduling jitter, well below
+/// any sleep worth reacting to.
+#[cfg(target_os = "linux")]
+const SUSPEND_THRESHOLD: Duration = Duration::from_secs(10);
+
+/// Whether the host was suspended between two checks. `CLOCK_BOOTTIME` keeps
+/// counting through suspend and `CLOCK_MONOTONIC` (tokio's `Instant`) does not,
+/// so the difference between their deltas is the time spent asleep.
+#[cfg(target_os = "linux")]
+fn slept_between(boot_elapsed: Duration, monotonic_elapsed: Duration) -> bool {
+    boot_elapsed.saturating_sub(monotonic_elapsed) >= SUSPEND_THRESHOLD
+}
+
+#[cfg(target_os = "linux")]
+fn boottime() -> Option<Duration> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one timespec into memory we own.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) } != 0 {
+        return None;
+    }
+    Some(Duration::new(
+        u64::try_from(now.tv_sec).ok()?,
+        u32::try_from(now.tv_nsec).ok()?,
+    ))
+}
+
+/// Rebind after a suspend. netwatch looks for time jumps with `Instant`, which
+/// on Linux is `CLOCK_MONOTONIC` and stops during suspend, so it never sees
+/// one. A laptop that resumes on the same network then keeps its stale sockets
+/// and relay connection until a route change or timeout. Comparing against
+/// `CLOCK_BOOTTIME` catches it and takes the same path as a host-reported
+/// network change.
+#[cfg(target_os = "linux")]
+fn spawn_resume_watch(daemon: Arc<Daemon>) {
+    tokio::spawn(async move {
+        let token = daemon.shutdown_token.clone();
+        let Some(mut last_boot) = boottime() else {
+            return;
+        };
+        let mut last_monotonic = tokio::time::Instant::now();
+        let mut ticks = tokio::time::interval(RESUME_CHECK_INTERVAL);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => return,
+                _ = ticks.tick() => {}
+            }
+            let Some(boot) = boottime() else {
+                continue;
+            };
+            let monotonic = tokio::time::Instant::now();
+            let boot_elapsed = boot.saturating_sub(last_boot);
+            let monotonic_elapsed = monotonic.duration_since(last_monotonic);
+            last_boot = boot;
+            last_monotonic = monotonic;
+            if slept_between(boot_elapsed, monotonic_elapsed) {
+                tracing::info!(
+                    asleep_secs = boot_elapsed.saturating_sub(monotonic_elapsed).as_secs(),
+                    "host resumed from suspend; rebinding endpoint"
+                );
+                daemon.network_changed().await;
+            }
+        }
+    });
+}
+
 /// Opt-in automatic updates: a single daemon-wide task that periodically checks
 /// GitHub for a newer stable release and, when found, swaps the binary and
 /// restarts the service onto it. All errors are logged and swallowed so the task
@@ -1743,6 +1819,19 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_suspend_is_the_gap_between_boottime_and_monotonic() {
+        let secs = Duration::from_secs;
+        assert!(!slept_between(secs(5), secs(5)));
+        // Scheduling delay moves both clocks together.
+        assert!(!slept_between(secs(9), secs(9)));
+        assert!(!slept_between(secs(14), secs(5)));
+        assert!(slept_between(secs(3605), secs(5)));
+        // A clock that reads behind never counts.
+        assert!(!slept_between(secs(1), secs(5)));
+    }
 
     /// The decode-error reply quotes the request, and a frame may carry up to
     /// `MAX_FRAME_LEN` of it. Bounding the reply is what keeps a client that
