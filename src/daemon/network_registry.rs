@@ -529,6 +529,14 @@ impl NetworkRegistry {
         }
     }
 
+    /// What a person shares to reach this user: the paired user identity, or
+    /// this endpoint when unpaired. Also the target of `ray connect`.
+    pub(crate) fn own_identity(&self) -> EndpointId {
+        self.current_device_cert()
+            .map(|cert| cert.user_identity)
+            .unwrap_or_else(|| self.transport.endpoint.id())
+    }
+
     /// Record memberships a device held before receiving our certificate.
     /// A later certificate revocation must not turn those into paired joins.
     pub(crate) fn remember_independent_paired_device(&self, device: EndpointId) -> Result<()> {

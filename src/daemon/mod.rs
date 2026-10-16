@@ -2416,6 +2416,38 @@ mod accept_handler_tests {
         Endpoint::bind(iroh::endpoint::presets::N0).await.unwrap()
     }
 
+    // The env lock only serializes whole tests; nothing it guards changes across
+    // the awaits.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn own_identity_is_the_cert_user_or_this_endpoint() {
+        let _env_lock = crate::config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("RAYFISH_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("RAYFISH_CONFIG_DIR", dir.path());
+        }
+        let endpoint = sample_test_endpoint().await;
+        let store = FsStore::load(dir.path().join("blobs")).await.unwrap();
+        let me = endpoint.id();
+        let registry = sample_registry(endpoint.clone(), IrohIdentityProvider::new(me), store, me);
+        let unpaired = registry.own_identity();
+        let user = SecretKey::from_bytes(&[9u8; 32]);
+        crate::identity::store_device_cert(&control::DeviceCert::create(&user, &me, 0)).unwrap();
+        let paired = registry.own_identity();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("RAYFISH_CONFIG_DIR", value),
+                None => std::env::remove_var("RAYFISH_CONFIG_DIR"),
+            }
+        }
+        endpoint.close().await;
+        assert_eq!(unpaired, me);
+        assert_eq!(paired, user.public());
+    }
+
     mod disconnect_recovery_tests {
         use super::*;
         use iroh::RelayMode;
