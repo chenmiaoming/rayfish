@@ -47,6 +47,31 @@ impl DnsMode {
     }
 }
 
+/// Who may reach this node on the connect channel (`ray connect` requests and
+/// invitations). "Known" means sharing a network with this node.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::AsRefStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum InboundPolicy {
+    #[default]
+    Anyone,
+    Known,
+    #[serde(rename = "none")]
+    #[strum(serialize = "none")]
+    Nobody,
+}
+
 /// Packet forwarding engine, selected when the endpoint binds. Both engines
 /// use loss-tolerant QUIC congestion control.
 #[derive(
@@ -660,6 +685,12 @@ pub struct AppConfig {
     /// Exact device identities allowed to send files without approval.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_auto_accept_peers: Vec<EndpointId>,
+    /// Who may send connect requests and invitations.
+    #[serde(default)]
+    pub inbound: InboundPolicy,
+    /// Refused on the connect channel. Shared networks are unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<EndpointId>,
     /// Absolute directory where auto-accepted files are written.
     /// `None` falls back to `download_user`, then the operator's ~/Downloads.
     /// Set via `ray files download-dir <path>`.
@@ -722,6 +753,8 @@ impl Default for AppConfig {
             auto_update_last_target: None,
             auto_update_last_attempt: None,
             file_auto_accept_peers: Vec::new(),
+            inbound: InboundPolicy::default(),
+            blocked: Vec::new(),
             download_dir: None,
             download_user: None,
             networks: Vec::new(),
@@ -869,6 +902,10 @@ struct Settings {
     download_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     file_auto_accept_peers: Vec<EndpointId>,
+    #[serde(default)]
+    inbound: InboundPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    blocked: Vec<EndpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_user: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1432,6 +1469,8 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         auto_update_last_target: settings.auto_update_last_target,
         auto_update_last_attempt: settings.auto_update_last_attempt,
         file_auto_accept_peers: settings.file_auto_accept_peers,
+        inbound: settings.inbound,
+        blocked: settings.blocked,
         download_dir: settings.download_dir,
         download_user: settings.download_user,
         networks,
@@ -1508,6 +1547,8 @@ fn settings_toml(config: &AppConfig) -> Result<String> {
         auto_update_last_target: config.auto_update_last_target.clone(),
         auto_update_last_attempt: config.auto_update_last_attempt,
         file_auto_accept_peers: config.file_auto_accept_peers.clone(),
+        inbound: config.inbound,
+        blocked: config.blocked.clone(),
         download_dir: config.download_dir.clone(),
         download_user: config.download_user,
         pending_joins: config.pending_joins.clone(),
@@ -2310,6 +2351,20 @@ name = "test"
         assert_eq!(loaded.download_dir.as_deref(), Some("/srv/incoming"));
         assert_eq!(loaded.download_user, Some(1000));
         assert_eq!(loaded.file_auto_accept_peers, cfg.file_auto_accept_peers);
+    }
+
+    #[test]
+    fn settings_inbound_and_blocked_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            inbound: InboundPolicy::Known,
+            blocked: vec![SecretKey::from([45; 32]).public()],
+            ..Default::default()
+        };
+        save_settings_in(tmp.path(), &cfg).unwrap();
+        let loaded = load_in(tmp.path()).unwrap();
+        assert_eq!(loaded.inbound, InboundPolicy::Known);
+        assert_eq!(loaded.blocked, cfg.blocked);
     }
 
     #[test]

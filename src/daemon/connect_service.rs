@@ -341,6 +341,12 @@ impl ConnectService {
         IpcMessage::PendingRequests { requests }
     }
 
+    /// Forget anything queued from a now-blocked identity.
+    pub(crate) async fn drop_blocked(&self, blocked: &[EndpointId]) {
+        self.pending_connects
+            .retain(|endpoint, _| !blocked.contains(endpoint));
+    }
+
     /// Decline a pending connection request by hostname or endpoint prefix.
     pub(crate) fn reject_connect(&self, selector: &str) -> IpcMessage {
         let req = match self.find_pending(selector) {

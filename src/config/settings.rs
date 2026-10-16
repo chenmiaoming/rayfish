@@ -16,7 +16,7 @@ use iroh::EndpointId;
 
 pub use ray_proto::settings::{FirewallKey, GlobalKey, NetworkKey, NodeKey};
 
-use super::{AppConfig, DnsMode, NetworkConfig, QuicEngine, ServerOverride};
+use super::{AppConfig, DnsMode, InboundPolicy, NetworkConfig, QuicEngine, ServerOverride};
 use crate::firewall::{Action, FirewallConfig};
 
 /// Parse an on/off value. An empty value (what `ConfigUnset` sends) resets to
@@ -56,6 +56,36 @@ pub fn apply_global(cfg: &mut AppConfig, key: GlobalKey, value: &str, replace: b
                 }
             }
             cfg.file_auto_accept_peers = peers;
+        }
+        GlobalKey::Blocked => {
+            let mut blocked = if replace || value.trim().is_empty() {
+                Vec::new()
+            } else {
+                cfg.blocked.clone()
+            };
+            for entry in entries {
+                let (remove, identity) = match entry.strip_prefix('-') {
+                    Some(identity) => (true, identity),
+                    None => (false, entry.as_str()),
+                };
+                let peer: EndpointId = identity.parse().context("invalid identity")?;
+                if remove {
+                    blocked.retain(|saved| *saved != peer);
+                } else if !blocked.contains(&peer) {
+                    blocked.push(peer);
+                }
+            }
+            cfg.blocked = blocked;
+        }
+        GlobalKey::Inbound => {
+            cfg.inbound = if value.trim().is_empty() {
+                InboundPolicy::default()
+            } else {
+                value
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("inbound must be anyone, known, or none"))?
+            }
         }
         GlobalKey::Mdns => cfg.mdns_enabled = parse_bool(value, true)?,
         GlobalKey::Dns => {
@@ -191,6 +221,13 @@ pub fn render_global(cfg: &AppConfig, key: GlobalKey) -> String {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(","),
+        GlobalKey::Blocked => cfg
+            .blocked
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+        GlobalKey::Inbound => cfg.inbound.as_ref().to_string(),
         GlobalKey::Mdns => on_off(cfg.mdns_enabled),
         GlobalKey::Dns => cfg.dns_mode.as_ref().to_string(),
         GlobalKey::QuicEngine => cfg.quic_engine.as_ref().to_string(),
@@ -334,6 +371,42 @@ mod tests {
                 .file_auto_accept_peers
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn blocked_peers_add_remove_and_persist() {
+        let mut cfg = AppConfig::default();
+        let first = iroh::SecretKey::from([43; 32]).public();
+        let second = iroh::SecretKey::from([44; 32]).public();
+        let key = GlobalKey::Blocked;
+        apply_global(&mut cfg, key, &first.to_string(), false).unwrap();
+        apply_global(&mut cfg, key, &first.to_string(), false).unwrap();
+        assert_eq!(cfg.blocked, vec![first]);
+        let restored: AppConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(restored.blocked, vec![first]);
+        assert!(apply_global(&mut cfg, key, &format!("{second},invalid"), false).is_err());
+        assert_eq!(cfg.blocked, vec![first]);
+        apply_global(&mut cfg, key, &second.to_string(), false).unwrap();
+        apply_global(&mut cfg, key, &format!("-{first}"), false).unwrap();
+        assert_eq!(cfg.blocked, vec![second]);
+        assert_eq!(render_global(&cfg, key), second.to_string());
+        apply_global(&mut cfg, key, "", false).unwrap();
+        assert!(cfg.blocked.is_empty());
+    }
+
+    #[test]
+    fn inbound_parses_renders_and_resets() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.inbound, InboundPolicy::Anyone);
+        apply_global(&mut cfg, GlobalKey::Inbound, "known", false).unwrap();
+        assert_eq!(cfg.inbound, InboundPolicy::Known);
+        apply_global(&mut cfg, GlobalKey::Inbound, "none", false).unwrap();
+        assert_eq!(cfg.inbound, InboundPolicy::Nobody);
+        assert_eq!(render_global(&cfg, GlobalKey::Inbound), "none");
+        assert!(apply_global(&mut cfg, GlobalKey::Inbound, "everyone", false).is_err());
+        assert_eq!(cfg.inbound, InboundPolicy::Nobody);
+        apply_global(&mut cfg, GlobalKey::Inbound, "", false).unwrap();
+        assert_eq!(cfg.inbound, InboundPolicy::Anyone);
     }
 
     #[test]

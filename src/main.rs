@@ -151,6 +151,7 @@ fn print_pending_requests(
 fn json_requested(command: &Command) -> bool {
     match command {
         Command::Status { json, .. }
+        | Command::Blocked { json }
         | Command::Invite { json, .. }
         | Command::Requests { json, .. }
         | Command::Connect { json, .. }
@@ -457,6 +458,28 @@ pub(crate) enum Command {
     Connections {
         #[command(subcommand)]
         action: Option<ConnectAction>,
+        /// Emit machine-readable JSON instead of styled text
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Refuse a peer's connect requests and invitations
+    ///
+    /// The peer is closed without a reply, so it cannot tell you from an
+    /// offline node. Networks you already share are unaffected; `ray kick`
+    /// removes a member.
+    Block {
+        /// Identity or hostname of the peer
+        #[arg(add = complete::peers())]
+        peer: String,
+    },
+    /// Let a blocked peer reach you again
+    Unblock {
+        /// Identity or hostname of the peer
+        #[arg(add = complete::peers())]
+        peer: String,
+    },
+    /// List blocked peers
+    Blocked {
         /// Emit machine-readable JSON instead of styled text
         #[arg(long, global = true)]
         json: bool,
@@ -1815,6 +1838,9 @@ async fn run() -> Result<()> {
             }
         },
         Command::Connections { action, json: _ } => ipc_connections(action).await,
+        Command::Block { peer } => ipc_block(&peer).await,
+        Command::Unblock { peer } => ipc_unblock(&peer).await,
+        Command::Blocked { json: _ } => ipc_blocked().await,
         Command::Ping {
             peer,
             count,

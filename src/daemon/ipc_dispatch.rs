@@ -190,28 +190,31 @@ impl Daemon {
         reset: bool,
     ) -> IpcMessage {
         let resolved_value;
-        let value =
-            if key == NodeKey::Global(GlobalKey::FileAutoAcceptPeers) && !value.trim().is_empty() {
-                let mut identities = Vec::new();
-                for entry in config::parse_entries(value) {
-                    let (remove, name) = match entry.strip_prefix('-') {
-                        Some(name) => (true, name),
-                        None => (false, entry.as_str()),
-                    };
-                    let peer = match name.parse::<EndpointId>() {
-                        Ok(peer) => peer,
-                        Err(_) => match self.registry.resolve_peer_flexible(name).await {
-                            Some(peer) => peer,
-                            None => return ipc_err(format!("unknown peer '{name}'")),
-                        },
-                    };
-                    identities.push(format!("{}{peer}", if remove { "-" } else { "" }));
-                }
-                resolved_value = identities.join(",");
-                resolved_value.as_str()
-            } else {
-                value
-            };
+        let value = if matches!(
+            key,
+            NodeKey::Global(GlobalKey::FileAutoAcceptPeers | GlobalKey::Blocked)
+        ) && !value.trim().is_empty()
+        {
+            let mut identities = Vec::new();
+            for entry in config::parse_entries(value) {
+                let (remove, name) = match entry.strip_prefix('-') {
+                    Some(name) => (true, name),
+                    None => (false, entry.as_str()),
+                };
+                let peer = match name.parse::<EndpointId>() {
+                    Ok(peer) => peer,
+                    Err(_) => match self.registry.resolve_peer_flexible(name).await {
+                        Some(peer) => peer,
+                        None => return ipc_err(format!("unknown peer '{name}'")),
+                    },
+                };
+                identities.push(format!("{}{peer}", if remove { "-" } else { "" }));
+            }
+            resolved_value = identities.join(",");
+            resolved_value.as_str()
+        } else {
+            value
+        };
         let key = match key {
             NodeKey::Firewall(k) => return self.registry.firewall_config_set(k, value),
             NodeKey::Global(GlobalKey::Dns) => return self.dns_config_set(value).await,
@@ -240,7 +243,9 @@ impl Daemon {
                 | GlobalKey::QuicEngine
                 | GlobalKey::DownloadDir
                 | GlobalKey::DownloadUser
-                | GlobalKey::FileAutoAcceptPeers),
+                | GlobalKey::FileAutoAcceptPeers
+                | GlobalKey::Inbound
+                | GlobalKey::Blocked),
             ) => k,
         };
         let app_config = match save_global(key, value, replace) {
@@ -249,6 +254,9 @@ impl Daemon {
         };
         if key == GlobalKey::FileAutoAcceptPeers {
             self.files.drain_auto_acceptable().await;
+        }
+        if key == GlobalKey::Blocked {
+            self.connect.drop_blocked(&app_config.blocked).await;
         }
         IpcMessage::Ok {
             message: global_set_message(&app_config, key, reset),

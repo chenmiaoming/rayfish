@@ -1022,12 +1022,14 @@ mod tests {
         assert_eq!(domain("mdns"), ["on", "off"]);
         assert_eq!(domain("firewall.default-in"), ["allow", "deny"]);
         assert_eq!(domain("quic-engine"), ["standalone", "fq-codel"]);
+        assert_eq!(domain("inbound"), ["anyone", "known", "none"]);
 
         // Free-form values: a trailing parenthesis that is prose, not a domain.
         assert!(domain("relay").is_empty());
         assert!(domain("dns-upstreams").is_empty());
         assert!(domain("download-dir").is_empty());
         assert!(domain("download-user").is_empty());
+        assert!(domain("blocked").is_empty());
 
         // Nothing to read at all.
         assert!(domain_of("no parenthesis here").is_empty());

@@ -1322,6 +1322,8 @@ fn global_set_message(cfg: &AppConfig, key: GlobalKey, reset: bool) -> String {
     let restart = "Restart the daemon for changes to take effect.";
     match key {
         GlobalKey::FileAutoAcceptPeers => "File auto-accept peers updated.".to_string(),
+        GlobalKey::Inbound => "Inbound policy updated.".to_string(),
+        GlobalKey::Blocked => "Block list updated.".to_string(),
         GlobalKey::Mdns => format!(
             "mDNS discovery {}.",
             if cfg.mdns_enabled {
@@ -1428,6 +1430,14 @@ mod confirmation_message_tests {
 
     #[test]
     fn global_keys_keep_the_exact_wording_their_handlers_printed() {
+        assert_eq!(
+            global_set_message(&AppConfig::default(), GlobalKey::Inbound, false),
+            "Inbound policy updated."
+        );
+        assert_eq!(
+            global_set_message(&AppConfig::default(), GlobalKey::Blocked, false),
+            "Block list updated."
+        );
         assert_eq!(
             global_set_message(&mdns(true), GlobalKey::Mdns, false),
             "mDNS discovery enabled."

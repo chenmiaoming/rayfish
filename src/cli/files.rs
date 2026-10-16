@@ -294,7 +294,7 @@ async fn ipc_send_file(file: &str, peer: &str) -> Result<()> {
 /// command, so there is no "no value" case left for the caller to handle: an
 /// absent row renders as the empty string, which is how every settings key
 /// spells unset.
-async fn config_row(key: NodeKey) -> Result<String> {
+pub(crate) async fn config_row(key: NodeKey) -> Result<String> {
     let mut stream = ipc::connect().await?;
     ipc::send(&mut stream, ipc::IpcMessage::ConfigGet { key: Some(key) }).await?;
     match ipc::recv(&mut stream).await? {
