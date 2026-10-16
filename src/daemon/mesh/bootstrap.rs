@@ -876,6 +876,9 @@ struct IpcSocket {
     listener: UnixListener,
     path: PathBuf,
     inode: u64,
+    /// The daemon lock, held for as long as the socket is served. Declared
+    /// last so it is released only after `Drop` has removed the socket file.
+    _lock: DaemonLock,
 }
 
 #[cfg(unix)]
@@ -888,6 +891,50 @@ impl Drop for IpcSocket {
     }
 }
 
+/// An exclusive `flock` on the lock file beside the IPC socket.
+///
+/// Probing the socket alone cannot tell two daemons starting together apart:
+/// both see a dead or missing socket, and the slower one unlinks the socket the
+/// faster one just bound. The lock serializes them. The file itself is never
+/// removed; the lock dies with the descriptor, including on a crash.
+#[cfg(unix)]
+pub(crate) struct DaemonLock(std::fs::File);
+
+#[cfg(unix)]
+pub(crate) fn daemon_lock_path(socket: &Path) -> PathBuf {
+    socket.with_extension("lock")
+}
+
+#[cfg(unix)]
+impl DaemonLock {
+    /// Take the lock, or `None` when another live process holds it.
+    pub(crate) fn try_acquire(socket: &Path) -> Result<Option<Self>> {
+        use std::io::{Error, ErrorKind};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = daemon_lock_path(socket);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        // SAFETY: flock on a descriptor we own.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = Error::last_os_error();
+            if error.kind() == ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| format!("failed to lock {}", path.display()));
+        }
+        Ok(Some(Self(file)))
+    }
+}
+
 #[cfg(unix)]
 async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
     use std::io::ErrorKind;
@@ -896,6 +943,8 @@ async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let lock =
+        DaemonLock::try_acquire(path)?.context("another rayfish daemon is already running")?;
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         anyhow::ensure!(metadata.file_type().is_socket(), "IPC path is not a socket");
         match UnixStream::connect(path).await {
@@ -915,6 +964,7 @@ async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
         listener,
         path: path.to_path_buf(),
         inode,
+        _lock: lock,
     })
 }
 
@@ -1047,11 +1097,18 @@ mod embedded_ipc_tests {
         let path = dir.path().join("ray.sock");
         let socket = bind_ipc_socket(&path).await.unwrap();
         std::fs::remove_file(&path).unwrap();
-        let replacement = bind_ipc_socket(&path).await.unwrap();
+        // A second daemon is refused by the lock even with the socket gone.
+        let error = bind_ipc_socket(&path).await.err().unwrap();
+        assert!(format!("{error:#}").contains("another rayfish daemon"));
+        // Whatever took the path since is not ours to remove.
+        let replacement = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        replacement.bind(&SockAddr::unix(&path).unwrap()).unwrap();
         drop(socket);
-        assert!(UnixStream::connect(&path).await.is_ok());
+        assert!(path.exists());
         drop(replacement);
-        assert!(!path.exists());
+        // The lock went with the first socket, so a new daemon can start.
+        std::fs::remove_file(&path).unwrap();
+        assert!(bind_ipc_socket(&path).await.is_ok());
     }
 
     struct ConfigEnv(Option<OsString>);
