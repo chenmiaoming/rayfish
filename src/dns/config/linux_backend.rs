@@ -272,7 +272,7 @@ mod linux {
 
 /// The stub listeners systemd-resolved binds. A `nameserver` line naming either
 /// one means glibc queries reach resolved.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(super) const RESOLVED_STUB_IPS: [Ipv4Addr; 2] =
     [Ipv4Addr::new(127, 0, 0, 53), Ipv4Addr::new(127, 0, 0, 54)];
 
@@ -305,12 +305,12 @@ pub(super) async fn resolved_is_in_resolution_path() -> bool {
 
 /// The pure half of [`resolved_is_in_resolution_path`]: `link` is the target of
 /// `/etc/resolv.conf` when it is a symlink.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(super) fn resolv_conf_owned_by_resolved(contents: &str, link: Option<&Path>) -> bool {
     resolv_conf_points_at_resolved(contents) || link.is_some_and(links_to_resolved_stub)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(super) fn resolv_conf_points_at_resolved(contents: &str) -> bool {
     parse_resolv_nameservers(contents)
         .iter()
@@ -320,7 +320,7 @@ pub(super) fn resolv_conf_points_at_resolved(contents: &str) -> bool {
 /// `/run/systemd/resolve/stub-resolv.conf`, absolute or relative (the usual
 /// `../run/...`). resolved owns the directory and only the stub file routes
 /// lookups through it.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn links_to_resolved_stub(target: &Path) -> bool {
     target.ends_with("run/systemd/resolve/stub-resolv.conf")
 }
