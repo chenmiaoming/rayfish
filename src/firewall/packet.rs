@@ -195,7 +195,7 @@ pub fn parse_ipv6_fragment(packet: &[u8]) -> Option<Ipv6Fragment> {
     let chain = ipv6_chain(packet)?;
     let fragment = chain.fragment?;
     let first = fragment.offset == 0;
-    if first && matches!(chain.protocol, 6 | 17) && packet.len() < chain.offset + 4 {
+    if first && !carries_upper_header(packet, chain.protocol, chain.offset) {
         return None;
     }
     let mut src = [0u8; 16];
@@ -219,6 +219,30 @@ pub fn parse_ipv6_fragment(packet: &[u8]) -> Option<Ipv6Fragment> {
         },
         first,
     })
+}
+
+/// Whether a first fragment holds its whole upper-layer header, as RFC 7112
+/// requires. A tiny first fragment would leave the TCP checksum or flags in a
+/// later fragment, out of reach of the firewall and the SSH port rewrite, so it
+/// is refused. TCP must also hold any options its data offset declares.
+/// Protocols this parser does not read are left to the firewall.
+fn carries_upper_header(packet: &[u8], protocol: u8, offset: usize) -> bool {
+    const TCP_MIN: usize = 20;
+    const UDP_LEN: usize = 8;
+    const ICMPV6_LEN: usize = 8;
+    let needed = match protocol {
+        6 => match packet.get(offset + 12) {
+            Some(byte) => usize::from(byte >> 4) * 4,
+            None => return false,
+        },
+        17 => UDP_LEN,
+        58 => ICMPV6_LEN,
+        _ => 0,
+    };
+    if protocol == 6 && needed < TCP_MIN {
+        return false;
+    }
+    packet.len() >= offset + needed
 }
 
 fn parse_ipv6(packet: &[u8]) -> Option<PacketInfo> {
@@ -383,6 +407,32 @@ mod tests {
 
         // Truncated inside the Fragment header.
         assert!(parse_ipv6_fragment(&udp_fragment(185)[..46]).is_none());
+    }
+
+    /// A first fragment cut short inside its transport header leaves the rest
+    /// of that header, the TCP checksum among it, to a later fragment.
+    #[test]
+    fn a_tiny_first_fragment_is_refused() {
+        // UDP with only its ports.
+        assert!(parse_ipv6_fragment(&udp_fragment(0)[..52]).is_none());
+        assert!(parse_ipv6_fragment(&udp_fragment(0)[..56]).is_some());
+
+        let mut tcp = udp_fragment(0);
+        tcp[40] = 6;
+        tcp.resize(48 + 20, 0);
+        tcp[48 + 12] = 5 << 4;
+        assert!(parse_ipv6_fragment(&tcp).is_some(), "a full TCP header");
+        assert!(parse_ipv6_fragment(&tcp[..48 + 18]).is_none(), "18 bytes");
+        assert!(parse_ipv6_fragment(&tcp[..48 + 4]).is_none(), "ports only");
+        tcp[48 + 12] = 8 << 4;
+        assert!(parse_ipv6_fragment(&tcp).is_none(), "options cut off");
+        tcp[48 + 12] = 4 << 4;
+        assert!(parse_ipv6_fragment(&tcp).is_none(), "data offset below 5");
+
+        let mut icmp = udp_fragment(0);
+        icmp[40] = 58;
+        assert!(parse_ipv6_fragment(&icmp[..52]).is_none());
+        assert!(parse_ipv6_fragment(&icmp[..56]).is_some());
     }
 
     fn ipv6_to(dst: Ipv6Addr) -> Vec<u8> {
