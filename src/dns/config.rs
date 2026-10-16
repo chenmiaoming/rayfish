@@ -305,8 +305,13 @@ pub fn restore_stale_backups() {
             // one we merged into another VPN's. Copying the backup over it would
             // undo their DNS as well as ours; subtract our lines instead. Same
             // rule as `restore_file`, arrived at from the other direction.
+            //
+            // The backup goes only once it is no longer needed: a restore that
+            // failed (a read-only bind mount, a full disk) keeps it for the
+            // next start or the panic hook to try again, rather than losing
+            // the host's own file for good.
             let current = std::fs::read_to_string(&path).ok();
-            match stale_backup_action(current.as_deref()) {
+            let done = match stale_backup_action(current.as_deref()) {
                 StaleBackup::StripOurs(ip) => {
                     tracing::info!(
                         resolver = %ip,
@@ -314,33 +319,52 @@ pub fn restore_stale_backups() {
                          removing only our entries"
                     );
                     let current = current.unwrap_or_default();
-                    let _ = write_resolv_file(&path, strip_our_resolv_entries(&current).as_bytes());
+                    match write_resolv_file(&path, strip_our_resolv_entries(&current).as_bytes()) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to remove our DNS entries; keeping the backup");
+                            false
+                        }
+                    }
                 }
                 StaleBackup::Restore => {
                     tracing::info!(path = %path.display(), "restoring stale DNS backup from previous crash");
-                    if let Err(e) = restore_resolv_backup(&backup, &path) {
-                        tracing::warn!(error = %e, "failed to restore DNS backup");
+                    match restore_resolv_backup(&backup, &path) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to restore DNS backup; keeping it");
+                            false
+                        }
                     }
                 }
-                StaleBackup::Discard => tracing::info!(
-                    path = %path.display(),
-                    "stale DNS backup, but something else has rewritten the live file since; \
-                     discarding the backup and leaving the file alone"
-                ),
+                StaleBackup::Discard => {
+                    tracing::info!(
+                        path = %path.display(),
+                        "stale DNS backup, but something else has rewritten the live file since; \
+                         discarding the backup and leaving the file alone"
+                    );
+                    true
+                }
+            };
+            if done {
+                let _ = std::fs::remove_file(&backup);
             }
-            let _ = std::fs::remove_file(&backup);
         }
         // Drop a stale `dns=none` NM snippet left by a hard kill (a panic would
         // have cleaned it via emergency_restore_resolv_conf). Marker-guarded so
         // we never touch an operator's own NM config. If we're about to
         // re-activate, apply() reinstalls it; if we boot into standby, this stops
         // NM staying quieted while the VPN is down.
+        // NM keeps `dns=none` until it rereads conf.d, so reload it, bounded,
+        // the same way the panic hook does.
         if std::fs::read_to_string(NM_DROPIN)
             .map(|c| resolv_conf_is_ours(&c))
             .unwrap_or(false)
         {
             tracing::info!("removing stale NetworkManager dns=none drop-in from previous crash");
-            let _ = std::fs::remove_file(NM_DROPIN);
+            if std::fs::remove_file(NM_DROPIN).is_ok() {
+                nm_reload_blocking();
+            }
         }
     }
 }
