@@ -17,6 +17,7 @@ impl Daemon {
                 | IpcMessage::ExitNodeStatus { .. }
                 | IpcMessage::ListFiles
                 | IpcMessage::Connections
+                | IpcMessage::Invitations
                 | IpcMessage::Requests { .. }
                 | IpcMessage::Ping { .. }
                 | IpcMessage::Netcheck
@@ -708,6 +709,11 @@ impl Daemon {
             IpcMessage::Connections => self.list_connections(),
             IpcMessage::ApproveConnection { id } => self.approve_connection(&id).await,
             IpcMessage::ConnectDeny { id } => self.deny_connection(&id).await,
+            IpcMessage::Invitations => self.connect.list_invitations().await,
+            IpcMessage::InvitationAccept { id, hostname } => {
+                self.connect.accept_invitation(&id, hostname).await
+            }
+            IpcMessage::InvitationDecline { id } => self.connect.decline_invitation(&id).await,
             IpcMessage::Ping {
                 peer,
                 count,
@@ -745,6 +751,25 @@ fn save_global(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invitation_listing_is_open_but_answers_need_authorization() {
+        assert!(Daemon::is_open_read(&IpcMessage::Invitations));
+        for request in [
+            IpcMessage::InvitationAccept {
+                id: "example-id".into(),
+                hostname: None,
+            },
+            IpcMessage::InvitationDecline {
+                id: "example-id".into(),
+            },
+            IpcMessage::ConnectDeny {
+                id: "example-id".into(),
+            },
+        ] {
+            assert!(!Daemon::is_open_read(&request));
+        }
+    }
 
     /// Like `ray firewall show`, a test only reads the rules, so any local user
     /// may run it.

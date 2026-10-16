@@ -73,7 +73,11 @@ pub(crate) struct ConnectService {
     transport: Arc<Transport>,
     /// The network-owning service, for minting/joining the 2-peer direct network
     /// once a connect request is approved.
-    registry: Arc<NetworkRegistry>,
+    pub(super) registry: Arc<NetworkRegistry>,
+    /// One load-modify-save of the invitation inbox at a time.
+    pub(super) inbox_lock: AsyncMutex<()>,
+    /// Spans a whole invitation accept or decline.
+    pub(super) answer_lock: AsyncMutex<()>,
 }
 
 impl ConnectService {
@@ -84,6 +88,8 @@ impl ConnectService {
             outgoing_connects: DashSet::new(),
             transport,
             registry,
+            inbox_lock: AsyncMutex::new(()),
+            answer_lock: AsyncMutex::new(()),
         }
     }
 
@@ -347,6 +353,7 @@ impl ConnectService {
     pub(crate) async fn drop_blocked(&self, blocked: &[EndpointId]) {
         self.pending_connects
             .retain(|endpoint, _| !blocked.contains(endpoint));
+        self.drop_blocked_invitations(blocked).await;
     }
 
     /// Add `remote` to the block list and forget what it has queued.
@@ -444,6 +451,19 @@ impl ConnectService {
                         return;
                     }
                 };
+                if let control::ConnectMsg::InviteOffer { network, code } = request {
+                    if !self.receive_offer(remote_id, class, network, code).await {
+                        conn.close(0u32.into(), b"");
+                        return;
+                    }
+                    if control::send_framed(&mut send, &control::ConnectMsg::Pending)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+                    }
+                    return;
+                }
                 if let control::ConnectMsg::Request {
                     from_identity,
                     from_endpoint,

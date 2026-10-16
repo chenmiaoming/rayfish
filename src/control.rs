@@ -11,7 +11,9 @@ use iroh::{EndpointId, SecretKey, Signature};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
+use crate::invite::InviteCode;
 use crate::membership::{ApprovedEntry, ExitFamilies, Member};
+use ray_proto::ipc::NetworkName;
 
 /// Certificate proving a device belongs to a user identity.
 ///
@@ -125,6 +127,15 @@ pub enum ConnectMsg {
     },
     /// B → A: request rejected.
     Denied { reason: String },
+    /// Private invitation from a network's coordinator. Receipt only stores it;
+    /// joining needs the recipient's explicit accept. Acked with `Pending`;
+    /// a refused offer gets no reply. Older peers fail to decode it, which the
+    /// sender treats as unreachable.
+    InviteOffer {
+        /// The sender's label for the network, display only.
+        network: NetworkName,
+        code: InviteCode,
+    },
 }
 
 /// Control messages exchanged between peers over QUIC bidirectional streams.
@@ -820,6 +831,40 @@ mod tests {
                 hostname: None,
             }
         );
+    }
+
+    #[test]
+    fn invite_offer_roundtrips_and_older_variants_are_unchanged() {
+        let offer = ConnectMsg::InviteOffer {
+            network: NetworkName::new("sample-net".into()),
+            code: InviteCode::encode(&test_id(1), &test_id(2), &[3; 16]),
+        };
+        let body = rmp_serde::to_vec(&offer).unwrap();
+        assert_eq!(rmp_serde::from_slice::<ConnectMsg>(&body).unwrap(), offer);
+        // Variants are encoded by name, so an existing message still decodes
+        // in a build that never heard of `InviteOffer`.
+        #[derive(Debug, PartialEq, Deserialize)]
+        enum OldConnectMsg {
+            Request {
+                from_contact_id: EndpointId,
+                from_endpoint: EndpointId,
+                hostname: Option<String>,
+            },
+            Pending,
+            Approved {
+                room_id: EndpointId,
+                coordinator: EndpointId,
+            },
+            Denied {
+                reason: String,
+            },
+        }
+        let pending = rmp_serde::to_vec(&ConnectMsg::Pending).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<OldConnectMsg>(&pending).unwrap(),
+            OldConnectMsg::Pending
+        );
+        assert!(rmp_serde::from_slice::<OldConnectMsg>(&body).is_err());
     }
 
     #[test]

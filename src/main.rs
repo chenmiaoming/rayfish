@@ -153,6 +153,7 @@ fn json_requested(command: &Command) -> bool {
         Command::Status { json, .. }
         | Command::Blocked { json }
         | Command::Invite { json, .. }
+        | Command::Invitations { json, .. }
         | Command::Requests { json, .. }
         | Command::Connect { json, .. }
         | Command::Connections { json, .. }
@@ -383,6 +384,17 @@ pub(crate) enum Command {
         /// Print the URL without trying to open a browser
         #[arg(long)]
         no_open: bool,
+    },
+    /// Review and answer private network invitations
+    ///
+    /// Coordinators send these with `ray apply --invite-missing`. Nothing joins
+    /// until you accept; declining also blocks the sender.
+    Invitations {
+        #[command(subcommand)]
+        action: Option<InvitationAction>,
+        /// Emit machine-readable JSON instead of styled text
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Mint and manage invite codes (coordinator only)
     ///
@@ -761,6 +773,23 @@ pub(crate) enum Command {
         sha256: String,
         #[arg(long)]
         parent_pid: u32,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum InvitationAction {
+    /// Join the invitation's network
+    Accept {
+        /// Invitation id, or an unambiguous prefix
+        id: String,
+        /// Your hostname on the network (defaults to your set name)
+        #[arg(long)]
+        hostname: Option<ipc::MachineHostname>,
+    },
+    /// Refuse it and block the sender
+    Decline {
+        /// Invitation id, or an unambiguous prefix
+        id: String,
     },
 }
 
@@ -1815,6 +1844,7 @@ async fn run() -> Result<()> {
             action,
             json: _,
         } => ipc_invite(&network, action).await,
+        Command::Invitations { action, json: _ } => ipc_invitations(action).await,
         Command::Requests {
             network,
             action,

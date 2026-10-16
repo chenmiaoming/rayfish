@@ -260,6 +260,7 @@ pub mod transfers;
 
 mod connect_service;
 mod inbound;
+mod invite_inbox;
 pub(crate) use connect_service::ConnectService;
 mod management_service;
 pub(crate) use management_service::ManagementService;
@@ -2705,6 +2706,143 @@ mod accept_handler_tests {
         for endpoint in [receiver, blocked, allowed] {
             endpoint.close().await;
         }
+    }
+
+    /// A connect service whose pkarr relay refuses connections, so a join fails
+    /// fast instead of reaching the public DHT.
+    async fn offline_connect_service(dir: &std::path::Path) -> (Endpoint, ConnectService) {
+        let (endpoint, mut registry) = test_registry(dir).await;
+        let mut transport = (*registry.transport).clone();
+        transport.pkarr_relay_url = "http://127.0.0.1:1/pkarr".parse().unwrap();
+        Arc::get_mut(&mut registry).unwrap().transport = Arc::new(transport);
+        let connect = ConnectService::new(Arc::clone(&registry.transport), registry);
+        (endpoint, connect)
+    }
+
+    fn invite_from(coordinator: EndpointId) -> crate::invite::InviteCode {
+        let network = SecretKey::from_bytes(&[30u8; 32]).public();
+        crate::invite::InviteCode::encode(&network, &coordinator, &[7; 16])
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn offer_from_another_coordinator_is_refused() {
+        let env = TestConfigDir::new();
+        let (endpoint, connect) = offline_connect_service(env.dir.path()).await;
+        let sender = SecretKey::from_bytes(&[31u8; 32]).public();
+        let real_coordinator = SecretKey::from_bytes(&[32u8; 32]).public();
+        let label = ipc::NetworkName::new("sample-net".into());
+        assert!(
+            !connect
+                .receive_offer(
+                    sender,
+                    inbound::Inbound::Known,
+                    label.clone(),
+                    invite_from(real_coordinator)
+                )
+                .await
+        );
+        assert!(
+            connect
+                .receive_offer(sender, inbound::Inbound::Known, label, invite_from(sender))
+                .await
+        );
+        let IpcMessage::InvitationsResponse { invitations } = connect.list_invitations().await
+        else {
+            panic!("expected invitations");
+        };
+        assert_eq!(invitations.len(), 1);
+        assert_eq!(invitations[0].coordinator, sender);
+        endpoint.close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn malformed_offer_is_refused_without_echo() {
+        let env = TestConfigDir::new();
+        let (endpoint, connect) = offline_connect_service(env.dir.path()).await;
+        let sender = SecretKey::from_bytes(&[33u8; 32]).public();
+        let garbage: crate::invite::InviteCode =
+            serde_json::from_str("\"secret-looking-garbage\"").unwrap();
+        let stored = connect
+            .receive_offer(
+                sender,
+                inbound::Inbound::Stranger,
+                ipc::NetworkName::new("sample-net".into()),
+                garbage,
+            )
+            .await;
+        assert!(!stored);
+        assert!(!env.dir.path().join("invitations.toml").exists());
+        endpoint.close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn decline_marks_and_blocks_the_sender() {
+        let env = TestConfigDir::new();
+        let (endpoint, connect) = offline_connect_service(env.dir.path()).await;
+        let sender = SecretKey::from_bytes(&[34u8; 32]).public();
+        assert!(
+            connect
+                .receive_offer(
+                    sender,
+                    inbound::Inbound::Known,
+                    ipc::NetworkName::new("sample-net".into()),
+                    invite_from(sender),
+                )
+                .await
+        );
+        let IpcMessage::InvitationsResponse { invitations } = connect.list_invitations().await
+        else {
+            panic!("expected invitations");
+        };
+        let id = invitations[0].id.clone();
+        assert!(matches!(
+            connect.decline_invitation(&id).await,
+            IpcMessage::Ok { .. }
+        ));
+        assert_eq!(config::load().unwrap().blocked, vec![sender]);
+        let IpcMessage::InvitationsResponse { invitations } = connect.list_invitations().await
+        else {
+            panic!("expected invitations");
+        };
+        assert_eq!(invitations[0].status, ipc::InvitationStatus::Declined);
+        assert!(matches!(
+            connect.accept_invitation(&id, None).await,
+            IpcMessage::Error { .. }
+        ));
+        endpoint.close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn failed_join_leaves_the_invitation_pending() {
+        let env = TestConfigDir::new();
+        let (endpoint, connect) = offline_connect_service(env.dir.path()).await;
+        let sender = SecretKey::from_bytes(&[35u8; 32]).public();
+        assert!(
+            connect
+                .receive_offer(
+                    sender,
+                    inbound::Inbound::Known,
+                    ipc::NetworkName::new("sample-net".into()),
+                    invite_from(sender),
+                )
+                .await
+        );
+        let IpcMessage::InvitationsResponse { invitations } = connect.list_invitations().await
+        else {
+            panic!("expected invitations");
+        };
+        let reply = connect.accept_invitation(&invitations[0].id, None).await;
+        assert!(matches!(reply, IpcMessage::Error { .. }), "{reply:?}");
+        let IpcMessage::InvitationsResponse { invitations } = connect.list_invitations().await
+        else {
+            panic!("expected invitations");
+        };
+        assert_eq!(invitations[0].status, ipc::InvitationStatus::Pending);
+        endpoint.close().await;
     }
 
     #[allow(clippy::await_holding_lock)]

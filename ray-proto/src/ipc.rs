@@ -400,6 +400,18 @@ pub enum IpcMessage {
         #[serde(default)]
         reusable: bool,
     },
+    /// `ray invitations`: received private invitations, metadata only. Open
+    /// read.
+    Invitations,
+    /// `ray invitations accept <id>`: join the invitation's network.
+    InvitationAccept {
+        id: String,
+        hostname: Option<MachineHostname>,
+    },
+    /// `ray invitations decline <id>`: refuse it and block the sender.
+    InvitationDecline {
+        id: String,
+    },
     /// List invites for a network (coordinator-only).
     InviteList {
         network: String,
@@ -765,6 +777,9 @@ pub enum IpcMessage {
         expires_secs: u64,
     },
     /// The list of invites for a network.
+    InvitationsResponse {
+        invitations: Vec<InvitationInfo>,
+    },
     InviteListResponse {
         invites: Vec<InviteInfo>,
     },
@@ -1104,6 +1119,29 @@ macro_rules! string_newtype {
 pub struct NetworkName(String);
 
 string_newtype!(NetworkName, "Wraps a network name.");
+
+/// Where a received invitation stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum InvitationStatus {
+    Pending,
+    Accepted,
+    Declined,
+}
+
+/// A received invitation, metadata only: its code never crosses IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvitationInfo {
+    pub id: String,
+    /// The sender's label for the network.
+    pub network: NetworkName,
+    /// The coordinator that sent it (authenticated).
+    pub coordinator: EndpointId,
+    /// Unix seconds it arrived.
+    pub received: u64,
+    pub status: InvitationStatus,
+}
 
 impl From<NetworkName> for String {
     fn from(network: NetworkName) -> Self {

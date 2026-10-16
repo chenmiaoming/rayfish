@@ -50,6 +50,7 @@ const ROOT: Groups = &[
         "Members & access",
         &[
             "invite",
+            "invitations",
             "requests",
             "kick",
             "block",

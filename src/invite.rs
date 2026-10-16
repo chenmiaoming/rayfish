@@ -12,6 +12,7 @@
 //! secret, looks it up in the ledger, and burns it. Codes minted before the
 //! checksum existed still decode.
 
+use std::fmt::{self, Debug, Formatter};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -136,6 +137,43 @@ pub fn encode_invite_code(
     bytes.extend_from_slice(secret);
     bytes.extend_from_slice(&invite_checksum(&bytes));
     bs58::encode(&bytes).into_string()
+}
+
+/// An encoded invite code. A credential: `Debug` never prints it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InviteCode(String);
+
+/// [`decode_invite_code`]'s result, with names instead of positions.
+pub struct DecodedInvite {
+    pub network_key: EndpointId,
+    pub coordinator: EndpointId,
+    pub secret: Vec<u8>,
+}
+
+impl InviteCode {
+    pub fn encode(network_key: &EndpointId, coordinator: &EndpointId, secret: &[u8]) -> Self {
+        Self(encode_invite_code(network_key, coordinator, secret))
+    }
+
+    pub fn decode(&self) -> Result<DecodedInvite> {
+        let (network_key, coordinator, secret) = decode_invite_code(&self.0)?;
+        Ok(DecodedInvite {
+            network_key,
+            coordinator,
+            secret,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Debug for InviteCode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("InviteCode([redacted])")
+    }
 }
 
 /// Decode an invite code into `(network_pubkey, coordinator, secret)`.
@@ -389,6 +427,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("net.toml");
         (InviteStore::with_path(path), dir)
+    }
+
+    #[test]
+    fn invite_code_debug_is_redacted_and_decodes_with_names() {
+        let (net, coord) = (test_id(1), test_id(2));
+        let secret = generate_secret();
+        let code = InviteCode::encode(&net, &coord, &secret);
+        assert!(!format!("{code:?}").contains(code.as_str()));
+        let decoded = code.decode().unwrap();
+        assert_eq!(decoded.network_key, net);
+        assert_eq!(decoded.coordinator, coord);
+        assert_eq!(decoded.secret, secret);
+        assert!(InviteCode("not a code".into()).decode().is_err());
     }
 
     #[test]
