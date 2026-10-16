@@ -85,7 +85,7 @@ struct ProviderStatus: Codable, Equatable {
     var ipv6: String
     var networks: [ProviderNetwork]
     var pendingRequests: [ProviderJoinRequest]
-    var contactId: String? = nil
+    var identity: String? = nil
     var connectionRequests: [ProviderConnectionRequest] = []
     var dnsEnabled: Bool = true
     var mdnsEnabled: Bool = true

@@ -98,16 +98,19 @@ pub enum PairMsg {
 }
 
 /// Messages for the `ray connect` friend-request handshake (ALPN
-/// `rayfish/connect/2`). The initiator (A) dials the recipient's (B) contact
-/// key, sends `Request`, and polls until `Approved`. Approval is recipient-only:
+/// `rayfish/connect/2`). The initiator (A) dials the recipient's (B) identity,
+/// sends `Request`, and polls until `Approved`. Approval is recipient-only:
 /// only B acts, A just waits.
+///
+/// Frames are positional: never remove or reorder a field, only rename.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectMsg {
     /// A → B: request a direct connection. `from_endpoint` is A's transport id
-    /// (the key B pre-approves into the minted network); `from_contact_id` is
-    /// A's own contact key (for display/dedupe on B).
+    /// (the key B pre-approves into the minted network); `from_identity` is A's
+    /// identity, display only and unverified. Older builds filled it with a
+    /// contact key in the same position.
     Request {
-        from_contact_id: EndpointId,
+        from_identity: EndpointId,
         from_endpoint: EndpointId,
         #[serde(default)]
         hostname: Option<String>,
@@ -793,10 +796,37 @@ mod tests {
     }
 
     #[test]
+    fn request_from_0_5_9_still_decodes() {
+        // The 0.5.9 shape: fields are positional, so only the name changed.
+        #[derive(Serialize)]
+        enum OldConnectMsg {
+            Request {
+                from_contact_id: EndpointId,
+                from_endpoint: EndpointId,
+                hostname: Option<String>,
+            },
+        }
+        let body = rmp_serde::to_vec(&OldConnectMsg::Request {
+            from_contact_id: test_id(1),
+            from_endpoint: test_id(2),
+            hostname: None,
+        })
+        .unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<ConnectMsg>(&body).unwrap(),
+            ConnectMsg::Request {
+                from_identity: test_id(1),
+                from_endpoint: test_id(2),
+                hostname: None,
+            }
+        );
+    }
+
+    #[test]
     fn test_roundtrip_connect_msg() {
         let msgs = vec![
             ConnectMsg::Request {
-                from_contact_id: test_id(1),
+                from_identity: test_id(1),
                 from_endpoint: test_id(2),
                 hostname: Some("laptop".to_string()),
             },

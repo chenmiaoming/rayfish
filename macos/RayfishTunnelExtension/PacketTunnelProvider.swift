@@ -187,7 +187,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             firewall = try providerFirewall(node.firewallShow())
         case .connectPeer:
             guard let id = request.id, !id.isEmpty else { throw ProviderError.missingPeer }
-            message = try node.connectPeer(contactId: id, hostname: request.hostname)
+            message = try node.connectPeer(peer: id, hostname: request.hostname)
         case .approveConnection:
             guard let id = request.id, !id.isEmpty else { throw ProviderError.missingPeer }
             try node.approveConnection(id: id)
@@ -283,7 +283,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     waitingSecs: request.waitingSecs
                 )
             },
-            contactId: status.requests.contactId,
+            identity: status.requests.identity,
             connectionRequests: status.requests.connectionRequests.map { request in
                 ProviderConnectionRequest(id: request.id, hostname: request.hostname, waitingSecs: request.waitingSecs)
             },
@@ -332,7 +332,7 @@ private enum ProviderError: LocalizedError {
         case .missingSetting:
             "A setting and its value are required"
         case .missingPeer:
-            "A peer contact ID or request ID is required"
+            "A peer identity or request ID is required"
         case .missingOwner:
             "Open the Rayfish app and reconnect to authorize your shell commands"
         case .missingFile:

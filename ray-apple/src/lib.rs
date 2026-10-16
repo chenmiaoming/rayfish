@@ -80,7 +80,7 @@ pub struct NodeMeshStatus {
 #[derive(uniffi::Record)]
 pub struct NodeRequestStatus {
     pub pending_requests: Vec<JoinRequest>,
-    pub contact_id: Option<String>,
+    pub identity: Option<String>,
     pub connection_requests: Vec<ConnectionRequest>,
 }
 
@@ -308,7 +308,7 @@ impl Node {
             endpoint_id,
             active,
             networks,
-            contact_id,
+            identity,
             mdns_enabled: mdns_active,
             ..
         } = state.status()
@@ -350,7 +350,7 @@ impl Node {
         };
         let requests = NodeRequestStatus {
             pending_requests,
-            contact_id,
+            identity: identity.map(|id| id.to_string()),
             connection_requests,
         };
         let files = incoming_files(state.list_files())?;
@@ -629,11 +629,11 @@ impl Node {
 
     pub fn connect_peer(
         &self,
-        contact_id: String,
+        peer: String,
         hostname: Option<String>,
     ) -> Result<String, AppleError> {
         let state = self.state()?;
-        match self.runtime.block_on(state.connect(&contact_id, hostname)) {
+        match self.runtime.block_on(state.connect(&peer, hostname)) {
             IpcMessage::Ok { message } => Ok(message),
             IpcMessage::Joined { name, .. } => Ok(format!("Connected on {name}")),
             IpcMessage::Error { message } => Err(AppleError::Network(message)),
@@ -1027,7 +1027,7 @@ mod tests {
                 let before = node.status().unwrap();
                 assert!(before.mesh.networks.is_empty());
                 assert!(before.requests.connection_requests.is_empty());
-                assert!(before.requests.contact_id.is_some());
+                assert!(before.requests.identity.is_some());
                 node.set_setting(GlobalSetting::Dns, false).unwrap();
                 node.set_setting(GlobalSetting::Mdns, false).unwrap();
                 #[cfg(unix)]
@@ -1095,7 +1095,7 @@ mod tests {
                 assert!(node.status().unwrap().services.quic_fq_codel);
                 assert!(Arc::ptr_eq(&state, &node.state().unwrap()));
                 assert!(matches!(
-                    node.connect_peer("invalid contact id".into(), None),
+                    node.connect_peer("invalid identity".into(), None),
                     Err(AppleError::Network(_))
                 ));
                 assert!(node.approve_connection("missing".into()).is_err());

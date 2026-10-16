@@ -155,7 +155,6 @@ fn json_requested(command: &Command) -> bool {
         | Command::Requests { json, .. }
         | Command::Connect { json, .. }
         | Command::Connections { json, .. }
-        | Command::Contact { json, .. }
         | Command::Ping { json, .. }
         | Command::Netcheck { json }
         | Command::Admin { json, .. }
@@ -433,20 +432,21 @@ pub(crate) enum Command {
     },
     /// Request a direct link, or review incoming ones
     ///
-    /// `ray connect <contact-id>` asks that peer for a direct 2-peer network,
+    /// `ray connect <identity>` asks that peer for a direct 2-peer network,
     /// with no room id or invite code needed; they run `ray connect approve` to
-    /// accept it. With no argument, lists the requests waiting on you.
+    /// accept it. Share yours from `ray status`. With no argument, lists the
+    /// requests waiting on you.
     Connect {
         #[command(subcommand)]
         action: Option<ConnectAction>,
-        /// The peer's contact id (from their `ray contact id` / `ray status`)
-        contact_id: Option<String>,
+        /// The peer's identity (from their `ray status` or `ray identityof`)
+        peer: Option<String>,
         /// Your hostname on the resulting network (defaults to your set name)
         ///
         /// `requires` because the id is what it names a hostname *on*: without
         /// one there is nothing to dial, and the flag would be dropped in
         /// silence while the queue got listed instead.
-        #[arg(long, requires = "contact_id")]
+        #[arg(long, requires = "peer")]
         hostname: Option<String>,
         /// Emit machine-readable JSON instead of styled text
         #[arg(long, global = true)]
@@ -457,16 +457,6 @@ pub(crate) enum Command {
     Connections {
         #[command(subcommand)]
         action: Option<ConnectAction>,
-        /// Emit machine-readable JSON instead of styled text
-        #[arg(long, global = true)]
-        json: bool,
-    },
-    /// Show or rotate your contact id
-    ///
-    /// Share it so others can `ray connect` you.
-    Contact {
-        #[command(subcommand)]
-        action: Option<ContactAction>,
         /// Emit machine-readable JSON instead of styled text
         #[arg(long, global = true)]
         json: bool,
@@ -587,20 +577,17 @@ pub(crate) enum Command {
         /// New hostname (e.g. "alice" → alice.network.ray)
         name: String,
     },
-    /// Print a host's or contact's identity string
+    /// Print a host's identity string
     ///
     /// The value to paste into a `ray apply` spec's `aliases:` map. Resolves to
     /// the user identity if the device is paired, else the device's transport
     /// identity. Searches all networks; different identities sharing a name
     /// are listed in a table. The older `identityof <network> <hostname>` form
-    /// limits the lookup to one network.
-    ///
-    /// A contact id resolves its signed discovery record without connecting to
-    /// the peer. This returns the advertised device identity, which may differ
-    /// from its paired user identity. Requires a running daemon.
+    /// limits the lookup to one network. The identity is also what `ray
+    /// connect` takes. Requires a running daemon.
     #[command(visible_alias = "whois")]
     Identityof {
-        /// Hostname to look up across all networks, or a contact id
+        /// Hostname to look up across all networks
         #[arg(add = complete::peers())]
         peer: String,
         /// Hostname for a scoped lookup, treating PEER as the network name
@@ -1017,14 +1004,6 @@ pub(crate) enum DnsAction {
     Partial,
     /// Remove Rayfish's system DNS configuration
     Off,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum ContactAction {
-    /// Print your contact id (default)
-    Id,
-    /// Rotate your contact key (invalidates the old contact id)
-    Rotate,
 }
 
 #[derive(Subcommand)]
@@ -1817,17 +1796,17 @@ async fn run() -> Result<()> {
         },
         Command::Accept { network, id } => ipc_accept_request(&network, &id).await,
         Command::Deny { network, id } => ipc_deny_request(&network, &id).await,
-        // An action is a request-queue verb, a bare contact id dials that peer,
+        // An action is a request-queue verb, a bare identity dials that peer,
         // and with neither, show the queue, the same as `ray connections` did.
         // The two together parse (the positional fills, then the subcommand
         // does) and mean nothing, so they are rejected rather than served by
         // dropping one.
         Command::Connect {
             action,
-            contact_id,
+            peer,
             hostname,
             json: _,
-        } => match (action, contact_id) {
+        } => match (action, peer) {
             (None, Some(id)) => ipc_connect(&id, hostname).await,
             (None, None) => ipc_connections(None).await,
             (Some(action), None) => ipc_connections(Some(action)).await,
@@ -1836,7 +1815,6 @@ async fn run() -> Result<()> {
             }
         },
         Command::Connections { action, json: _ } => ipc_connections(action).await,
-        Command::Contact { action, json: _ } => ipc_contact(action).await,
         Command::Ping {
             peer,
             count,
@@ -2129,11 +2107,11 @@ mod tests {
                 Command::Identityof { peer, hostname: Some(hostname), json: true }
                     if peer == "network-a" && hostname == "build-box"
             ));
-            let contact = iroh::SecretKey::from([7; 32]).public().to_string();
-            let cli = Cli::try_parse_from(["ray", command, &contact, "--json"]).unwrap();
+            let identity = iroh::SecretKey::from([7; 32]).public().to_string();
+            let cli = Cli::try_parse_from(["ray", command, &identity, "--json"]).unwrap();
             assert!(matches!(
                 cli.command,
-                Command::Identityof { peer, hostname: None, json: true } if peer == contact
+                Command::Identityof { peer, hostname: None, json: true } if peer == identity
             ));
         }
         assert!(Cli::try_parse_from(["ray", "identityof"]).is_err());

@@ -12,6 +12,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enrollment. Repeat the flag for multiple settings; `--enable` is an alias and
   a bare key means `on`, for example `--enable v4-bridge --set dns=partial`.
 
+### Changed
+
+- `ray connect` takes the peer's identity, shown by `ray status` and
+  `ray identityof`. Contact ids and `ray contact` are removed. A node on 0.5.9
+  cannot `ray connect` to a newer one until it upgrades.
+
 ## [0.5.9] - 2026-10-15
 
 ### Added

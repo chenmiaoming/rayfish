@@ -130,7 +130,7 @@ pub(crate) fn connect_requests() -> ArgValueCompleter {
     ArgValueCompleter::new(|current: &OsStr| waiting_peers(current, IpcMessage::Connections))
 }
 
-/// The two queues share a reply type, and a joiner and a would-be contact read
+/// The two queues share a reply type, and a joiner and a would-be peer read
 /// the same on screen: an id, who it is, and how long they have been waiting.
 fn waiting_peers(current: &OsStr, request: IpcMessage) -> Vec<CompletionCandidate> {
     let requests = ask(request, |reply| match reply {

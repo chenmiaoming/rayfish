@@ -11,8 +11,8 @@ use super::*;
 
 /// Cap on the queue of unapproved incoming `ray connect` requests.
 ///
-/// The dial that fills it is unauthenticated (a stranger needs only our contact
-/// id) and every entry is keyed by an endpoint id the requester generates, so
+/// The dial that fills it is unauthenticated (a stranger needs only our
+/// identity) and every entry is keyed by an endpoint id the requester generates, so
 /// without a bound the map is memory anyone can allocate on this daemon. Same
 /// policy and same size as [`MAX_PENDING_JOINS`](super::mesh::accept::MAX_PENDING_JOINS):
 /// at the cap the oldest unanswered request makes way, on the grounds that a
@@ -20,11 +20,9 @@ use super::*;
 pub(crate) const MAX_PENDING_CONNECTS: usize = 256;
 
 /// A pending incoming `ray connect` request, awaiting `ray connect approve`.
-/// Keyed by the requester's transport endpoint id (not contact id) so it
-/// survives the requester rotating their contact key.
+/// Keyed by the requester's authenticated transport endpoint id.
 #[derive(Clone)]
 pub(crate) struct PendingConnect {
-    pub(crate) from_contact_id: EndpointId,
     pub(crate) from_endpoint: EndpointId,
     pub(crate) hostname: Option<String>,
     pub(crate) requested_at: Instant,
@@ -69,63 +67,47 @@ pub(crate) struct ConnectService {
     /// the concurrency tie-break: if both peers requested *and* approved each
     /// other, only the higher endpoint id mints, avoiding a duplicate network.
     pub(crate) outgoing_connects: DashSet<EndpointId>,
-    /// Foundation handles (endpoint + contact id) for the connect handshake and
-    /// contact-record publishing.
+    /// Foundation handles (endpoint, LAN sightings) for the connect handshake.
     transport: Arc<Transport>,
-    /// Whether the data plane is active, gating immediate contact republish on
-    /// key rotation.
-    active: Arc<AtomicBool>,
     /// The network-owning service, for minting/joining the 2-peer direct network
     /// once a connect request is approved.
     registry: Arc<NetworkRegistry>,
 }
 
 impl ConnectService {
-    pub(crate) fn new(
-        transport: Arc<Transport>,
-        active: Arc<AtomicBool>,
-        registry: Arc<NetworkRegistry>,
-    ) -> Self {
+    pub(crate) fn new(transport: Arc<Transport>, registry: Arc<NetworkRegistry>) -> Self {
         Self {
             pending_connects: DashMap::new(),
             approved_connects: DashMap::new(),
             outgoing_connects: DashSet::new(),
             transport,
-            active,
             registry,
         }
     }
 
     /// Turn a `ray connect` argument into the peer endpoint to dial.
     ///
-    /// A LAN sighting wins over the DHT: if the argument names a neighbour from
-    /// `ray mdns scan` we already know where that peer is, so there is nothing
-    /// to look up. Otherwise the argument is a contact id and resolves through
-    /// pkarr as before. Contact ids and transport endpoint ids are distinct
-    /// keys, so the two cases cannot collide.
+    /// A LAN sighting (a prefix from `ray mdns scan`) wins. Otherwise the
+    /// argument is an identity, dialed directly: iroh's address lookup finds the
+    /// endpoint and QUIC proves who answers, so nothing is looked up here.
     ///
     /// The error is the message, not a whole `IpcMessage`: every failure here is
     /// an `ipc_err`, and the one caller is what turns it into a reply.
-    async fn resolve_connect_target(&self, arg: &str) -> Result<EndpointId, String> {
+    pub(crate) fn resolve_connect_target(&self, arg: &str) -> Result<EndpointId, String> {
         let me = self.transport.endpoint.id();
         if let Some(peer) = self.transport.lan_peers.resolve(arg, me) {
             return Ok(peer);
         }
-        let contact_pubkey = arg
+        let peer = arg
             .parse::<EndpointId>()
-            .map_err(|e| format!("invalid contact id: {e}"))?;
-        if contact_pubkey == self.transport.contact_public {
-            return Err("cannot connect to your own contact id".to_string());
+            .map_err(|e| format!("invalid identity: {e}"))?;
+        if peer == me || peer == self.registry.own_identity() {
+            return Err("cannot connect to yourself".to_string());
         }
-        let pkarr =
-            dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-                .map_err(|e| format!("failed to create pkarr client: {e}"))?;
-        dht::resolve_contact(&pkarr, contact_pubkey)
-            .await
-            .map_err(|_| "contact offline or unknown (could not resolve contact id)".to_string())
+        Ok(peer)
     }
 
-    /// Approve a pending `ray connect` request by hostname or contact-id prefix: mint a
+    /// Approve a pending `ray connect` request by hostname or endpoint prefix: mint a
     /// restricted 2-peer network with the requester pre-approved (idempotent if
     /// already linked; defers to the higher endpoint id on a simultaneous
     /// cross-connect). The initiator's connect-retry loop then joins it.
@@ -197,19 +179,18 @@ impl ConnectService {
         }
     }
 
-    /// `ray connect <contact-id>`: resolve the contact to an endpoint, dial it
-    /// over CONNECT_ALPN, and send a request. If approved immediately we join the
-    /// minted direct network; if pending we retry on a backoff.
+    /// `ray connect <identity>`: dial that identity over CONNECT_ALPN and send a
+    /// request. If approved immediately we join the minted direct network; if
+    /// pending we retry on a backoff.
     ///
-    /// The argument may also be the endpoint id of a neighbour from `ray mdns
-    /// scan`; that path skips the pkarr lookup entirely, so it works on a LAN
-    /// with no internet. Approval is still recipient-only either way.
+    /// The argument may also be a neighbour from `ray mdns scan`, which works on
+    /// a LAN with no internet. Approval is recipient-only either way.
     pub(crate) async fn connect(
         self: &Arc<Self>,
-        contact_id: &str,
+        peer: &str,
         hostname: Option<String>,
     ) -> IpcMessage {
-        let peer = match self.resolve_connect_target(contact_id).await {
+        let peer = match self.resolve_connect_target(peer) {
             Ok(peer) => peer,
             Err(message) => return ipc_err(message),
         };
@@ -237,10 +218,10 @@ impl ConnectService {
                 self.outgoing_connects.remove(&peer);
                 ipc_err(format!("connection denied: {reason}"))
             }
-            Ok(_) => ipc_err("unexpected response from contact".to_string()),
+            Ok(_) => ipc_err("unexpected response from peer".to_string()),
             Err(e) => {
                 self.outgoing_connects.remove(&peer);
-                ipc_err(format!("failed to reach contact: {e}"))
+                ipc_err(format!("failed to reach peer: {e}"))
             }
         }
     }
@@ -262,7 +243,7 @@ impl ConnectService {
         control::send_framed(
             &mut send,
             &control::ConnectMsg::Request {
-                from_contact_id: self.transport.contact_public,
+                from_identity: self.registry.own_identity(),
                 from_endpoint: self.transport.endpoint.id(),
                 hostname,
             },
@@ -352,7 +333,7 @@ impl ConnectService {
             .pending_connects
             .iter()
             .map(|p| ipc::PendingRequestInfo {
-                short_id: p.from_contact_id.fmt_short().to_string(),
+                short_id: p.from_endpoint.fmt_short().to_string(),
                 hostname: p.hostname.clone(),
                 waiting_secs: now.saturating_duration_since(p.requested_at).as_secs(),
             })
@@ -360,7 +341,7 @@ impl ConnectService {
         IpcMessage::PendingRequests { requests }
     }
 
-    /// Decline a pending connection request by hostname or contact-id prefix.
+    /// Decline a pending connection request by hostname or endpoint prefix.
     pub(crate) fn reject_connect(&self, selector: &str) -> IpcMessage {
         let req = match self.find_pending(selector) {
             Ok(req) => req,
@@ -372,7 +353,7 @@ impl ConnectService {
         }
     }
 
-    /// The pending request named by `selector` (hostname or contact-id
+    /// The pending request named by `selector` (hostname or endpoint
     /// prefix), or the error message for a miss. Requests are keyed by
     /// `from_endpoint`, so the returned request's `from_endpoint` is its key.
     fn find_pending(&self, selector: &str) -> Result<PendingConnect, String> {
@@ -380,7 +361,7 @@ impl ConnectService {
             selector,
             self.pending_connects
                 .iter()
-                .map(|request| (request.from_contact_id, request.hostname.clone())),
+                .map(|request| (request.from_endpoint, request.hostname.clone())),
         ) {
             Ok(Some(identity)) => identity,
             Ok(None) => {
@@ -396,33 +377,9 @@ impl ConnectService {
         };
         self.pending_connects
             .iter()
-            .find(|request| request.from_contact_id == identity)
+            .find(|request| request.from_endpoint == identity)
             .map(|request| request.value().clone())
             .ok_or_else(|| format!("pending connection request '{selector}' disappeared"))
-    }
-
-    /// Rotate this node's contact key and, if the data plane is active, republish
-    /// the contact record immediately so the new id resolves.
-    pub(crate) async fn rotate_contact(&self) -> IpcMessage {
-        let mut rotated = None;
-        if let Err(e) = config::update_settings(|cfg| {
-            rotated = Some(config::rotate_contact_secret(cfg));
-            Ok(())
-        }) {
-            return ipc_err(format!("failed to save config: {e}"));
-        }
-        let Some(secret) = rotated else {
-            return ipc_err("contact key rotation did not run".to_string());
-        };
-        if self.active.load(Ordering::SeqCst)
-            && let Ok(client) =
-                dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-        {
-            let _ = dht::publish_contact(&client, &secret, self.transport.endpoint.id()).await;
-        }
-        IpcMessage::ContactIdResponse {
-            contact_id: secret.public().to_string(),
-        }
     }
 
     /// `CONNECT_ALPN`: handle a `ray connect` friend request. Binds the request
@@ -440,7 +397,7 @@ impl ConnectService {
                     }
                 };
                 if let control::ConnectMsg::Request {
-                    from_contact_id,
+                    from_identity,
                     from_endpoint,
                     hostname,
                 } = request
@@ -478,13 +435,12 @@ impl ConnectService {
                         self.pending_connects.insert(
                             from_endpoint,
                             PendingConnect {
-                                from_contact_id,
                                 from_endpoint,
                                 hostname,
                                 requested_at: Instant::now(),
                             },
                         );
-                        tracing::info!(from = %from_contact_id.fmt_short(), endpoint = %from_endpoint.fmt_short(), "connect request received");
+                        tracing::info!(identity = %from_identity.fmt_short(), endpoint = %from_endpoint.fmt_short(), "connect request received");
                         control::ConnectMsg::Pending
                     };
                     if let Err(e) = control::send_framed(&mut send, &reply).await {
@@ -516,7 +472,6 @@ mod pending_connect_cap_tests {
 
     fn queued_at(id: EndpointId, t: Instant) -> PendingConnect {
         PendingConnect {
-            from_contact_id: id,
             from_endpoint: id,
             hostname: None,
             requested_at: t,
@@ -532,7 +487,7 @@ mod pending_connect_cap_tests {
     }
 
     /// The regression. `CONNECT_ALPN` takes a request from anyone holding our
-    /// contact id, keyed by an endpoint id the requester mints, so an unbounded
+    /// identity, keyed by an endpoint id the requester mints, so an unbounded
     /// queue was memory a stranger could allocate here without limit.
     #[test]
     fn full_queue_evicts_the_oldest() {

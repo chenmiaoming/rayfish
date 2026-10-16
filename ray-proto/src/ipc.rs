@@ -434,11 +434,11 @@ pub enum IpcMessage {
     AdminList {
         network: String,
     },
-    /// `ray connect <contact-id>`: request a direct 2-peer connection by the
-    /// recipient's contact id. Resolves the contact id to an endpoint, dials the
-    /// connect ALPN, and waits (recipient-only approval).
+    /// `ray connect <identity>`: request a direct 2-peer connection. Dials the
+    /// identity (or a LAN sighting) on the connect ALPN and waits for the
+    /// recipient's approval.
     Connect {
-        contact_id: String,
+        peer: String,
         hostname: Option<String>,
     },
     /// `ray connections`: list pending incoming connect requests. Open read.
@@ -452,15 +452,6 @@ pub enum IpcMessage {
     /// is not a relationship, so this is an open read.
     /// Reply: [`IpcMessage::LanPeersList`].
     ListLanPeers,
-    /// `ray contact id`: print this node's contact id. Open read.
-    ContactId,
-    /// Resolve a contact's signed record without dialing the peer. Open read.
-    ResolveContact {
-        contact_id: EndpointId,
-    },
-    /// `ray contact rotate`: rotate this node's contact key (old id stops
-    /// resolving once its pkarr record expires).
-    RotateContact,
     /// `ray ping <peer>`: active liveness probe. Resolves `peer`, sends `count`
     /// echo probes over the mesh connection, and returns per-probe RTTs. Open
     /// read, like `Status`.
@@ -554,10 +545,10 @@ pub enum IpcMessage {
         auto_update: bool,
         /// Whether the VPN is active (TUN up, networks connected) or on standby.
         active: bool,
-        /// This node's contact id (`ray connect`), shown at the top of status.
-        /// `None` if the daemon has not generated one yet.
+        /// What to share for `ray connect`: the paired user identity, or this
+        /// endpoint when unpaired. `None` from daemons that predate it.
         #[serde(default)]
-        contact_id: Option<String>,
+        identity: Option<EndpointId>,
         /// The running daemon's compiled version (`CARGO_PKG_VERSION`). The CLI
         /// compares it to its own version and hints `ray update` on a mismatch
         /// — e.g. after a self-update where the daemon never restarted onto the
@@ -780,14 +771,6 @@ pub enum IpcMessage {
     /// plus every identity it has granted the key to.
     AdminListResponse {
         admins: Vec<AdminInfo>,
-    },
-    /// This node's contact id (reply to `ContactId`/`RotateContact`).
-    ContactIdResponse {
-        contact_id: String,
-    },
-    /// The device endpoint advertised by a contact, not its paired user identity.
-    ContactResolved {
-        endpoint_id: EndpointId,
     },
     /// Reply to `ConfigGet`: `(key, value)` rows as `config::config_get` renders.
     ConfigValues {
@@ -2568,17 +2551,14 @@ mod tests {
     #[test]
     fn test_connect_roundtrip() {
         let req = IpcMessage::Connect {
-            contact_id: "contactabc".to_string(),
+            peer: "peerabc".to_string(),
             hostname: Some("laptop".to_string()),
         };
         let bytes = rmp_serde::to_vec_named(&req).unwrap();
         let decoded: IpcMessage = rmp_serde::from_slice(&bytes).unwrap();
         match decoded {
-            IpcMessage::Connect {
-                contact_id,
-                hostname,
-            } => {
-                assert_eq!(contact_id, "contactabc");
+            IpcMessage::Connect { peer, hostname } => {
+                assert_eq!(peer, "peerabc");
                 assert_eq!(hostname.as_deref(), Some("laptop"));
             }
             _ => panic!("wrong variant"),
@@ -2632,35 +2612,6 @@ mod tests {
     }
 
     #[test]
-    fn test_contact_id_response_roundtrip() {
-        let resp = IpcMessage::ContactIdResponse {
-            contact_id: "abc123".to_string(),
-        };
-        let bytes = rmp_serde::to_vec_named(&resp).unwrap();
-        let decoded: IpcMessage = rmp_serde::from_slice(&bytes).unwrap();
-        match decoded {
-            IpcMessage::ContactIdResponse { contact_id } => assert_eq!(contact_id, "abc123"),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn contact_lookup_roundtrip() {
-        let contact_id = iroh::SecretKey::from([7; 32]).public();
-        let endpoint_id = iroh::SecretKey::from([8; 32]).public();
-        let bytes = rmp_serde::to_vec_named(&IpcMessage::ResolveContact { contact_id }).unwrap();
-        assert!(matches!(
-            rmp_serde::from_slice::<IpcMessage>(&bytes).unwrap(),
-            IpcMessage::ResolveContact { contact_id: decoded } if decoded == contact_id
-        ));
-        let bytes = rmp_serde::to_vec_named(&IpcMessage::ContactResolved { endpoint_id }).unwrap();
-        assert!(matches!(
-            rmp_serde::from_slice::<IpcMessage>(&bytes).unwrap(),
-            IpcMessage::ContactResolved { endpoint_id: decoded } if decoded == endpoint_id
-        ));
-    }
-
-    #[test]
     fn test_status_response_roundtrip() {
         let ep_id = iroh::SecretKey::generate().public();
         let peer_id = iroh::SecretKey::generate().public();
@@ -2669,7 +2620,7 @@ mod tests {
             mdns_enabled: true,
             auto_update: false,
             active: true,
-            contact_id: Some("contact123".to_string()),
+            identity: Some(ep_id),
             daemon_version: "0.1.0".to_string(),
             networks: vec![NetworkStatus {
                 name: "gaming".to_string(),

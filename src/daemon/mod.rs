@@ -753,8 +753,8 @@ impl TunTasks {
 pub struct Daemon {
     /// Recent RTT samples per peer, shared by successive status requests.
     connection_history: Mutex<mesh::diagnostics::ConnectionHistory>,
-    /// The process-lifetime foundation (endpoint, identity, blob store, metrics,
-    /// contact id), grouped so extracted services can depend on `Arc<Transport>`
+    /// The process-lifetime foundation (endpoint, identity, blob store, metrics),
+    /// grouped so extracted services can depend on `Arc<Transport>`
     /// instead of the whole daemon. During the service-decomposition transition
     /// this holds clones of the same handles the loose fields below still use;
     /// the loose fields go away when `Daemon` is dissolved.
@@ -829,11 +829,6 @@ pub struct Daemon {
     /// Delegated machine enrollment and direct management protocol.
     management: Arc<ManagementService>,
     device_cert: Option<control::DeviceCert>,
-    /// This node's contact id (`ray connect`): the public half of the rotatable
-    /// contact key. The secret lives in config (read fresh by the publisher and
-    /// `rotate_contact` so rotation needs no restart); only the public id is
-    /// surfaced here for `ray status` / `ray contact id`.
-    contact_public: EndpointId,
     /// Whether the VPN is currently active (TUN up, networks connected) or on
     /// standby. Toggled by the `Up`/`Down` IPC commands.
     active: Arc<AtomicBool>,
@@ -2145,7 +2140,6 @@ mod accept_handler_tests {
             sample_test_endpoint().await,
             IrohIdentityProvider::new(my_id),
             blob_store.clone(),
-            my_id,
         );
         AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
             ctx: sample_mesh_ctx(IrohIdentityProvider::new(my_id), blob_store, registry),
@@ -2162,7 +2156,6 @@ mod accept_handler_tests {
         endpoint: Endpoint,
         identity: IrohIdentityProvider,
         blob_store: FsStore,
-        contact: EndpointId,
     ) -> Arc<NetworkRegistry> {
         let transport = Arc::new(Transport::new(
             endpoint,
@@ -2170,7 +2163,6 @@ mod accept_handler_tests {
             blob_store,
             Arc::new(ForwardMetrics::default()),
             TransportBootstrap {
-                contact_public: contact,
                 lan_peers: Arc::new(LanPeers::new()),
                 warm_lookup: iroh::address_lookup::memory::MemoryLookup::new(),
                 pkarr_relay_url: dht::pkarr_relay_url(&config::ServerOverride::default()),
@@ -2220,7 +2212,6 @@ mod accept_handler_tests {
             endpoint.clone(),
             IrohIdentityProvider::new(endpoint.id()),
             FsStore::load(tmp.path()).await.unwrap(),
-            endpoint.id(),
         );
         let user = SecretKey::from_bytes(&[41; 32]).public();
         let device = SecretKey::from_bytes(&[42; 32]).public();
@@ -2286,7 +2277,6 @@ mod accept_handler_tests {
             endpoint.clone(),
             IrohIdentityProvider::new(endpoint.id()),
             FsStore::load(tmp.path()).await.unwrap(),
-            endpoint.id(),
         );
         let user = SecretKey::from_bytes(&[51; 32]).public();
         let device = SecretKey::from_bytes(&[52; 32]).public();
@@ -2391,7 +2381,6 @@ mod accept_handler_tests {
             endpoint.clone(),
             IrohIdentityProvider::new(my_id),
             blob_store.clone(),
-            my_id,
         );
         AcceptHandler::Member(Arc::new(MemberAcceptState {
             ctx: sample_mesh_ctx(
@@ -2432,7 +2421,7 @@ mod accept_handler_tests {
         let endpoint = sample_test_endpoint().await;
         let store = FsStore::load(dir.path().join("blobs")).await.unwrap();
         let me = endpoint.id();
-        let registry = sample_registry(endpoint.clone(), IrohIdentityProvider::new(me), store, me);
+        let registry = sample_registry(endpoint.clone(), IrohIdentityProvider::new(me), store);
         let unpaired = registry.own_identity();
         let user = SecretKey::from_bytes(&[9u8; 32]);
         crate::identity::store_device_cert(&control::DeviceCert::create(&user, &me, 0)).unwrap();
@@ -2446,6 +2435,40 @@ mod accept_handler_tests {
         endpoint.close().await;
         assert_eq!(unpaired, me);
         assert_eq!(paired, user.public());
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn connecting_to_yourself_is_refused() {
+        let _env_lock = crate::config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("RAYFISH_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("RAYFISH_CONFIG_DIR", dir.path());
+        }
+        let endpoint = sample_test_endpoint().await;
+        let store = FsStore::load(dir.path().join("blobs")).await.unwrap();
+        let me = endpoint.id();
+        let registry = sample_registry(endpoint.clone(), IrohIdentityProvider::new(me), store);
+        let connect = ConnectService::new(Arc::clone(&registry.transport), registry);
+        let by_endpoint = connect.resolve_connect_target(&me.to_string());
+        let user = SecretKey::from_bytes(&[9u8; 32]);
+        crate::identity::store_device_cert(&control::DeviceCert::create(&user, &me, 0)).unwrap();
+        let by_user = connect.resolve_connect_target(&user.public().to_string());
+        let other = SecretKey::from_bytes(&[10u8; 32]).public();
+        let stranger = connect.resolve_connect_target(&other.to_string());
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("RAYFISH_CONFIG_DIR", value),
+                None => std::env::remove_var("RAYFISH_CONFIG_DIR"),
+            }
+        }
+        endpoint.close().await;
+        assert!(by_endpoint.is_err());
+        assert!(by_user.is_err());
+        assert_eq!(stranger, Ok(other));
     }
 
     mod disconnect_recovery_tests {
@@ -2497,7 +2520,6 @@ mod accept_handler_tests {
                 local.clone(),
                 IrohIdentityProvider::new(local.id()),
                 store.clone(),
-                local.id(),
             );
             let peer_ip = derive_ipv6(&remote.id());
             registry
@@ -2663,7 +2685,6 @@ mod accept_handler_tests {
             local.clone(),
             IrohIdentityProvider::new(local.id()),
             store.clone(),
-            local.id(),
         );
         let ctx = sample_mesh_ctx(IrohIdentityProvider::new(local.id()), store, registry);
         let peer_id = conn.remote_id();
@@ -2703,12 +2724,7 @@ mod accept_handler_tests {
         let conn = conn.unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let store = FsStore::load(tmp.path()).await.unwrap();
-        let registry = sample_registry(
-            local.clone(),
-            IrohIdentityProvider::new(local.id()),
-            store,
-            local.id(),
-        );
+        let registry = sample_registry(local.clone(), IrohIdentityProvider::new(local.id()), store);
         let peer_ip = derive_ipv6(&remote.id());
         registry
             .peers
@@ -2785,7 +2801,6 @@ mod accept_handler_tests {
             local.clone(),
             IrohIdentityProvider::new(local.id()),
             store.clone(),
-            local.id(),
         );
         let router = Arc::new(ProtocolRouter::new(
             BlobsProtocol::new(&store, None),
@@ -2799,7 +2814,6 @@ mod accept_handler_tests {
             )),
             Arc::new(ConnectService::new(
                 Arc::clone(&registry.transport),
-                Arc::new(AtomicBool::new(false)),
                 Arc::clone(&registry),
             )),
             Arc::new(ManagementService::new(
@@ -3115,7 +3129,6 @@ mod accept_handler_tests {
             coord_ep.clone(),
             IrohIdentityProvider::new(coord_id),
             blob_store.clone(),
-            coord_id,
         );
         let state = make_network_state();
         let net_pubkey = state.read().unwrap().network_public_key;
@@ -3299,7 +3312,6 @@ mod accept_handler_tests {
             coord_ep.clone(),
             IrohIdentityProvider::new(coord_id),
             coord_blobs.clone(),
-            coord_id,
         );
         let coord_state = make_network_state();
         {
@@ -3366,7 +3378,6 @@ mod accept_handler_tests {
             member_ep.clone(),
             IrohIdentityProvider::new(member_id),
             member_blobs.clone(),
-            member_id,
         );
         let member_state = make_network_state();
         {

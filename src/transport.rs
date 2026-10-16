@@ -36,7 +36,7 @@ pub const FILES_ALPN: &[u8] = b"rayfish/files/2";
 
 /// Identity-level ALPN for the `ray connect` friend-request handshake. Unlike
 /// `network_alpn`, this is not per-network: it accepts connection requests
-/// addressed to this node's contact key. The trailing `/1` is its protocol
+/// addressed to this node's identity. The trailing `/1` is its protocol
 /// version, **bump it on any breaking change to the `ConnectMsg` handshake**;
 /// peers on different versions can't negotiate a connection (transport-enforced).
 pub const CONNECT_ALPN: &[u8] = b"rayfish/connect/2";

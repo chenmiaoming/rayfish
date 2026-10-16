@@ -18,8 +18,6 @@ impl Daemon {
                 | IpcMessage::ListFiles
                 | IpcMessage::Connections
                 | IpcMessage::Requests { .. }
-                | IpcMessage::ContactId
-                | IpcMessage::ResolveContact { .. }
                 | IpcMessage::Ping { .. }
                 | IpcMessage::Netcheck
                 | IpcMessage::AliasList { .. }
@@ -698,30 +696,9 @@ impl Daemon {
                 self.registry.admin_add(&network, &identity).await
             }
             IpcMessage::AdminList { network } => self.registry.admin_list(&network),
-            IpcMessage::Connect {
-                contact_id,
-                hostname,
-            } => self.connect(&contact_id, hostname).await,
+            IpcMessage::Connect { peer, hostname } => self.connect(&peer, hostname).await,
             IpcMessage::Connections => self.list_connections(),
             IpcMessage::ApproveConnection { id } => self.approve_connection(&id).await,
-            IpcMessage::ContactId => IpcMessage::ContactIdResponse {
-                contact_id: self.contact_public.to_string(),
-            },
-            IpcMessage::ResolveContact { contact_id } => {
-                let result = async {
-                    let client = dht::create_pkarr_client(
-                        &self.transport.endpoint,
-                        &self.transport.pkarr_relay_url,
-                    )?;
-                    dht::resolve_contact(&client, contact_id).await
-                }
-                .await;
-                match result {
-                    Ok(endpoint_id) => IpcMessage::ContactResolved { endpoint_id },
-                    Err(error) => ipc_err(format!("could not resolve contact: {error:#}")),
-                }
-            }
-            IpcMessage::RotateContact => self.rotate_contact().await,
             IpcMessage::Ping {
                 peer,
                 count,
@@ -759,15 +736,6 @@ fn save_global(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn contact_lookup_is_an_open_read() {
-        let request = IpcMessage::ResolveContact {
-            contact_id: SecretKey::from([7; 32]).public(),
-        };
-        assert!(Daemon::is_open_read(&request));
-        assert!(Daemon::check_authorized(&request, None).is_none());
-    }
 
     /// Like `ray firewall show`, a test only reads the rules, so any local user
     /// may run it.

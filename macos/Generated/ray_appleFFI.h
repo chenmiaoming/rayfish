@@ -288,7 +288,7 @@ void uniffi_ray_apple_fn_method_node_approve_connection(void*_Nonnull ptr, RustB
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_CONNECT_PEER
 #define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_CONNECT_PEER
-RustBuffer uniffi_ray_apple_fn_method_node_connect_peer(void*_Nonnull ptr, RustBuffer contact_id, RustBuffer hostname, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_ray_apple_fn_method_node_connect_peer(void*_Nonnull ptr, RustBuffer peer, RustBuffer hostname, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_CREATE_INVITE

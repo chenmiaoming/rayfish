@@ -428,14 +428,14 @@ private struct DevicesView: View {
                     .buttonStyle(RayfishButtonStyle(kind: .primary))
                     .disabled(!controller.isConnected || controller.isLoading)
             }
-            if let contactId = controller.status?.contactId {
+            if let identity = controller.status?.identity {
                 HStack(spacing: 12) {
-                    Text("Your contact ID").foregroundColor(RayfishTheme.muted)
-                    Text(contactId).font(RayfishTheme.mono(11)).lineLimit(1).truncationMode(.middle)
+                    Text("Your identity").foregroundColor(RayfishTheme.muted)
+                    Text(identity).font(RayfishTheme.mono(11)).lineLimit(1).truncationMode(.middle)
                     Spacer()
                     Button("Copy") {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(contactId, forType: .string)
+                        NSPasteboard.general.setString(identity, forType: .string)
                     }.help("Share this ID so another peer can request a connection.")
                 }.padding(14).rayfishCard()
             }
@@ -532,16 +532,16 @@ private struct MachineRow: View {
 private struct ConnectPeerSheet: View {
     @ObservedObject var controller: TunnelController
     @Environment(\.dismiss) private var dismiss
-    @State private var contactId = ""
+    @State private var peerIdentity = ""
     @State private var hostname = ""
     @State private var message: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Connect to a peer").font(RayfishTheme.heading(18))
-            Text("Paste their contact ID. They must approve the request before a private network is created.")
+            Text("Paste their identity. They must approve the request before a private network is created.")
                 .foregroundColor(RayfishTheme.muted)
-            TextField("Contact ID or nearby peer ID", text: $contactId)
+            TextField("Identity or nearby peer ID", text: $peerIdentity)
                 .font(RayfishTheme.mono(12))
                 .disabled(controller.isLoading || message != nil)
             TextField("This Mac's name (optional)", text: $hostname)
@@ -558,11 +558,11 @@ private struct ConnectPeerSheet: View {
                         Task {
                             let name = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
                             message = await controller.connectPeer(
-                                id: contactId.trimmingCharacters(in: .whitespacesAndNewlines),
+                                id: peerIdentity.trimmingCharacters(in: .whitespacesAndNewlines),
                                 hostname: name.isEmpty ? nil : name)
                         }
                     }.buttonStyle(RayfishButtonStyle(kind: .primary))
-                        .disabled(contactId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || controller.isLoading || !controller.isConnected)
+                        .disabled(peerIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || controller.isLoading || !controller.isConnected)
                 }
             }
         }.rayfishSheet().frame(width: 480)

@@ -513,7 +513,7 @@ public protocol NodeProtocol: AnyObject, Sendable {
 
     func approveConnection(id: String) throws
 
-    func connectPeer(contactId: String, hostname: String?) throws  -> String
+    func connectPeer(peer: String, hostname: String?) throws  -> String
 
     /**
      * Mint a single-use invite that expires after seven days.
@@ -685,10 +685,10 @@ open func approveConnection(id: String)throws   {try rustCallWithError(FfiConver
 }
 }
 
-open func connectPeer(contactId: String, hostname: String?)throws  -> String  {
+open func connectPeer(peer: String, hostname: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeAppleError_lift) {
     uniffi_ray_apple_fn_method_node_connect_peer(self.uniffiClonePointer(),
-        FfiConverterString.lower(contactId),
+        FfiConverterString.lower(peer),
         FfiConverterOptionString.lower(hostname),$0
     )
 })
@@ -1676,14 +1676,14 @@ public func FfiConverterTypeNodeMeshStatus_lower(_ value: NodeMeshStatus) -> Rus
 
 public struct NodeRequestStatus {
     public var pendingRequests: [JoinRequest]
-    public var contactId: String?
+    public var identity: String?
     public var connectionRequests: [ConnectionRequest]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(pendingRequests: [JoinRequest], contactId: String?, connectionRequests: [ConnectionRequest]) {
+    public init(pendingRequests: [JoinRequest], identity: String?, connectionRequests: [ConnectionRequest]) {
         self.pendingRequests = pendingRequests
-        self.contactId = contactId
+        self.identity = identity
         self.connectionRequests = connectionRequests
     }
 }
@@ -1698,7 +1698,7 @@ extension NodeRequestStatus: Equatable, Hashable {
         if lhs.pendingRequests != rhs.pendingRequests {
             return false
         }
-        if lhs.contactId != rhs.contactId {
+        if lhs.identity != rhs.identity {
             return false
         }
         if lhs.connectionRequests != rhs.connectionRequests {
@@ -1709,7 +1709,7 @@ extension NodeRequestStatus: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(pendingRequests)
-        hasher.combine(contactId)
+        hasher.combine(identity)
         hasher.combine(connectionRequests)
     }
 }
@@ -1724,14 +1724,14 @@ public struct FfiConverterTypeNodeRequestStatus: FfiConverterRustBuffer {
         return
             try NodeRequestStatus(
                 pendingRequests: FfiConverterSequenceTypeJoinRequest.read(from: &buf),
-                contactId: FfiConverterOptionString.read(from: &buf),
+                identity: FfiConverterOptionString.read(from: &buf),
                 connectionRequests: FfiConverterSequenceTypeConnectionRequest.read(from: &buf)
         )
     }
 
     public static func write(_ value: NodeRequestStatus, into buf: inout [UInt8]) {
         FfiConverterSequenceTypeJoinRequest.write(value.pendingRequests, into: &buf)
-        FfiConverterOptionString.write(value.contactId, into: &buf)
+        FfiConverterOptionString.write(value.identity, into: &buf)
         FfiConverterSequenceTypeConnectionRequest.write(value.connectionRequests, into: &buf)
     }
 }
@@ -2770,7 +2770,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ray_apple_checksum_method_node_approve_connection() != 5866) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ray_apple_checksum_method_node_connect_peer() != 32943) {
+    if (uniffi_ray_apple_checksum_method_node_connect_peer() != 63408) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_apple_checksum_method_node_create_invite() != 34104) {
