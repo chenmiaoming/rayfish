@@ -523,6 +523,21 @@ impl ExitServer {
         self.nets.store(Arc::default());
     }
 
+    /// Re-read the host's addresses and on-link prefixes that transit is refused
+    /// to. Runs on every reconcile and on the daemon's periodic kernel check, so a
+    /// new lease or interface is covered within one tick instead of at the next
+    /// `ray up`. Spawns a process; callers keep it off the async runtime.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    pub fn refresh_host_interfaces(&self) {
+        let host = host_interfaces();
+        if **self.self_addrs.load() != host.addrs {
+            self.set_self_addrs(host.addrs);
+        }
+        if **self.on_link.load() != host.on_link {
+            self.set_on_link(host.on_link);
+        }
+    }
+
     /// Reconcile the kernel forwarding/NAT with the current offer state: install it
     /// when we offer an exit on some network, remove it when we don't. Both
     /// directions are idempotent, so this is safe to call on every change.
@@ -536,9 +551,7 @@ impl ExitServer {
     pub fn apply_os(&self, tun_name: &str) -> Option<String> {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
         if self.is_active() {
-            let host = host_interfaces();
-            self.set_self_addrs(host.addrs);
-            self.set_on_link(host.on_link);
+            self.refresh_host_interfaces();
             // Re-read rather than cache: an uplink gains or loses IPv6 with a
             // lease or a link change, and the claim we publish has to follow.
             self.v6_uplink.store(has_v6_uplink(), Ordering::Relaxed);
@@ -932,7 +945,10 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux::*;
 #[cfg(target_os = "linux")]
-pub use linux::{disable, install_client_routing, teardown_client_routing};
+pub use linux::{
+    client_state_intact, disable, install_client_routing, reassert_forward_firewall,
+    server_state_intact, teardown_client_routing,
+};
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 mod pf;
@@ -1482,6 +1498,30 @@ mod tests {
             );
         }
         assert!(!rules.contains(" drop"), "{rules}");
+    }
+
+    /// The periodic check sees a full rule set as intact, and a missing piece or
+    /// an older build's unmasked bypass as broken.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn client_rules_are_checked_for_every_piece() {
+        let full = "\
+0:\tfrom all lookup local
+99:\tfrom 2001:db8::5 lookup main
+100:\tfrom all fwmark 0x7261/0x7261 lookup main
+101:\tfrom all lookup main suppress_prefixlength 0
+102:\tfrom all lookup 29793
+32766:\tfrom all lookup main
+";
+        assert!(client_rules_present(full));
+        assert!(!client_rules_present(
+            &full.replace("0x7261/0x7261", "0x7261")
+        ));
+        assert!(!client_rules_present(&full.replace("102:", "103:")));
+        assert!(!client_rules_present(&full.replace(
+            "101:\tfrom all lookup main suppress_prefixlength 0\n",
+            ""
+        )));
     }
 
     /// Only real interfaces at `accept_ra=1` are raised: not the templates, not

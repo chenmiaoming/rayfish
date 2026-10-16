@@ -103,6 +103,16 @@ pub(super) fn enable(tun_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Re-add the host-firewall forwarding exceptions if a firewall reload dropped
+/// them, for the periodic kernel check. Quiet when nothing changed, and only a
+/// debug line when they cannot be added: [`enable`] already warned with the fix.
+#[cfg(target_os = "linux")]
+pub fn reassert_forward_firewall(tun_name: &str) {
+    if let Some(fix) = forward_fw::allow(tun_name).manual_fix {
+        tracing::debug!(fix, "host firewall still drops exit-node forwarding");
+    }
+}
+
 /// Every interface's own IPv6 `forwarding` value (and `default`'s), for the
 /// snapshot. `all` is left out: it is the snapshot's `v6`.
 #[cfg(target_os = "linux")]
@@ -187,6 +197,64 @@ pub(super) fn ra_interfaces_to_raise(current: &[(String, String)], tun_name: &st
         })
         .map(|(name, _)| name.clone())
         .collect()
+}
+
+/// Whether the gateway's kernel state is still what [`enable`] left: forwarding on
+/// and our table loaded. A firewall reload or `nft flush ruleset` removes the
+/// table, and with it the masquerade, without telling us.
+#[cfg(target_os = "linux")]
+pub fn server_state_intact() -> bool {
+    read_sysctl(V6_FORWARD) == "1" && nft_table_exists(SERVER_TABLE)
+}
+
+/// Whether the client full tunnel is still installed: our nft table, and for each
+/// family the tunnel carries, the bypass and catch-all rules and the tunnel
+/// table's default route.
+#[cfg(target_os = "linux")]
+pub fn client_state_intact(carries: ExitFamilies) -> bool {
+    nft_table_exists(CLIENT_TABLE)
+        && tunnel_families(carries).iter().all(|family| {
+            ip_output(&[family, "rule", "show"]).is_some_and(|show| client_rules_present(&show))
+                && ip_output(&[family, "route", "show", "table", EXIT_TABLE])
+                    .is_some_and(|routes| routes.lines().any(|l| l.starts_with("default")))
+        })
+}
+
+/// Whether `ip rule show` output still has the rules the tunnel cannot work
+/// without: the mark bypass, the `main` lookup, and the catch-all.
+#[cfg(target_os = "linux")]
+pub(super) fn client_rules_present(show: &str) -> bool {
+    let mark = fwmark_selector();
+    let at = |pref: &str, want: &[&str]| {
+        show.lines().any(|line| {
+            line.split_once(':').is_some_and(|(p, rest)| {
+                let f: Vec<&str> = rest.split_whitespace().collect();
+                p.trim() == pref && f == want
+            })
+        })
+    };
+    at(
+        PREF_BYPASS,
+        &["from", "all", "fwmark", &mark, "lookup", "main"],
+    ) && at(
+        PREF_MAIN,
+        &[
+            "from",
+            "all",
+            "lookup",
+            "main",
+            "suppress_prefixlength",
+            "0",
+        ],
+    ) && parse_catch_all(show)
+}
+
+#[cfg(target_os = "linux")]
+fn nft_table_exists(table: &str) -> bool {
+    Command::new("nft")
+        .args(["list", "table", "inet", table])
+        .output()
+        .is_ok_and(|out| out.status.success())
 }
 
 /// The nftables ruleset masquerading overlay traffic out of `tun_name`'s host.
