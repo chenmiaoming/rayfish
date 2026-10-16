@@ -2658,6 +2658,111 @@ mod accept_handler_tests {
         endpoint.close().await;
     }
 
+    /// `ray block <user>` covers that user's devices for what they already
+    /// queued, not only for new dials.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn blocking_a_user_drops_what_its_devices_queued() {
+        let env = TestConfigDir::new();
+        let (endpoint, registry) = test_registry(env.dir.path()).await;
+        let primary = SecretKey::from_bytes(&[42u8; 32]).public();
+        let laptop = SecretKey::from_bytes(&[43u8; 32]).public();
+        let other = SecretKey::from_bytes(&[44u8; 32]).public();
+        hold_network(
+            &registry,
+            "sample-net",
+            NetworkRole::Member,
+            vec![
+                roster_member(laptop, Some(primary)),
+                roster_member(other, None),
+            ],
+            vec![],
+        );
+        let connect = ConnectService::new(registry);
+        for requester in [laptop, other] {
+            connect.pending_connects.insert(
+                requester,
+                connect_service::PendingConnect {
+                    from_endpoint: requester,
+                    hostname: None,
+                    requested_at: Instant::now(),
+                    stranger: false,
+                },
+            );
+            assert!(
+                connect
+                    .receive_offer(
+                        requester,
+                        inbound::Inbound::Known,
+                        sample_net(),
+                        invite_from(requester)
+                    )
+                    .await
+            );
+        }
+        connect.block(primary).await.unwrap();
+        assert!(!connect.pending_connects.contains_key(&laptop));
+        assert!(connect.pending_connects.contains_key(&other));
+        let coordinators: Vec<_> = invitations_of(&connect)
+            .await
+            .into_iter()
+            .map(|i| i.coordinator)
+            .collect();
+        assert_eq!(coordinators, vec![other]);
+        endpoint.close().await;
+    }
+
+    /// A dialer admitted when it connected, then blocked while it held its
+    /// stream open, must not get its request queued.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_block_made_mid_dial_refuses_the_request() {
+        use iroh::address_lookup::memory::MemoryLookup;
+        let env = TestConfigDir::new();
+        let lookup = MemoryLookup::new();
+        let receiver = loopback_endpoint(MemoryLookup::new()).await;
+        let dialer = loopback_endpoint(lookup.clone()).await;
+        lookup.add_endpoint_info(receiver.addr());
+        let registry = registry_on(&receiver, &env.dir.path().join("blobs")).await;
+        let connect = Arc::new(ConnectService::new(registry));
+        let server = tokio::spawn({
+            let connect = Arc::clone(&connect);
+            let receiver = receiver.clone();
+            async move {
+                let conn = receiver.accept().await.unwrap().await.unwrap();
+                connect.accept_connect_request(conn).await;
+            }
+        });
+        let conn =
+            transport::connect_to_peer_with_alpn(&dialer, receiver.id(), transport::CONNECT_ALPN)
+                .await
+                .unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        // Let the handler pass its first gate and wait on the stream.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        config::update_settings(|cfg| {
+            cfg.blocked = vec![dialer.id()];
+            Ok(())
+        })
+        .unwrap();
+        control::send_framed(
+            &mut send,
+            &control::ConnectMsg::Request {
+                from_identity: dialer.id(),
+                from_endpoint: dialer.id(),
+                hostname: None,
+            },
+        )
+        .await
+        .unwrap();
+        let reply = control::recv_framed::<control::ConnectMsg>(&mut recv).await;
+        server.await.unwrap();
+        assert!(reply.is_err(), "{reply:?}");
+        assert!(connect.pending_connects.is_empty());
+        receiver.close().await;
+        dialer.close().await;
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn deny_removes_the_request_and_blocks_the_sender() {
@@ -2874,10 +2979,144 @@ mod accept_handler_tests {
         endpoint.close().await;
     }
 
-    /// A loopback-only endpoint on the connect ALPN, found through `lookup`.
+    /// A coordinator that refuses the code (revoked, used, expired) ends the
+    /// invitation; any other failed join leaves it to retry.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_rejected_invite_leaves_the_inbox() {
+        let env = TestConfigDir::new();
+        let (endpoint, connect) = offline_connect_service(env.dir.path()).await;
+        let sender = SecretKey::from_bytes(&[45u8; 32]).public();
+        assert!(
+            connect
+                .receive_offer(
+                    sender,
+                    inbound::Inbound::Known,
+                    sample_net(),
+                    invite_from(sender)
+                )
+                .await
+        );
+        let id = invitations_of(&connect).await[0].id.clone();
+        let entry = connect.invitation_entry(&id).await;
+        let unreachable = ipc_err("failed to reach the coordinator".to_string());
+        let reply = connect.settle_accept(&entry, unreachable).await;
+        assert!(matches!(reply, IpcMessage::Error { .. }), "{reply:?}");
+        assert_eq!(invitations_of(&connect).await.len(), 1);
+        let revoked = ipc_err(format!(
+            "join denied: {}: invite revoked",
+            crate::invite::INVITE_REJECTED
+        ));
+        let reply = connect.settle_accept(&entry, revoked).await;
+        assert!(
+            matches!(&reply, IpcMessage::Error { message } if message.contains("revoked or has expired")),
+            "{reply:?}"
+        );
+        assert!(invitations_of(&connect).await.is_empty());
+        endpoint.close().await;
+    }
+
+    /// A recipient that predates invite delivery shares no ALPN for it: the
+    /// sender is told to share the code, and the sweep stops dialing it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_old_recipient_is_recorded_and_not_retried() {
+        let env = TestConfigDir::new();
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        let (sender, connect, _) = delivering_service(env.dir.path(), lookup.clone()).await;
+        let old = loopback_endpoint_on(
+            iroh::address_lookup::memory::MemoryLookup::new(),
+            vec![transport::CONNECT_ALPN.to_vec()],
+        )
+        .await;
+        lookup.add_endpoint_info(old.addr());
+        // Accept like an old node's router, which fails the handshake.
+        let accepting = tokio::spawn({
+            let old = old.clone();
+            async move {
+                while let Some(incoming) = old.accept().await {
+                    let _ = incoming.await;
+                }
+            }
+        });
+        let message = reply_text(connect.deliver_invite("sample-net", old.id()).await);
+        assert!(message.contains("older Rayfish"), "{message}");
+        let store = crate::invite::InviteStore::load("sample-net").unwrap();
+        assert!(store.pending_deliveries().is_empty());
+        assert_eq!(store.list().len(), 1);
+        // A manual retry dials again (it may have upgraded) and reuses the invite.
+        let message = reply_text(connect.deliver_invite("sample-net", old.id()).await);
+        assert!(message.contains("older Rayfish"), "{message}");
+        assert_eq!(
+            crate::invite::InviteStore::load("sample-net")
+                .unwrap()
+                .list()
+                .len(),
+            1
+        );
+        sender.close().await;
+        old.close().await;
+        accepting.abort();
+    }
+
+    /// An offer is only taken on the invite ALPN, a request only on connect.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_offer_on_the_connect_channel_is_refused() {
+        let env = TestConfigDir::new();
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        let (receiver, inbox) = receiving_service(env.dir.path()).await;
+        let dialer = loopback_endpoint(lookup.clone()).await;
+        lookup.add_endpoint_info(receiver.addr());
+        let server = tokio::spawn({
+            let inbox = Arc::clone(&inbox);
+            let receiver = receiver.clone();
+            async move {
+                let conn = receiver.accept().await.unwrap().await.unwrap();
+                inbox.accept_connect_request(conn).await;
+            }
+        });
+        let conn =
+            transport::connect_to_peer_with_alpn(&dialer, receiver.id(), transport::CONNECT_ALPN)
+                .await
+                .unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        control::send_framed(
+            &mut send,
+            &control::ConnectMsg::InviteOffer {
+                network: sample_net(),
+                code: invite_from(dialer.id()),
+            },
+        )
+        .await
+        .unwrap();
+        let reply = control::recv_framed::<control::ConnectMsg>(&mut recv).await;
+        server.await.unwrap();
+        assert!(reply.is_err(), "{reply:?}");
+        assert!(invitations_of(&inbox).await.is_empty());
+        receiver.close().await;
+        dialer.close().await;
+    }
+
+    /// A loopback-only endpoint on the connect and invite ALPNs, found through
+    /// `lookup`.
     async fn loopback_endpoint(lookup: iroh::address_lookup::memory::MemoryLookup) -> Endpoint {
+        loopback_endpoint_on(
+            lookup,
+            vec![
+                transport::CONNECT_ALPN.to_vec(),
+                transport::INVITE_ALPN.to_vec(),
+            ],
+        )
+        .await
+    }
+
+    async fn loopback_endpoint_on(
+        lookup: iroh::address_lookup::memory::MemoryLookup,
+        alpns: Vec<Vec<u8>>,
+    ) -> Endpoint {
         Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .alpns(vec![transport::CONNECT_ALPN.to_vec()])
+            .alpns(alpns)
             .address_lookup(lookup)
             .clear_ip_transports()
             .bind_addr((Ipv4Addr::LOCALHOST, 0))
@@ -4363,6 +4602,68 @@ mod headless_tests {
         assert_eq!(config::load().unwrap().file_auto_accept_peers, vec![second]);
         assert!(!daemon.files.should_auto_accept_file(first));
         assert!(daemon.files.should_auto_accept_file(second));
+    }
+
+    /// The app bridges block, unblock and set the inbound policy through
+    /// `config_set`, the same arm `ray block` and `ray config set` use.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn embedder_config_set_blocks_unblocks_and_sets_inbound() {
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvVarGuard::set("RAYFISH_CONFIG_DIR", tmp.path());
+        let daemon = tokio::time::timeout(Duration::from_secs(30), build_headless(false))
+            .await
+            .expect("build_headless should not hang")
+            .expect("build_headless should succeed");
+        let peer = SecretKey::from_bytes(&[41u8; 32]).public();
+
+        let msg = daemon
+            .config_set(GlobalKey::Blocked, &peer.to_string())
+            .await;
+        assert!(matches!(msg, IpcMessage::Ok { .. }), "{msg:?}");
+        assert_eq!(config::load_inbound().unwrap().blocked, vec![peer]);
+
+        let msg = daemon
+            .config_set(GlobalKey::Blocked, &format!("-{peer}"))
+            .await;
+        assert!(matches!(msg, IpcMessage::Ok { .. }), "{msg:?}");
+        assert!(config::load_inbound().unwrap().blocked.is_empty());
+
+        let msg = daemon
+            .config_set(GlobalKey::Inbound, config::InboundPolicy::Known.as_ref())
+            .await;
+        assert!(matches!(msg, IpcMessage::Ok { .. }), "{msg:?}");
+        assert_eq!(
+            config::load_inbound().unwrap().inbound,
+            config::InboundPolicy::Known
+        );
+
+        // One-peer edits refuse what a raw list value would treat as
+        // "clear" or "remove", so a stray comma cannot empty the list.
+        daemon
+            .config_set(GlobalKey::Blocked, &peer.to_string())
+            .await;
+        for bad in [",", " ", "-x", "a,b"] {
+            let msg = daemon.edit_peer_list(GlobalKey::Blocked, bad, false).await;
+            assert!(matches!(msg, IpcMessage::Error { .. }), "{bad:?}: {msg:?}");
+        }
+        assert_eq!(config::load_inbound().unwrap().blocked, vec![peer]);
+        let msg = daemon
+            .edit_peer_list(GlobalKey::Blocked, &peer.to_string(), true)
+            .await;
+        assert!(matches!(msg, IpcMessage::Ok { .. }), "{msg:?}");
+        assert!(config::load_inbound().unwrap().blocked.is_empty());
+        let msg = daemon
+            .edit_peer_list(GlobalKey::Inbound, &peer.to_string(), false)
+            .await;
+        assert!(matches!(msg, IpcMessage::Error { .. }), "{msg:?}");
+
+        let msg = daemon.config_set(GlobalKey::Blocked, "no-such-peer").await;
+        assert!(
+            matches!(&msg, IpcMessage::Error { message } if message.contains("unknown peer")),
+            "{msg:?}"
+        );
     }
 
     /// `net_config_apply` gates on the network's presence ON DISK, not in the

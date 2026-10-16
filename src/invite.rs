@@ -96,7 +96,16 @@ pub struct Delivery {
     pub code: InviteCode,
     /// The recipient's daemon acknowledged storing the offer.
     pub delivered: bool,
+    /// The recipient runs a Rayfish too old to receive offers. The sweep
+    /// skips it; a manual delivery tries again in case it has upgraded.
+    #[serde(default)]
+    pub unsupported: bool,
 }
+
+/// How a coordinator's join denial starts when the presented invite is
+/// unknown, used, revoked or expired. A recipient reads it to drop a dead
+/// invitation, so the wording is shared, not repeated. 0.5.9 sends it too.
+pub const INVITE_REJECTED: &str = "invite rejected";
 
 /// How long a privately delivered invite stays redeemable.
 pub const DELIVERY_TTL: Duration = Duration::from_secs(7 * 86400);
@@ -374,6 +383,7 @@ impl InviteStore {
             recipient,
             code: InviteCode::encode(&network_key, &coordinator, &secret),
             delivered: false,
+            unsupported: false,
         };
         let invite = Invite::new(&secret, DELIVERY_TTL, None, Some(delivery));
         self.invites.push(invite.clone());
@@ -382,24 +392,35 @@ impl InviteStore {
     }
 
     pub fn mark_delivered(&mut self, id: &str) -> Result<()> {
-        let delivery = self
-            .invites
-            .iter_mut()
-            .find(|i| i.id == id)
-            .and_then(|i| i.delivery.as_mut())
-            .context("delivery invite missing")?;
+        let delivery = self.delivery_mut(id)?;
         delivery.delivered = true;
+        delivery.unsupported = false;
         self.save()
     }
 
-    /// Recipients with a live delivery that has not been acknowledged yet.
+    /// Record that the recipient cannot receive offers, so the sweep stops.
+    pub fn mark_unsupported(&mut self, id: &str) -> Result<()> {
+        self.delivery_mut(id)?.unsupported = true;
+        self.save()
+    }
+
+    fn delivery_mut(&mut self, id: &str) -> Result<&mut Delivery> {
+        self.invites
+            .iter_mut()
+            .find(|i| i.id == id)
+            .and_then(|i| i.delivery.as_mut())
+            .context("delivery invite missing")
+    }
+
+    /// Recipients with a live delivery that has not been acknowledged yet
+    /// and that can receive one.
     pub fn pending_deliveries(&self) -> Vec<EndpointId> {
         let now = now_secs();
         self.invites
             .iter()
             .filter(|i| i.is_live(now))
             .filter_map(|i| i.delivery.as_ref())
-            .filter(|d| !d.delivered)
+            .filter(|d| !d.delivered && !d.unsupported)
             .map(|d| d.recipient)
             .collect()
     }

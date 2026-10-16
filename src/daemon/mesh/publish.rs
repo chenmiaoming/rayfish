@@ -595,6 +595,35 @@ impl Daemon {
     pub async fn approve_connection(&self, id_prefix: &str) -> IpcMessage {
         self.connect.approve_connection(id_prefix).await
     }
+
+    /// `ray connect deny <id>`: drop a pending request and block the requester.
+    pub async fn deny_connection(&self, id_prefix: &str) -> IpcMessage {
+        self.connect.deny_connection(id_prefix).await
+    }
+
+    /// `ray invitations`: invitations received from coordinators.
+    pub async fn list_invitations(&self) -> IpcMessage {
+        self.connect.list_invitations().await
+    }
+
+    /// `ray invitations accept <id>`: join the invited network.
+    pub async fn accept_invitation(
+        &self,
+        id: &str,
+        hostname: Option<ipc::MachineHostname>,
+    ) -> IpcMessage {
+        self.connect.accept_invitation(id, hostname).await
+    }
+
+    /// `ray invitations decline <id>`.
+    pub async fn decline_invitation(&self, id: &str) -> IpcMessage {
+        self.connect.decline_invitation(id).await
+    }
+
+    /// Deliver an invite for `network` straight to `recipient`'s identity.
+    pub async fn deliver_invite(&self, network: &str, recipient: EndpointId) -> IpcMessage {
+        self.connect.deliver_invite(network, recipient).await
+    }
 }
 
 #[cfg(test)]

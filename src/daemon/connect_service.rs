@@ -2,7 +2,7 @@
 //! unit instead of living loose inside `ProtocolRouter`.
 //!
 //! Holds the three connect maps (pending/approved/outgoing) and the
-//! `CONNECT_ALPN` accept arm. The `ProtocolRouter` accept loop holds an
+//! `CONNECT_ALPN` and `INVITE_ALPN` accept arm. The `ProtocolRouter` accept loop holds an
 //! `Arc<ConnectService>` and delegates to it; `Daemon` holds the same handle
 //! for the IPC-side connect commands (`connect`/`connections approve`/…), which
 //! mint and join networks over the core registry.
@@ -18,6 +18,10 @@ use super::*;
 /// at the cap the oldest unanswered request makes way, on the grounds that a
 /// request nobody approved in that long is the one least likely to be waited on.
 pub(crate) const MAX_PENDING_CONNECTS: usize = 256;
+
+/// How long a dialer past the gate has to send its one message. A stream held
+/// open and idle otherwise ties up a handler task indefinitely.
+const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A pending incoming `ray connect` request, awaiting `ray connect approve`.
 /// Keyed by the requester's authenticated transport endpoint id.
@@ -357,11 +361,15 @@ impl ConnectService {
         IpcMessage::PendingRequests { requests }
     }
 
-    /// Forget anything queued from a now-blocked identity.
+    /// Forget anything queued from a now-blocked identity, including the
+    /// devices a roster binds to a blocked user.
     pub(crate) async fn drop_blocked(&self, blocked: &[EndpointId]) {
+        let is_blocked = |remote| {
+            inbound::classify(&self.registry, blocked, remote) == inbound::Inbound::Blocked
+        };
         self.pending_connects
-            .retain(|endpoint, _| !blocked.contains(endpoint));
-        self.drop_blocked_invitations(blocked).await;
+            .retain(|endpoint, _| !is_blocked(*endpoint));
+        self.drop_blocked_invitations(is_blocked).await;
     }
 
     /// Add `remote` to the block list and forget what it has queued.
@@ -405,6 +413,25 @@ impl ConnectService {
         }
     }
 
+    /// The dialer's class when the inbound gate admits it right now. An
+    /// unreadable settings file must not quietly lift a block, so it refuses
+    /// everyone until it is fixed.
+    fn admitted(&self, remote: EndpointId) -> Option<inbound::Inbound> {
+        let cfg = match config::load_inbound() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "connect channel closed: settings unreadable");
+                return None;
+            }
+        };
+        let class = inbound::classify(&self.registry, &cfg.blocked, remote);
+        if !inbound::admits(cfg.inbound, class) {
+            tracing::debug!(peer = %remote.fmt_short(), ?class, "connect dial refused");
+            return None;
+        }
+        Some(class)
+    }
+
     /// Remove and return the pending request named by `selector`.
     fn take_pending(&self, selector: &str) -> Result<PendingConnect, String> {
         let req = self.find_pending(selector)?;
@@ -444,37 +471,50 @@ impl ConnectService {
     /// `CONNECT_ALPN`: handle a `ray connect` friend request. Binds the request
     /// to the dialing identity, replies `Approved` if already accepted
     /// (idempotent), else queues it as `Pending` for `ray connect approve`.
+    /// `INVITE_ALPN`: store an invitation offer. Each channel takes only its
+    /// own message.
     ///
     /// The inbound gate runs first, on the authenticated `remote_id`: a blocked
     /// or refused dialer is closed before anything is read or written.
     pub(crate) async fn accept_connect_request(&self, conn: Connection) {
         let remote_id = conn.remote_id();
-        // An unreadable settings file must not quietly lift a block, so it
-        // refuses everyone until it is fixed.
-        let cfg = match config::load_inbound() {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                tracing::warn!(error = %e, "connect channel closed: settings unreadable");
-                conn.close(0u32.into(), b"");
-                return;
-            }
-        };
-        let class = inbound::classify(&self.registry, &cfg.blocked, remote_id);
-        if !inbound::admits(cfg.inbound, class) {
-            tracing::debug!(peer = %remote_id.fmt_short(), ?class, "connect dial refused");
+        if self.admitted(remote_id).is_none() {
             conn.close(0u32.into(), b"");
             return;
         }
-        let stranger = class == inbound::Inbound::Stranger;
         match conn.accept_bi().await {
             Ok((mut send, mut recv)) => {
-                let request: control::ConnectMsg = match control::recv_framed(&mut recv).await {
-                    Ok(r) => r,
-                    Err(e) => {
+                let read = tokio::time::timeout(
+                    CONNECT_READ_TIMEOUT,
+                    control::recv_framed::<control::ConnectMsg>(&mut recv),
+                )
+                .await;
+                let request = match read {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
                         tracing::warn!(error = %e, peer = %remote_id.fmt_short(), "failed to read connect request");
                         return;
                     }
+                    Err(_) => {
+                        tracing::debug!(peer = %remote_id.fmt_short(), "connect request timed out");
+                        return;
+                    }
                 };
+                // Gate again: a block or policy change made while this dialer
+                // held its stream open must apply to what it sends.
+                let Some(class) = self.admitted(remote_id) else {
+                    conn.close(0u32.into(), b"");
+                    return;
+                };
+                let stranger = class == inbound::Inbound::Stranger;
+                // Each message has its own channel: offers ride `INVITE_ALPN`
+                // and requests `CONNECT_ALPN`.
+                let invite_channel = conn.alpn() == transport::INVITE_ALPN;
+                if matches!(request, control::ConnectMsg::InviteOffer { .. }) != invite_channel {
+                    tracing::debug!(peer = %remote_id.fmt_short(), "connect message on the wrong channel");
+                    conn.close(0u32.into(), b"");
+                    return;
+                }
                 if let control::ConnectMsg::InviteOffer { network, code } = request {
                     if !self.receive_offer(remote_id, class, network, code).await {
                         conn.close(0u32.into(), b"");

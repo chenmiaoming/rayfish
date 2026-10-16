@@ -5,6 +5,8 @@
 //! identity and counts as delivered only when the recipient's daemon acks it.
 //! An unreachable recipient is not an error: the sweep retries until the
 //! invite expires, is redeemed, or is revoked, and never mints a new one.
+//! Offers ride their own ALPN, so a recipient too old to read one fails the
+//! handshake: that is recorded and the sweep leaves it alone.
 
 use super::*;
 use crate::invite::{Invite, InviteStore};
@@ -25,6 +27,14 @@ impl DeliveryOutcome {
             Self::Done(message) | Self::Queued(message) => message,
         }
     }
+}
+
+/// What the recipient's node did with a dial.
+enum Reply {
+    /// Stored the offer and acked it.
+    Stored,
+    /// Shares no ALPN with us: it predates invite delivery.
+    TooOld,
 }
 
 /// Whether a delivery may mint a new invite. The sweep never does: if the
@@ -103,30 +113,52 @@ impl ConnectService {
         }
         let offer = control::ConnectMsg::InviteOffer {
             network: ipc::NetworkName::new(network.to_string()),
-            code: delivery.code,
+            code: delivery.code.clone(),
         };
-        let acked = tokio::time::timeout(DELIVERY_TIMEOUT, async {
-            let conn = transport::connect_to_peer_with_alpn(
+        let reply = tokio::time::timeout(DELIVERY_TIMEOUT, async {
+            let conn = match transport::connect_to_peer_with_alpn(
                 &self.transport.endpoint,
                 recipient,
-                transport::CONNECT_ALPN,
+                transport::INVITE_ALPN,
             )
-            .await?;
+            .await
+            {
+                Ok(conn) => conn,
+                Err(e) if transport::is_alpn_mismatch(&format!("{e:#}")) => {
+                    return Ok(Reply::TooOld);
+                }
+                Err(e) => return Err(e),
+            };
             let (mut send, mut recv) = conn.open_bi().await?;
             control::send_framed(&mut send, &offer).await?;
             // Never echo a peer reply: only the ack shape matters.
             match control::recv_framed::<control::ConnectMsg>(&mut recv).await? {
-                control::ConnectMsg::Pending => Ok(()),
+                control::ConnectMsg::Pending => Ok(Reply::Stored),
                 _ => anyhow::bail!("recipient did not acknowledge"),
             }
         })
         .await;
-        if !matches!(acked, Ok(Ok(()))) {
-            return Ok(DeliveryOutcome::Queued(format!(
-                "{} is unreachable; invite {} queued and retried until it expires",
-                recipient.fmt_short(),
-                invite.id
-            )));
+        match reply {
+            Ok(Ok(Reply::Stored)) => {}
+            Ok(Ok(Reply::TooOld)) => {
+                {
+                    let _guard = invite_lock.lock().await;
+                    InviteStore::load(network)?.mark_unsupported(&invite.id)?;
+                }
+                // The coordinator's own credential, shown only to its operator.
+                return Ok(DeliveryOutcome::Done(format!(
+                    "{} runs an older Rayfish that cannot receive invites; send them this code instead: {}",
+                    recipient.fmt_short(),
+                    delivery.code.as_str()
+                )));
+            }
+            _ => {
+                return Ok(DeliveryOutcome::Queued(format!(
+                    "{} is unreachable; invite {} queued and retried until it expires",
+                    recipient.fmt_short(),
+                    invite.id
+                )));
+            }
         }
         {
             let _guard = invite_lock.lock().await;

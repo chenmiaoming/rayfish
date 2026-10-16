@@ -131,6 +131,7 @@ fn initial_alpns() -> Vec<Vec<u8>> {
         transport::FILES_ALPN.to_vec(),
         PAIR_ALPN.to_vec(),
         transport::CONNECT_ALPN.to_vec(),
+        transport::INVITE_ALPN.to_vec(),
         crate::management::ALPN.to_vec(),
         crate::management::V2_ALPN.to_vec(),
         crate::management::LEGACY_ALPN.to_vec(),

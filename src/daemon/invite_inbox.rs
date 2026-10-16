@@ -32,7 +32,7 @@ const MAX_PENDING_STRANGER: usize = 2;
 const MAX_PENDING_STRANGERS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReceivedInvitation {
+pub(super) struct ReceivedInvitation {
     id: String,
     network: NetworkName,
     coordinator: EndpointId,
@@ -176,10 +176,10 @@ impl Inbox {
 
     /// Forget pending offers from blocked senders. Answered entries stay so a
     /// retry cannot resurface a decline.
-    fn drop_from(&mut self, blocked: &[EndpointId]) -> bool {
+    fn drop_from(&mut self, blocked: impl Fn(EndpointId) -> bool) -> bool {
         let before = self.invitations.len();
         self.invitations
-            .retain(|i| !(i.is_pending() && blocked.contains(&i.coordinator)));
+            .retain(|i| !(i.is_pending() && blocked(i.coordinator)));
         self.invitations.len() != before
     }
 }
@@ -288,6 +288,15 @@ impl ConnectService {
                 false,
             )
             .await;
+        self.settle_accept(&invitation, reply).await
+    }
+
+    /// Record what the join did to an accepted invitation.
+    pub(super) async fn settle_accept(
+        &self,
+        invitation: &ReceivedInvitation,
+        reply: IpcMessage,
+    ) -> IpcMessage {
         // `Ok` is a closed network that queued the join; its retry loop now
         // holds the secret, so a second accept must not start another.
         if matches!(reply, IpcMessage::Joined { .. } | IpcMessage::Ok { .. }) {
@@ -304,7 +313,38 @@ impl ConnectService {
                 tracing::warn!(error = %e, "joined, but could not mark the invitation accepted");
             }
         }
-        reply
+        match reply {
+            IpcMessage::Error { message } if message.contains(crate::invite::INVITE_REJECTED) => {
+                self.drop_dead_invitation(invitation).await
+            }
+            reply => reply,
+        }
+    }
+
+    /// The coordinator refused the invitation's code: it was revoked, used or
+    /// has expired. Nothing can redeem it, so it leaves the inbox.
+    async fn drop_dead_invitation(&self, invitation: &ReceivedInvitation) -> IpcMessage {
+        let dropped = self
+            .edit_inbox(|inbox| {
+                inbox.invitations.retain(|i| i.id != invitation.id);
+                Ok(())
+            })
+            .await;
+        if let Err(e) = dropped {
+            tracing::warn!(error = %e, "could not drop a revoked invitation");
+        }
+        ipc_err(format!(
+            "the invitation to {} was revoked or has expired; ask {} for a new one",
+            invitation.network,
+            invitation.coordinator.fmt_short()
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn invitation_entry(&self, id: &str) -> ReceivedInvitation {
+        self.read_inbox(|inbox| Ok(inbox.find(id)?.clone()))
+            .await
+            .expect("the invitation is in the inbox")
     }
 
     /// Refuse an invitation and block its sender on the connect channel.
@@ -334,7 +374,7 @@ impl ConnectService {
     }
 
     /// Drop pending offers from blocked senders.
-    pub(super) async fn drop_blocked_invitations(&self, blocked: &[EndpointId]) {
+    pub(super) async fn drop_blocked_invitations(&self, blocked: impl Fn(EndpointId) -> bool) {
         let dropped = self
             .edit_inbox(|inbox| {
                 inbox.drop_from(blocked);
@@ -458,7 +498,7 @@ mod tests {
         inbox.receive(offer_from(1, 1, false, 1000), 1000).unwrap();
         inbox.receive(offer_from(1, 2, false, 1000), 1000).unwrap();
         inbox.invitations[0].status = InvitationStatus::Declined;
-        assert!(inbox.drop_from(&[id(1)]));
+        assert!(inbox.drop_from(|remote| remote == id(1)));
         assert_eq!(inbox.invitations.len(), 1);
         assert_eq!(inbox.invitations[0].status, InvitationStatus::Declined);
     }

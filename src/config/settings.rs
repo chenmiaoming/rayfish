@@ -33,6 +33,22 @@ pub fn parse_bool(value: &str, default: bool) -> Result<bool> {
     }
 }
 
+/// The `config set` value that adds or removes exactly one peer in a peer-list
+/// key. A raw value is a comma list where `-` removes and an empty one clears
+/// the list, so a single-peer edit must be none of those.
+pub fn peer_list_edit(peer: &str, remove: bool) -> Result<String> {
+    let peer = peer.trim();
+    anyhow::ensure!(
+        !peer.is_empty() && !peer.contains(',') && !peer.starts_with('-'),
+        "a single peer name or identity is required"
+    );
+    Ok(if remove {
+        format!("-{peer}")
+    } else {
+        peer.to_string()
+    })
+}
+
 pub fn apply_global(cfg: &mut AppConfig, key: GlobalKey, value: &str, replace: bool) -> Result<()> {
     let entries = super::parse_entries(value);
     let reset = entries.is_empty() || entries == ["n0"];

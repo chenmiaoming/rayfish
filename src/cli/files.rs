@@ -309,17 +309,9 @@ async fn config_row(key: NodeKey) -> Result<String> {
 /// Add or remove one peer in a peer-list setting (`file-auto-accept-peers`,
 /// `blocked`). The daemon resolves a hostname to its identity.
 pub(crate) async fn edit_peer_list(key: GlobalKey, peer: &str, remove: bool) -> Result<()> {
-    anyhow::ensure!(
-        !peer.trim().is_empty() && !peer.contains(',') && !peer.starts_with('-'),
-        "a single peer name or identity is required"
-    );
     crate::ipc_mutate(ipc::IpcMessage::ConfigSet {
         key: NodeKey::Global(key),
-        value: if remove {
-            format!("-{peer}")
-        } else {
-            peer.to_string()
-        },
+        value: crate::config::settings::peer_list_edit(peer, remove)?,
         replace: false,
     })
     .await

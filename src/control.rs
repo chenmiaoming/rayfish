@@ -100,7 +100,8 @@ pub enum PairMsg {
 }
 
 /// Messages for the `ray connect` friend-request handshake (ALPN
-/// `rayfish/connect/2`). The initiator (A) dials the recipient's (B) identity,
+/// `rayfish/connect/2`) and for invitation delivery (`rayfish/invite/1`, which
+/// carries only `InviteOffer`). The initiator (A) dials the recipient's (B) identity,
 /// sends `Request`, and polls until `Approved`. Approval is recipient-only:
 /// only B acts, A just waits.
 ///
@@ -129,8 +130,8 @@ pub enum ConnectMsg {
     Denied { reason: String },
     /// Private invitation from a network's coordinator. Receipt only stores it;
     /// joining needs the recipient's explicit accept. Acked with `Pending`;
-    /// a refused offer gets no reply. Older peers fail to decode it, which the
-    /// sender treats as unreachable.
+    /// a refused offer gets no reply. Sent only on `rayfish/invite/1`, which
+    /// older peers lack, so they fail the handshake rather than the decode.
     InviteOffer {
         /// The sender's label for the network, display only.
         network: NetworkName,

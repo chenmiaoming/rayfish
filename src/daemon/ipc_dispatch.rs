@@ -170,6 +170,30 @@ impl Daemon {
         .await
     }
 
+    /// `ray config set <key> <value>` for an embedder, with the same live
+    /// effects as the CLI.
+    pub async fn config_set(self: &Arc<Self>, key: GlobalKey, value: &str) -> IpcMessage {
+        self.config_apply(NodeKey::Global(key), value, false, false)
+            .await
+    }
+
+    /// `ray block <peer>` and friends for an embedder: add or remove exactly
+    /// one peer in a peer-list key. Blocking drops what the peer has queued.
+    pub async fn edit_peer_list(
+        self: &Arc<Self>,
+        key: GlobalKey,
+        peer: &str,
+        remove: bool,
+    ) -> IpcMessage {
+        if !key.is_peer_list() {
+            return ipc_err(format!("{} is not a peer list", key.name()));
+        }
+        match settings::peer_list_edit(peer, remove) {
+            Ok(value) => self.config_set(key, &value).await,
+            Err(e) => ipc_err(e.to_string()),
+        }
+    }
+
     /// Apply one settings key and persist it. Serves `ray config set|unset` and
     /// every single-value command that used to carry its own IPC variant
     /// (`ray mdns`, `ray firewall on|off|reject|default`, `ray firewall ssh
