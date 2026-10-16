@@ -109,6 +109,8 @@ pub mod ssh;
 #[path = "ssh_windows.rs"]
 pub mod ssh;
 pub mod stats;
+#[cfg(target_os = "linux")]
+pub(crate) mod sysctl;
 pub mod term;
 pub mod transport;
 pub mod tun;

@@ -10,7 +10,7 @@
 //! losses: re-adding what is missing raises "new" notifications, which it
 //! ignores, so a repair cannot feed itself.
 
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -24,15 +24,14 @@ use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage,
 use rtnetlink::{MulticastGroup, RouteMessageBuilder};
 use tokio_util::sync::CancellationToken;
 
+use super::{OVERLAY, OVERLAY_LEN, tun_link_index, with_tun_link};
+use crate::membership::is_overlay_ip;
+
 /// How long to let a burst of notifications settle before repairing. Taking a
 /// link down removes the route and raises several messages; one repair answers
 /// all of them, and the wait also caps repairs at about one a second if
 /// something keeps undoing them.
 const SETTLE: Duration = Duration::from_secs(1);
-
-/// The overlay range, `200::/7`.
-const OVERLAY: Ipv6Addr = Ipv6Addr::new(0x0200, 0, 0, 0, 0, 0, 0, 0);
-const OVERLAY_LEN: u8 = 7;
 
 /// Whether a notification says the TUN lost something `ray up` put there: its
 /// link went down, an address was removed from it, or a route through it was
@@ -106,17 +105,7 @@ async fn watch(
     .context("open netlink notification socket")?;
     let driver = tokio::spawn(connection);
     let result = async {
-        let index = handle
-            .link()
-            .get()
-            .match_name(tun_name.to_owned())
-            .execute()
-            .try_next()
-            .await
-            .context("query TUN link")?
-            .with_context(|| format!("TUN link {tun_name} not found"))?
-            .header
-            .index;
+        let index = tun_link_index(&handle, tun_name).await?;
         loop {
             let message = tokio::select! {
                 _ = token.cancelled() => return Ok(()),
@@ -169,7 +158,7 @@ pub(crate) struct OverlayRoute {
 /// contains the range (a default route, `::/1`) loses to our `/7` by prefix
 /// length and is no conflict.
 fn inside_overlay(prefix: Ipv6Addr, len: u8) -> bool {
-    len >= OVERLAY_LEN && prefix.octets()[0] & 0xfe == OVERLAY.octets()[0]
+    len >= OVERLAY_LEN && is_overlay_ip(IpAddr::V6(prefix))
 }
 
 /// The unicast routes through other interfaces that overlap the overlay. One
@@ -197,20 +186,7 @@ fn overlay_conflicts(routes: &[RouteMessage], our_index: u32) -> Vec<OverlayRout
 /// naming that interface. Read once at `ray up`; a full route dump is too
 /// heavy to repeat on a host carrying a large table.
 pub(crate) async fn overlay_route_warnings(tun_name: &str) -> Result<Vec<String>> {
-    let (connection, handle, _) = rtnetlink::new_connection().context("open netlink socket")?;
-    let driver = tokio::spawn(connection);
-    let result = async {
-        let our_index = handle
-            .link()
-            .get()
-            .match_name(tun_name.to_owned())
-            .execute()
-            .try_next()
-            .await
-            .context("query TUN link")?
-            .with_context(|| format!("TUN link {tun_name} not found"))?
-            .header
-            .index;
+    with_tun_link(tun_name, async |handle, our_index| {
         let routes: Vec<RouteMessage> = handle
             .route()
             .get(RouteMessageBuilder::<Ipv6Addr>::new().build())
@@ -229,10 +205,8 @@ pub(crate) async fn overlay_route_warnings(tun_name: &str) -> Result<Vec<String>
             ));
         }
         Ok(warnings)
-    }
-    .await;
-    driver.abort();
-    result
+    })
+    .await
 }
 
 async fn link_name(handle: &rtnetlink::Handle, index: u32) -> Option<String> {

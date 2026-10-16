@@ -30,7 +30,7 @@ use std::net::IpAddr;
 use std::net::Ipv6Addr;
 #[cfg(target_os = "macos")]
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 // Windows drives the interface through PowerShell (`windows_process`), not a
 // synchronous `Command`, so nothing here needs the blocking spawn. Linux does
@@ -460,8 +460,24 @@ const LINUX_TUN_IPV6_CONF: [(&str, &str); 3] = [
 ];
 
 #[cfg(target_os = "linux")]
-fn ipv6_conf_path(tun_name: &str, key: &str) -> PathBuf {
-    PathBuf::from(format!("/proc/sys/net/ipv6/conf/{tun_name}/{key}"))
+fn set_tun_ipv6_conf(tun_name: &str) {
+    use crate::sysctl::{ipv6_conf, read_sysctl, write_sysctl};
+
+    let disable = ipv6_conf(tun_name, "disable_ipv6");
+    let current = read_sysctl(&disable);
+    if !current.is_empty() && current != "0" {
+        match write_sysctl(&disable, "0") {
+            Ok(()) => tracing::info!(tun = %tun_name, "enabled IPv6 on the TUN device"),
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), tun = %tun_name, "cannot enable IPv6 on the TUN device")
+            }
+        }
+    }
+    for (key, value) in LINUX_TUN_IPV6_CONF {
+        if let Err(error) = write_sysctl(&ipv6_conf(tun_name, key), value) {
+            tracing::warn!(error = %format!("{error:#}"), tun = %tun_name, key, value, "cannot set TUN IPv6 sysctl");
+        }
+    }
 }
 
 /// Configures a freshly created Linux TUN: IPv6 settings first, then our `/128`,
@@ -473,22 +489,10 @@ fn ipv6_conf_path(tun_name: &str, key: &str) -> PathBuf {
 /// host's other interfaces as they are.
 #[cfg(target_os = "linux")]
 async fn configure_linux_tun(tun_name: &str, v6: Ipv6Addr) -> Result<()> {
-    let disable = ipv6_conf_path(tun_name, "disable_ipv6");
-    if let Ok(current) = tokio::fs::read_to_string(&disable).await
-        && current.trim() != "0"
-    {
-        match tokio::fs::write(&disable, "0").await {
-            Ok(()) => tracing::info!(tun = %tun_name, "enabled IPv6 on the TUN device"),
-            Err(error) => {
-                tracing::warn!(%error, tun = %tun_name, "cannot enable IPv6 on the TUN device")
-            }
-        }
-    }
-    for (key, value) in LINUX_TUN_IPV6_CONF {
-        if let Err(error) = tokio::fs::write(ipv6_conf_path(tun_name, key), value).await {
-            tracing::warn!(%error, tun = %tun_name, key, value, "cannot set TUN IPv6 sysctl");
-        }
-    }
+    let name = tun_name.to_owned();
+    tokio::task::spawn_blocking(move || set_tun_ipv6_conf(&name))
+        .await
+        .context("TUN IPv6 settings task")?;
     if let Err(error) = ensure_ipv6_addr(tun_name, v6).await {
         return Err(match ipv6_disabled_hint(netlink_errno(&error)) {
             Some(hint) => error.context(hint),
@@ -559,6 +563,30 @@ fn windows_replace_route_script(prefix: &str, index: u32, next_hop: &str) -> Str
     )
 }
 
+/// The overlay range, `200::/7`, as the netlink route the TUN carries.
+#[cfg(target_os = "linux")]
+const OVERLAY: Ipv6Addr = Ipv6Addr::new(0x0200, 0, 0, 0, 0, 0, 0, 0);
+#[cfg(target_os = "linux")]
+const OVERLAY_LEN: u8 = 7;
+
+/// The interface index of `tun_name`.
+#[cfg(target_os = "linux")]
+async fn tun_link_index(handle: &rtnetlink::Handle, tun_name: &str) -> Result<u32> {
+    use futures::TryStreamExt;
+
+    Ok(handle
+        .link()
+        .get()
+        .match_name(tun_name.to_owned())
+        .execute()
+        .try_next()
+        .await
+        .context("query TUN link")?
+        .with_context(|| format!("TUN link {tun_name} not found"))?
+        .header
+        .index)
+}
+
 /// Run `f` with a netlink handle and the interface index of `tun_name`.
 ///
 /// Every netlink call below needs the same preamble (open a socket, spawn the
@@ -566,28 +594,16 @@ fn windows_replace_route_script(prefix: &str, index: u32, next_hop: &str) -> Str
 /// every path out, success or error. Doing it here keeps each caller down to the
 /// one call it actually makes.
 #[cfg(target_os = "linux")]
-async fn with_tun_link<F, Fut>(tun_name: &str, f: F) -> Result<()>
+async fn with_tun_link<T, F, Fut>(tun_name: &str, f: F) -> Result<T>
 where
     F: FnOnce(rtnetlink::Handle, u32) -> Fut,
-    Fut: Future<Output = Result<()>>,
+    Fut: Future<Output = Result<T>>,
 {
-    use futures::TryStreamExt;
-
     let (connection, handle, _) = rtnetlink::new_connection().context("open netlink socket")?;
     let conn = tokio::spawn(connection);
 
     let result = async {
-        let index = handle
-            .link()
-            .get()
-            .match_name(tun_name.to_owned())
-            .execute()
-            .try_next()
-            .await
-            .context("query TUN link")?
-            .with_context(|| format!("TUN link {tun_name} not found"))?
-            .header
-            .index;
+        let index = tun_link_index(&handle, tun_name).await?;
         f(handle.clone(), index).await
     }
     .await;
@@ -629,7 +645,7 @@ pub async fn route_peer_range(tun_name: &str) -> Result<()> {
 
     with_tun_link(tun_name, async |handle, index| {
         let route = RouteMessageBuilder::<Ipv6Addr>::new()
-            .destination_prefix(Ipv6Addr::new(0x0200, 0, 0, 0, 0, 0, 0, 0), 7)
+            .destination_prefix(OVERLAY, OVERLAY_LEN)
             .output_interface(index)
             .build();
         handle

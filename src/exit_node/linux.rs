@@ -30,6 +30,8 @@ mod names {
 #[cfg(target_os = "linux")]
 pub(super) use names::*;
 
+pub(super) use crate::sysctl::{ipv6_conf, read_sysctl, write_sysctl};
+
 /// Turn this host into an exit node: enable IPv4/IPv6 forwarding and install an
 /// nftables table that masquerades overlay-sourced traffic that arrived on the
 /// TUN and is leaving by another interface, so replies come back to us and we
@@ -121,7 +123,7 @@ fn interface_forwarding() -> Vec<SavedSysctl> {
         .into_iter()
         .filter(|name| name != "all")
         .filter_map(|name| {
-            let path = format!("net/ipv6/conf/{name}/forwarding");
+            let path = ipv6_conf(&name, "forwarding");
             let value = read_sysctl(&path);
             (!value.is_empty()).then_some(SavedSysctl { path, value })
         })
@@ -183,7 +185,7 @@ fn keep_accepting_ras(tun_name: &str, snap: &mut Snapshot, path: &Path) -> Resul
 
 #[cfg(target_os = "linux")]
 fn accept_ra_path(name: &str) -> String {
-    format!("net/ipv6/conf/{name}/accept_ra")
+    ipv6_conf(name, "accept_ra")
 }
 
 /// Which of `(interface, accept_ra)` need raising to 2: those at exactly 1,
@@ -1249,19 +1251,4 @@ pub(super) fn run_ip(args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// The sysctl's current value, or `""` if it can't be read (then it is not
-/// restored on teardown).
-#[cfg(target_os = "linux")]
-pub(super) fn read_sysctl(path: &str) -> String {
-    fs::read_to_string(format!("/proc/sys/{path}"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn write_sysctl(path: &str, value: &str) -> Result<()> {
-    fs::write(format!("/proc/sys/{path}"), value)
-        .with_context(|| format!("writing sysctl {path}={value}"))
 }
