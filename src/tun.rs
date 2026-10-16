@@ -25,7 +25,7 @@ use std::net::IpAddr;
 use std::net::Ipv6Addr;
 #[cfg(target_os = "macos")]
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::path::PathBuf;
 // Windows drives the interface through PowerShell (`windows_process`), not a
 // synchronous `Command`, so nothing here needs the blocking spawn. Linux does
@@ -202,17 +202,20 @@ enum MacTunWriter {
 /// shares the host, and the overlay carries no IPv4 to put there.
 #[cfg(not(target_os = "android"))]
 pub async fn create(v6: Ipv6Addr) -> Result<(TunReader, TunWriter, String)> {
-    // `ipv6(v6, 128)` assigns just our own address (a /128, no connected route)
-    // cross-platform. `enable(true)` brings the link up at creation (as the old
-    // `.up()` did); `set_link_up` and the peer-range route helpers still run
-    // later on activate. No IPv4 is assigned at all: the overlay is IPv6-only,
-    // and `100.64.0.0/10` belongs to whatever else may be sharing the host.
+    // `ipv6(v6, 128)` assigns just our own address (a /128, no connected route).
+    // `enable(true)` brings the link up at creation (as the old `.up()` did);
+    // `set_link_up` and the peer-range route helpers still run later on
+    // activate. Linux does the same two steps over netlink. No IPv4 is assigned
+    // at all: the overlay is IPv6-only, and `100.64.0.0/10` belongs to whatever
+    // else may be sharing the host.
     // Create at IPv6's minimum first so a rejected preferred MTU cannot prevent
     // device creation. Upgrade separately: only MTU errors trigger fallback.
-    let builder = DeviceBuilder::new()
-        .ipv6(v6, 128)
-        .mtu(MIN_TUN_MTU)
-        .enable(true);
+    let builder = DeviceBuilder::new().mtu(MIN_TUN_MTU);
+    // Linux creates the device bare and configures it in `configure_linux_tun`:
+    // its per-device IPv6 settings have to be in place before the address
+    // goes on and the link comes up.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.ipv6(v6, 128).enable(true);
     #[cfg(target_os = "linux")]
     let builder = builder.name(LINUX_TUN_NAME).offload(true);
     #[cfg(target_os = "windows")]
@@ -221,7 +224,12 @@ pub async fn create(v6: Ipv6Addr) -> Result<(TunReader, TunWriter, String)> {
         .name(WINDOWS_TUN_NAME)
         .description("Rayfish")
         .wintun_file(wintun_library_path().to_string_lossy().into_owned());
+    #[cfg(target_os = "linux")]
+    let device = builder.build_async().map_err(linux_create_error)?;
+    #[cfg(not(target_os = "linux"))]
     let device = builder.build_async().context("create tun-rs device")?;
+    #[cfg(target_os = "linux")]
+    configure_linux_tun(&device.name().context("read TUN device name")?, v6).await?;
     let mtu = configure_mtu(|mtu| {
         device.set_mtu(mtu)?;
         #[cfg(target_os = "windows")]
@@ -369,6 +377,104 @@ fn packet_tunnel_fd() -> Result<OwnedFd> {
 /// and FreeBSD's `tun` cloner insists on a `tun` prefix.
 #[cfg(target_os = "linux")]
 const LINUX_TUN_NAME: &str = "rayfish%d";
+
+/// Explains a failed Linux TUN creation. Opening `/dev/net/tun` and claiming an
+/// interface are the steps that fail in a container or under a service unit
+/// without the capability, and the bare errno says neither.
+#[cfg(target_os = "linux")]
+fn linux_create_error(error: std::io::Error) -> anyhow::Error {
+    let hint = match error.raw_os_error() {
+        Some(libc::ENOENT) | Some(libc::ENODEV) | Some(libc::ENXIO) => Some(
+            "/dev/net/tun is missing: load the tun module (modprobe tun), or in a \
+             container pass the device in (--device /dev/net/tun)",
+        ),
+        Some(libc::EPERM) | Some(libc::EACCES) => Some(
+            "creating a TUN device needs CAP_NET_ADMIN and access to /dev/net/tun \
+             (in a container: --cap-add NET_ADMIN --device /dev/net/tun)",
+        ),
+        _ => None,
+    };
+    match hint {
+        Some(hint) => anyhow::Error::new(error).context(hint),
+        None => anyhow::Error::new(error).context("create tun-rs device"),
+    }
+}
+
+/// Explains a failed IPv6 address assignment. The kernel answers EACCES when
+/// IPv6 is disabled on the device and EAFNOSUPPORT when it is disabled at boot,
+/// and the first reads exactly like a missing capability.
+#[cfg(any(target_os = "linux", test))]
+fn ipv6_disabled_hint(errno: Option<i32>) -> Option<&'static str> {
+    matches!(errno, Some(libc::EACCES) | Some(libc::EAFNOSUPPORT)).then_some(
+        "IPv6 is disabled on this host (net.ipv6.conf.*.disable_ipv6 or ipv6.disable=1); \
+         the mesh is IPv6-only and cannot run without it",
+    )
+}
+
+/// The OS error code inside a netlink failure, if the kernel sent one.
+#[cfg(target_os = "linux")]
+fn netlink_errno(error: &anyhow::Error) -> Option<i32> {
+    error
+        .chain()
+        .find_map(|cause| match cause.downcast_ref::<rtnetlink::Error>() {
+            Some(rtnetlink::Error::NetlinkError(message)) => message.to_io().raw_os_error(),
+            _ => None,
+        })
+}
+
+/// Per-device IPv6 settings for the TUN, written under
+/// `/proc/sys/net/ipv6/conf/<tun>/`. All but `disable_ipv6` are best-effort.
+///
+/// - `keep_addr_on_down = 1`: Linux otherwise flushes the global address when
+///   anything takes the link down, and nothing outside `ray up` puts it back.
+/// - `addr_gen_mode = 1`: no link-local address. The mesh never uses one, and
+///   without it the kernel sends no router solicitations into the tunnel.
+/// - `router_solicitations = 0`: the same, for kernels that ignore the above.
+#[cfg(target_os = "linux")]
+const LINUX_TUN_IPV6_CONF: [(&str, &str); 3] = [
+    ("keep_addr_on_down", "1"),
+    ("addr_gen_mode", "1"),
+    ("router_solicitations", "0"),
+];
+
+#[cfg(target_os = "linux")]
+fn ipv6_conf_path(tun_name: &str, key: &str) -> PathBuf {
+    PathBuf::from(format!("/proc/sys/net/ipv6/conf/{tun_name}/{key}"))
+}
+
+/// Configures a freshly created Linux TUN: IPv6 settings first, then our `/128`,
+/// then link-up. The settings must precede link-up, since the link-local
+/// address is generated the moment the link comes up.
+///
+/// A host may disable IPv6 for new interfaces by default. The overlay is
+/// IPv6-only, so this turns it back on for our own device alone and leaves the
+/// host's other interfaces as they are.
+#[cfg(target_os = "linux")]
+async fn configure_linux_tun(tun_name: &str, v6: Ipv6Addr) -> Result<()> {
+    let disable = ipv6_conf_path(tun_name, "disable_ipv6");
+    if let Ok(current) = tokio::fs::read_to_string(&disable).await
+        && current.trim() != "0"
+    {
+        match tokio::fs::write(&disable, "0").await {
+            Ok(()) => tracing::info!(tun = %tun_name, "enabled IPv6 on the TUN device"),
+            Err(error) => {
+                tracing::warn!(%error, tun = %tun_name, "cannot enable IPv6 on the TUN device")
+            }
+        }
+    }
+    for (key, value) in LINUX_TUN_IPV6_CONF {
+        if let Err(error) = tokio::fs::write(ipv6_conf_path(tun_name, key), value).await {
+            tracing::warn!(%error, tun = %tun_name, key, value, "cannot set TUN IPv6 sysctl");
+        }
+    }
+    if let Err(error) = ensure_ipv6_addr(tun_name, v6).await {
+        return Err(match ipv6_disabled_hint(netlink_errno(&error)) {
+            Some(hint) => error.context(hint),
+            None => error,
+        });
+    }
+    set_link_up(tun_name).await
+}
 
 /// Wintun adapter name. Fixed rather than generated, so a restart reattaches to
 /// the adapter this daemon created instead of leaving a second one behind.
@@ -962,6 +1068,29 @@ mod tests {
             packet.to_string(),
             "unreadable TUN packet: too many GSO segments"
         );
+    }
+
+    /// EACCES from an address add is the kernel saying IPv6 is disabled, not
+    /// that the daemon lacks a capability, and the error has to say so.
+    #[test]
+    fn a_refused_ipv6_address_names_disabled_ipv6() {
+        for errno in [libc::EACCES, libc::EAFNOSUPPORT] {
+            let hint = super::ipv6_disabled_hint(Some(errno)).expect("explained");
+            assert!(hint.contains("IPv6 is disabled"), "{hint}");
+        }
+        assert_eq!(super::ipv6_disabled_hint(Some(libc::EEXIST)), None);
+        assert_eq!(super::ipv6_disabled_hint(None), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_tun_open_names_the_device_or_the_capability() {
+        let missing = super::linux_create_error(std::io::Error::from_raw_os_error(libc::ENOENT));
+        assert!(format!("{missing:#}").contains("/dev/net/tun is missing"));
+        let denied = super::linux_create_error(std::io::Error::from_raw_os_error(libc::EPERM));
+        assert!(format!("{denied:#}").contains("CAP_NET_ADMIN"));
+        let other = super::linux_create_error(std::io::Error::from_raw_os_error(libc::EBUSY));
+        assert!(format!("{other:#}").starts_with("create tun-rs device"));
     }
 
     #[cfg(not(target_os = "android"))]
