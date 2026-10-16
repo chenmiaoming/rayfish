@@ -276,8 +276,7 @@ async fn build_daemon_inner(
     let transfers = Arc::new(transfers::TransferRegistry::new());
 
     // --- Content-addressed blob store (membership/file transfer) ---
-    let blobs_dir = config::config_dir()?.join("blobs");
-    std::fs::create_dir_all(&blobs_dir)?;
+    let blobs_dir = config::blobs_dir()?;
     // GC is what actually frees a transfer's bytes: `Blobs::delete` is private
     // ("users should rely only on garbage collection"), so dropping a tag only
     // marks the blob collectable and this periodic sweep is what reclaims it.

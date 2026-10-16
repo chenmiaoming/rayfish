@@ -3835,7 +3835,7 @@ mod headless_tests {
         // (background tasks hold their own clones and wind down on their own
         // schedule), so releasing the store has to be something the call itself
         // guarantees before it returns.
-        let blobs_dir = config::config_dir().unwrap().join("blobs");
+        let blobs_dir = config::blobs_dir().unwrap();
         let reopened = tokio::time::timeout(
             Duration::from_secs(10),
             iroh_blobs::store::fs::FsStore::load(&blobs_dir),
