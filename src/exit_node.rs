@@ -772,9 +772,9 @@ impl ExitClient {
 ///
 /// Only a tunnel that carries IPv6 and not IPv4 needs one, which is IPv6-only
 /// mode and, since the gateway's claim narrows the tunnel too, a dual-stack node
-/// routing through a gateway that can only return IPv6. Every upstream the
-/// desktop capture can produce is IPv4 (`DnsConfigurator::captured_upstreams`),
-/// so left alone the daemon would forward each lookup out the physical link: the
+/// routing through a gateway that can only return IPv6. Nearly every upstream
+/// the desktop capture produces is IPv4 (`DnsConfigurator::captured_upstreams`;
+/// only a Linux resolv.conf takeover captures IPv6 ones), so left alone the daemon would forward each lookup out the physical link: the
 /// exit node would carry the traffic and see none of the names that chose it. A
 /// tunnel that carries IPv4 has no such gap, since it carries the captured
 /// upstreams' own family.

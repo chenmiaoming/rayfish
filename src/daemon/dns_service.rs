@@ -14,7 +14,9 @@
 //! `resolve` (reader side), on top of `configure` / `revert` (lifecycle).
 
 use super::*;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+#[cfg(any(target_os = "macos", test))]
+use std::net::IpAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::PoisonError;
 
 /// First and last backoff step for the OS-DNS configuration retry loop.
@@ -30,25 +32,6 @@ fn search_domains_for_mode(
     } else {
         Vec::new()
     }
-}
-
-/// Add the captured IPv6 servers after the IPv4 ones, under the same rule
-/// [`config::resolve_upstreams`] applies to the captured set: an override in
-/// replace mode drops them.
-fn with_captured_v6(
-    mut upstreams: Vec<IpAddr>,
-    captured_v6: Vec<Ipv6Addr>,
-    dns_override: &config::ServerOverride,
-) -> Vec<IpAddr> {
-    if dns_override.replace && !dns_override.servers.is_empty() {
-        return upstreams;
-    }
-    for ip in captured_v6.into_iter().map(IpAddr::V6) {
-        if !upstreams.contains(&ip) {
-            upstreams.push(ip);
-        }
-    }
-    upstreams
 }
 
 /// How often the forwarder re-checks which system resolvers actually answer.
@@ -172,15 +155,10 @@ impl DnsService {
         c: Box<dyn dns_config::DnsConfigurator>,
         tun_name: &str,
     ) {
-        let captured = c.captured_upstreams();
         // Merge any user-configured DNS upstreams over the system-captured
         // set (replace drops the captured ones; augment tries custom first).
         let dns_override = config::load().map(|c| c.dns_upstreams).unwrap_or_default();
-        let upstreams = with_captured_v6(
-            config::resolve_upstreams(&dns_override, captured),
-            c.captured_upstreams_v6(),
-            &dns_override,
-        );
+        let upstreams = config::resolve_upstreams(&dns_override, c.captured_upstreams());
         #[cfg(target_os = "linux")]
         let search_handle = c.search_handle();
         let fallbacks = c.fallback_upstreams();
@@ -302,6 +280,7 @@ impl DnsService {
             // Same merge the initial adopt does, so an operator's `dns-upstreams`
             // keeps its precedence instead of being overwritten by the capture.
             let dns_override = config::load().map(|c| c.dns_upstreams).unwrap_or_default();
+            let live = live.into_iter().map(IpAddr::V4).collect();
             let desired = config::resolve_upstreams(&dns_override, live);
 
             let mut answering = Vec::new();
@@ -640,28 +619,6 @@ impl DnsService {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A host whose resolv.conf names an IPv6 server keeps forwarding to it.
-    #[test]
-    fn captured_v6_upstreams_follow_the_override_rules() {
-        let v4: IpAddr = "192.0.2.1".parse().unwrap();
-        let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
-        let none = config::ServerOverride::default();
-        assert_eq!(
-            with_captured_v6(vec![v4], vec![v6], &none),
-            vec![v4, IpAddr::V6(v6)]
-        );
-        let replace = config::ServerOverride {
-            servers: vec!["9.9.9.9".into()],
-            replace: true,
-        };
-        assert_eq!(with_captured_v6(vec![v4], vec![v6], &replace), vec![v4]);
-        // Already listed (the operator named it too): not twice.
-        assert_eq!(
-            with_captured_v6(vec![IpAddr::V6(v6)], vec![v6], &none),
-            vec![IpAddr::V6(v6)]
-        );
-    }
 
     #[test]
     fn partial_mode_has_no_ray_search_domains() {

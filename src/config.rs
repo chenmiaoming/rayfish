@@ -398,22 +398,23 @@ pub fn discovery_urls(o: &ServerOverride) -> Result<Vec<String>> {
 /// captured ones. When present, Tailscale's Magic DNS resolver is preferred over
 /// every other upstream. Unset returns the captured set unchanged.
 ///
-/// Captured resolvers are IPv4 because that is what the desktop OS backends
-/// expose. Configured IPv6 addresses are retained so an overlay peer running a
-/// resolver can receive ordinary DNS queries over the mesh.
-pub fn resolve_upstreams(o: &ServerOverride, captured: Vec<Ipv4Addr>) -> Vec<IpAddr> {
+/// Both families: configured IPv6 addresses are retained so an overlay peer
+/// running a resolver can receive ordinary DNS queries over the mesh, and a
+/// host's own IPv6 servers are captured like its IPv4 ones. A captured server
+/// the operator also named is listed once.
+pub fn resolve_upstreams(o: &ServerOverride, captured: Vec<IpAddr>) -> Vec<IpAddr> {
     let upstreams = if o.servers.is_empty() {
-        captured.into_iter().map(IpAddr::V4).collect()
+        captured
     } else {
-        let custom: Vec<IpAddr> = o.servers.iter().filter_map(|s| s.parse().ok()).collect();
-        if o.replace {
-            custom
-        } else {
-            custom
-                .into_iter()
-                .chain(captured.into_iter().map(IpAddr::V4))
-                .collect()
+        let mut custom: Vec<IpAddr> = o.servers.iter().filter_map(|s| s.parse().ok()).collect();
+        if !o.replace {
+            for ip in captured {
+                if !custom.contains(&ip) {
+                    custom.push(ip);
+                }
+            }
         }
+        custom
     };
     prefer_tailscale_dns(upstreams)
 }
@@ -2962,13 +2963,13 @@ name = "test"
 
     #[test]
     fn resolve_upstreams_augment_and_replace() {
-        let captured = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let captured = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let one = Ipv4Addr::new(1, 1, 1, 1);
 
         // Unset: captured unchanged.
         assert_eq!(
             resolve_upstreams(&ServerOverride::default(), captured.clone()),
-            vec![IpAddr::V4(captured[0])]
+            captured
         );
 
         // Augment: custom first, then captured.
@@ -2978,7 +2979,7 @@ name = "test"
         };
         assert_eq!(
             resolve_upstreams(&aug, captured.clone()),
-            vec![IpAddr::V4(one), IpAddr::V4(captured[0])]
+            vec![IpAddr::V4(one), captured[0]]
         );
 
         // Replace: custom only.
@@ -2993,22 +2994,44 @@ name = "test"
 
         // Tailscale remains the preferred upstream even when the user added a
         // different resolver, while Rayfish itself still intercepts `.ray`.
-        let tailscale = Ipv4Addr::new(100, 100, 100, 100);
+        let tailscale = IpAddr::V4(Ipv4Addr::new(100, 100, 100, 100));
         assert_eq!(
-            resolve_upstreams(&aug, vec![captured[0], tailscale],),
-            vec![
-                IpAddr::V4(tailscale),
-                IpAddr::V4(one),
-                IpAddr::V4(captured[0])
-            ]
+            resolve_upstreams(&aug, vec![captured[0], tailscale]),
+            vec![tailscale, IpAddr::V4(one), captured[0]]
         );
+    }
+
+    /// A host whose resolv.conf names an IPv6 server keeps forwarding to it,
+    /// under the same override rules as its IPv4 ones.
+    #[test]
+    fn captured_v6_upstreams_follow_the_override_rules() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            resolve_upstreams(&ServerOverride::default(), vec![v4, v6]),
+            vec![v4, v6]
+        );
+        let replace = ServerOverride {
+            servers: vec!["9.9.9.9".into()],
+            replace: true,
+        };
+        assert_eq!(
+            resolve_upstreams(&replace, vec![v4, v6]),
+            vec![IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))]
+        );
+        // Already listed (the operator named it too): not twice.
+        let augment = ServerOverride {
+            servers: vec![v6.to_string()],
+            replace: false,
+        };
+        assert_eq!(resolve_upstreams(&augment, vec![v6]), vec![v6]);
     }
 
     /// An IPv6 upstream can be a resolver on a mesh peer. `--replace` must leave
     /// that address intact so it receives every non-`.ray` lookup.
     #[test]
     fn replace_with_only_ipv6_uses_the_configured_peer() {
-        let captured = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let captured = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let peer: Ipv6Addr = "200::1234".parse().unwrap();
         let v6_only = ServerOverride {
             servers: vec![peer.to_string()],
@@ -3040,7 +3063,7 @@ name = "test"
     /// than the refusal it bypassed, so the two must not disagree.
     #[test]
     fn only_a_usable_upstream_waives_the_takeover_guard() {
-        let captured: Vec<Ipv4Addr> = Vec::new();
+        let captured: Vec<IpAddr> = Vec::new();
         for (servers, usable) in [
             (vec!["2606:4700:4700::1111"], true),
             (vec!["2606:4700:4700::1111", "2001:4860:4860::8888"], true),

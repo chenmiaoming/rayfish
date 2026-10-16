@@ -8,7 +8,6 @@
 
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 #[cfg(target_os = "linux")]
@@ -135,15 +134,10 @@ pub trait DnsConfigurator: Send + Sync {
     async fn apply(&self) -> Result<()>;
     async fn revert(&self) -> Result<()>;
     fn name(&self) -> &'static str;
-    /// Return the upstream DNS servers captured from the system before rayfish
-    /// overwrote resolv.conf. Used by the resolver forwarder (Task 11).
-    /// Default: empty (all other configurators use split-DNS and don't capture).
-    fn captured_upstreams(&self) -> Vec<Ipv4Addr> {
-        Vec::new()
-    }
-    /// The IPv6 half of [`Self::captured_upstreams`]. Separate so the backends
-    /// that only ever capture IPv4 need not change. Default: empty.
-    fn captured_upstreams_v6(&self) -> Vec<Ipv6Addr> {
+    /// Return the upstream DNS servers, of either family, captured from the
+    /// system before rayfish overwrote resolv.conf. Seeds the resolver's
+    /// forwarder. Default: empty (split-DNS configurators don't capture).
+    fn captured_upstreams(&self) -> Vec<IpAddr> {
         Vec::new()
     }
     /// Install the OS search domains for the currently joined networks.
@@ -554,7 +548,7 @@ pub fn emergency_restore_resolv_conf() {}
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr};
 
     use super::{
         MAX_NAMESERVERS, NmQuietOutcome, Reassert, SearchDomain, StaleBackup, first_nameserver,
@@ -854,8 +848,8 @@ mod tests {
     /// owns DNS for the machine with nothing behind us.
     #[test]
     fn quieting_networkmanager_can_invalidate_the_capture_that_allowed_the_takeover() {
-        let nm = "127.0.0.1".parse::<Ipv4Addr>().unwrap();
-        let router = "192.168.1.1".parse::<Ipv4Addr>().unwrap();
+        let nm = "127.0.0.1".parse::<IpAddr>().unwrap();
+        let router = "192.168.1.1".parse::<IpAddr>().unwrap();
 
         // The regression: NM's dnsmasq was the only thing we captured, and
         // quieting NM killed it. Refuse, rather than install the black hole.
@@ -897,7 +891,7 @@ mod tests {
         assert_eq!(nm_quiet_outcome(&[], &[], false), NmQuietOutcome::Proceed);
         // And the abort still fires when something *was* answering and stopped,
         // which is the case it exists for.
-        let nm = "127.0.0.1".parse::<Ipv4Addr>().unwrap();
+        let nm = "127.0.0.1".parse::<IpAddr>().unwrap();
         assert_eq!(nm_quiet_outcome(&[nm], &[], false), NmQuietOutcome::Abort);
     }
 
@@ -906,9 +900,9 @@ mod tests {
     /// costs a full lookup timeout on every off-mesh name.
     #[test]
     fn a_degraded_verdict_names_exactly_the_servers_that_died() {
-        let nm = "127.0.0.1".parse::<Ipv4Addr>().unwrap();
-        let router = "192.168.1.1".parse::<Ipv4Addr>().unwrap();
-        let public = "9.9.9.9".parse::<Ipv4Addr>().unwrap();
+        let nm = "127.0.0.1".parse::<IpAddr>().unwrap();
+        let router = "192.168.1.1".parse::<IpAddr>().unwrap();
+        let public = "9.9.9.9".parse::<IpAddr>().unwrap();
         // What survives is `after`, so the caller can store it directly; what is
         // reported is the complement, so the operator can see what it cost.
         assert_eq!(
@@ -1127,12 +1121,12 @@ mod tests {
     /// with nothing to forward to and a rendered file without its servers.
     #[test]
     fn ipv6_nameservers_are_captured_and_rendered() {
-        use super::parse_resolv_nameservers_v6;
+        use super::parse_resolv_nameserver_ips;
         let c = "nameserver 192.168.1.1\nnameserver 2001:db8::53\nnameserver 200::53\n\
                  nameserver fe80::1%eth0\n";
         assert_eq!(
-            parse_resolv_nameservers_v6(c),
-            vec!["2001:db8::53".parse::<Ipv6Addr>().unwrap()]
+            parse_resolv_nameserver_ips(c),
+            ["192.168.1.1", "2001:db8::53"].map(|ip| ip.parse::<IpAddr>().unwrap())
         );
         let out = render_direct_resolv_conf(&[], &["2001:db8::53".parse().unwrap()]);
         assert!(out.contains("nameserver 200::53\nnameserver 2001:db8::53\n"));
@@ -1359,6 +1353,6 @@ mod tests {
             upstreams: vec!["192.168.1.1".parse().unwrap()],
         };
         assert_eq!(dns.name(), "windows-powershell-dns");
-        assert_eq!(dns.captured_upstreams(), dns.upstreams);
+        assert_eq!(dns.captured_upstreams(), [IpAddr::V4(dns.upstreams[0])]);
     }
 }

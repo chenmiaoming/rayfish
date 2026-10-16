@@ -115,8 +115,8 @@ impl Resolver {
     /// system capture found without having to re-detect the OS DNS backend.
     ///
     /// It exists for the IPv6-only client tunnel. The daemon forwards non-`.ray`
-    /// queries itself, and every upstream the desktop capture can produce is IPv4
-    /// (`DnsConfigurator::captured_upstreams`), while that tunnel carries IPv6
+    /// queries itself, and nearly every upstream the desktop capture produces is
+    /// IPv4 (`DnsConfigurator::captured_upstreams`), while that tunnel carries IPv6
     /// alone: left as they are, the exit node would see the traffic and none of
     /// the lookups that steered it. Pointing the forwarder at an IPv6 resolver
     /// puts the queries back inside the tunnel.

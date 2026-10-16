@@ -57,15 +57,7 @@ pub(super) async fn set_search_domains_linux(
         // `.ray` is the only routing domain; bare network names are not
         // registered, so a network named `dev` never captures `*.dev`.
         let domains = resolved_link_domains(rayfish_domains);
-        let reply = conn
-            .call_method(
-                Some(RESOLVED_BUS),
-                RESOLVED_PATH,
-                Some(RESOLVED_MANAGER),
-                "SetLinkDomains",
-                &(idx as i32, &domains),
-            )
-            .await;
+        let reply = resolved_call(&conn, "SetLinkDomains", &(idx as i32, &domains)).await;
         if reply.is_ok() {
             resolved_best_effort(&conn, "FlushCaches", &()).await;
             return Ok(());
@@ -97,32 +89,17 @@ pub(super) async fn set_search_domains_linux(
 /// list cannot say (it always carries `.ray`).
 #[cfg(target_os = "linux")]
 pub(super) async fn revert_resolved_link(tun_name: &str) {
-    use std::process::Stdio;
-    use tokio::process::Command;
-
     let Some(idx) = linux::get_ifindex(tun_name) else {
         return; // the link is gone, and resolved forgot it with it
     };
     if let Ok(conn) = Connection::system().await
-        && conn
-            .call_method(
-                Some(RESOLVED_BUS),
-                RESOLVED_PATH,
-                Some(RESOLVED_MANAGER),
-                "RevertLink",
-                &(idx as i32,),
-            )
+        && resolved_call(&conn, "RevertLink", &(idx as i32,))
             .await
             .is_ok()
     {
         return;
     }
-    let _ = Command::new("resolvectl")
-        .args(["revert", tun_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    resolvectl_best_effort(&["revert", tun_name]).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -131,6 +108,23 @@ const RESOLVED_BUS: &str = "org.freedesktop.resolve1";
 const RESOLVED_PATH: &str = "/org/freedesktop/resolve1";
 #[cfg(target_os = "linux")]
 const RESOLVED_MANAGER: &str = "org.freedesktop.resolve1.Manager";
+
+/// Call one of resolved's manager methods.
+#[cfg(target_os = "linux")]
+async fn resolved_call<B>(conn: &Connection, method: &str, body: &B) -> zbus::Result<()>
+where
+    B: serde::Serialize + zbus::zvariant::DynamicType,
+{
+    conn.call_method(
+        Some(RESOLVED_BUS),
+        RESOLVED_PATH,
+        Some(RESOLVED_MANAGER),
+        method,
+        body,
+    )
+    .await
+    .map(drop)
+}
 
 /// Call a resolved manager method whose failure should not fail the apply.
 ///
@@ -143,16 +137,7 @@ async fn resolved_best_effort<B>(conn: &Connection, method: &str, body: &B)
 where
     B: serde::Serialize + zbus::zvariant::DynamicType,
 {
-    match conn
-        .call_method(
-            Some(RESOLVED_BUS),
-            RESOLVED_PATH,
-            Some(RESOLVED_MANAGER),
-            method,
-            body,
-        )
-        .await
-    {
+    match resolved_call(conn, method, body).await {
         Ok(_) => {}
         Err(zbus::Error::MethodError(name, _, _))
             if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" =>
@@ -192,15 +177,31 @@ async fn resolvectl_best_effort(args: &[&str]) {
 /// resolver answers plain UDP only.
 #[cfg(target_os = "linux")]
 const RESOLVED_LINK_SETTINGS: [LinkSetting; 5] = [
-    LinkSetting::new(
-        "SetLinkDefaultRoute",
-        "default-route",
-        LinkValue::Bool(false),
-    ),
-    LinkSetting::new("SetLinkDNSOverTLS", "dnsovertls", LinkValue::Str("no")),
-    LinkSetting::new("SetLinkDNSSEC", "dnssec", LinkValue::Str("no")),
-    LinkSetting::new("SetLinkLLMNR", "llmnr", LinkValue::Str("no")),
-    LinkSetting::new("SetLinkMulticastDNS", "mdns", LinkValue::Str("no")),
+    LinkSetting {
+        method: "SetLinkDefaultRoute",
+        verb: "default-route",
+        value: LinkValue::Bool(false),
+    },
+    LinkSetting {
+        method: "SetLinkDNSOverTLS",
+        verb: "dnsovertls",
+        value: LinkValue::Str("no"),
+    },
+    LinkSetting {
+        method: "SetLinkDNSSEC",
+        verb: "dnssec",
+        value: LinkValue::Str("no"),
+    },
+    LinkSetting {
+        method: "SetLinkLLMNR",
+        verb: "llmnr",
+        value: LinkValue::Str("no"),
+    },
+    LinkSetting {
+        method: "SetLinkMulticastDNS",
+        verb: "mdns",
+        value: LinkValue::Str("no"),
+    },
 ];
 
 #[cfg(target_os = "linux")]
@@ -208,17 +209,6 @@ struct LinkSetting {
     method: &'static str,
     verb: &'static str,
     value: LinkValue,
-}
-
-#[cfg(target_os = "linux")]
-impl LinkSetting {
-    const fn new(method: &'static str, verb: &'static str, value: LinkValue) -> Self {
-        Self {
-            method,
-            verb,
-            value,
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -367,21 +357,9 @@ pub(super) struct SystemdResolvedDBus {
 #[cfg(target_os = "linux")]
 pub(super) async fn try_systemd_resolved_dbus(tun_name: &str) -> Option<SystemdResolvedDBus> {
     let ifindex = linux::get_ifindex(tun_name)? as i32;
-    let conn = Connection::system().await.ok()?;
-    // Check that resolved is available on the bus
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.resolve1"),
-            "/org/freedesktop/resolve1",
-            Some("org.freedesktop.DBus.Peer"),
-            "Ping",
-            &(),
-        )
-        .await;
-    if reply.is_err() {
-        return None;
-    }
-    Some(SystemdResolvedDBus { ifindex })
+    resolved_reachable()
+        .await
+        .then_some(SystemdResolvedDBus { ifindex })
 }
 
 #[cfg(target_os = "linux")]
@@ -399,27 +377,15 @@ impl DnsConfigurator for SystemdResolvedDBus {
             IpAddr::V4(v4) => vec![(2i32, v4.octets().to_vec())],
             IpAddr::V6(v6) => vec![(10i32, v6.octets().to_vec())],
         };
-        conn.call_method(
-            Some("org.freedesktop.resolve1"),
-            "/org/freedesktop/resolve1",
-            Some("org.freedesktop.resolve1.Manager"),
-            "SetLinkDNS",
-            &(self.ifindex, &dns_addrs),
-        )
-        .await
-        .context("SetLinkDNS failed")?;
+        resolved_call(&conn, "SetLinkDNS", &(self.ifindex, &dns_addrs))
+            .await
+            .context("SetLinkDNS failed")?;
 
         // SetLinkDomains(ifindex, [(domain, routing_only)])
         let domains: Vec<(&str, bool)> = vec![(DNS_DOMAIN, true)];
-        conn.call_method(
-            Some("org.freedesktop.resolve1"),
-            "/org/freedesktop/resolve1",
-            Some("org.freedesktop.resolve1.Manager"),
-            "SetLinkDomains",
-            &(self.ifindex, &domains),
-        )
-        .await
-        .context("SetLinkDomains failed")?;
+        resolved_call(&conn, "SetLinkDomains", &(self.ifindex, &domains))
+            .await
+            .context("SetLinkDomains failed")?;
 
         apply_link_settings_dbus(&conn, self.ifindex).await;
 
@@ -432,15 +398,7 @@ impl DnsConfigurator for SystemdResolvedDBus {
 
     async fn revert(&self) -> Result<()> {
         if let Ok(conn) = Connection::system().await {
-            let _ = conn
-                .call_method(
-                    Some("org.freedesktop.resolve1"),
-                    "/org/freedesktop/resolve1",
-                    Some("org.freedesktop.resolve1.Manager"),
-                    "RevertLink",
-                    &(self.ifindex,),
-                )
-                .await;
+            let _ = resolved_call(&conn, "RevertLink", &(self.ifindex,)).await;
         }
         tracing::info!("reverted systemd-resolved D-Bus configuration");
         Ok(())
@@ -715,18 +673,6 @@ pub(super) fn parse_resolv_nameservers(contents: &str) -> Vec<Ipv4Addr> {
         .filter_map(|ip| match ip {
             IpAddr::V4(v4) => Some(v4),
             IpAddr::V6(_) => None,
-        })
-        .collect()
-}
-
-/// The IPv6 half of [`parse_resolv_nameserver_ips`].
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn parse_resolv_nameservers_v6(contents: &str) -> Vec<Ipv6Addr> {
-    parse_resolv_nameserver_ips(contents)
-        .into_iter()
-        .filter_map(|ip| match ip {
-            IpAddr::V6(v6) => Some(v6),
-            IpAddr::V4(_) => None,
         })
         .collect()
 }
@@ -1414,12 +1360,10 @@ pub(super) struct DirectResolvConf {
     /// Swapped rather than owned so [`Self::apply`] can narrow it: quieting
     /// NetworkManager can kill a server that answered at capture time, and both
     /// the file we render and the forwarder we seed read this afterwards.
-    captured_upstreams: Arc<ArcSwap<Vec<Ipv4Addr>>>,
-    /// The IPv6 servers the file named, probed like the IPv4 ones. Kept apart
-    /// because everything that reasons about another overlay's resolver is
-    /// IPv4 (it lives in `100.64.0.0/10`); these only ever get rendered back
-    /// and forwarded to.
-    captured_v6: Arc<ArcSwap<Vec<Ipv6Addr>>>,
+    ///
+    /// Both families, IPv4 first and each in the file's order: this is also
+    /// the list rendered after ours (see [`DnsConfigurator::fallback_upstreams`]).
+    captured_upstreams: Arc<ArcSwap<Vec<IpAddr>>>,
     /// The search domains the file already had. Kept separately from the live
     /// list so a later join/leave re-merges against the host's own domains
     /// instead of accumulating ours on top of the previous render.
@@ -1549,24 +1493,11 @@ impl DirectResolvConf {
             .unwrap_or_default();
         let search = parse_resolv_search(&contents);
 
-        let captured = parse_resolv_nameservers(&contents);
-        let captured_v6 = parse_resolv_nameservers_v6(&contents);
-        let (live, live_v6) = futures::join!(
-            crate::dns::resolver::live_upstreams(&captured),
-            crate::dns::resolver::live_upstreams(&captured_v6)
-        );
-        if live.len() != captured.len() || live_v6.len() != captured_v6.len() {
-            let dead: Vec<IpAddr> = captured
-                .iter()
-                .filter(|ip| !live.contains(ip))
-                .map(|ip| IpAddr::V4(*ip))
-                .chain(
-                    captured_v6
-                        .iter()
-                        .filter(|ip| !live_v6.contains(ip))
-                        .map(|ip| IpAddr::V6(*ip)),
-                )
-                .collect();
+        let mut captured = parse_resolv_nameserver_ips(&contents);
+        captured.sort_by_key(IpAddr::is_ipv6);
+        let live = crate::dns::resolver::live_upstreams(&captured).await;
+        if live.len() != captured.len() {
+            let dead: Vec<&IpAddr> = captured.iter().filter(|ip| !live.contains(ip)).collect();
             tracing::warn!(
                 ?dead,
                 "resolv.conf names DNS servers that do not answer; ignoring them"
@@ -1574,7 +1505,6 @@ impl DirectResolvConf {
         }
         Self {
             captured_upstreams: Arc::new(ArcSwap::from_pointee(live)),
-            captured_v6: Arc::new(ArcSwap::from_pointee(live_v6)),
             search: Arc::new(ArcSwap::from_pointee(search.clone())),
             captured_search: search,
             operator_upstreams: crate::config::load()
@@ -1584,25 +1514,10 @@ impl DirectResolvConf {
         }
     }
 
-    /// The upstream written into resolv.conf as the second nameserver, so the
-    /// host keeps resolving if our resolver stops answering.
-    ///
-    /// IPv4 first, then IPv6. Within a family the file's own order is kept.
-    fn fallbacks(&self) -> Vec<IpAddr> {
-        self.captured_upstreams
-            .load()
-            .iter()
-            .map(|ip| IpAddr::V4(*ip))
-            .chain(self.captured_v6.load().iter().map(|ip| IpAddr::V6(*ip)))
-            .collect()
-    }
-
-    /// Whether anything we could forward to is left, of either family, or the
-    /// operator named their own.
-    fn has_somewhere_to_forward(&self) -> bool {
-        !self.captured_upstreams.load().is_empty()
-            || !self.captured_v6.load().is_empty()
-            || self.operator_upstreams
+    /// Whether `upstreams` or the operator's own leave the forwarder anywhere
+    /// to send queries.
+    fn can_forward(&self, upstreams: &[IpAddr]) -> bool {
+        !upstreams.is_empty() || self.operator_upstreams
     }
 }
 
@@ -1691,7 +1606,7 @@ pub(super) enum NmQuietOutcome {
     /// still give the forwarder somewhere to go. Not a black hole, so the
     /// takeover stands; the dead entries are named because they stay in the
     /// file we are about to write and cost a timeout each.
-    Degraded(Vec<Ipv4Addr>),
+    Degraded(Vec<IpAddr>),
     /// Nothing we captured answers any more and the operator named nothing.
     /// Taking the file over now would own DNS for the host with no way to
     /// resolve anything outside `.ray`.
@@ -1712,8 +1627,8 @@ pub(super) enum NmQuietOutcome {
 /// either way.
 #[cfg(any(target_os = "linux", test))]
 pub(super) fn nm_quiet_outcome(
-    before: &[Ipv4Addr],
-    after: &[Ipv4Addr],
+    before: &[IpAddr],
+    after: &[IpAddr],
     operator_upstreams: bool,
 ) -> NmQuietOutcome {
     if after.len() == before.len() {
@@ -1742,7 +1657,7 @@ impl DnsConfigurator for DirectResolvConf {
         // working DNS and no Magic DNS is the better failure. Bail before
         // touching anything so there is nothing to undo.
         anyhow::ensure!(
-            self.has_somewhere_to_forward(),
+            self.can_forward(&self.captured_upstreams.load()),
             "no working DNS server found in /etc/resolv.conf, so taking it over would leave \
              this host unable to resolve anything; set `dns_upstreams` in the config to \
              name one explicitly"
@@ -1790,23 +1705,16 @@ impl DnsConfigurator for DirectResolvConf {
         // presents exactly the evidence an NM forwarder does: everything answered
         // then, nothing answers now. Attributing that to the quiet is what latched
         // Magic DNS off for the daemon's lifetime on a passing blip.
-        let captured = self.captured_upstreams.load().as_ref().clone();
-        let captured_v6 = self.captured_v6.load().as_ref().clone();
-        let (before, before_v6) = futures::join!(
-            crate::dns::resolver::live_upstreams(&captured),
-            crate::dns::resolver::live_upstreams(&captured_v6)
-        );
-        if before_v6.len() != captured_v6.len() {
-            self.captured_v6.store(Arc::new(before_v6.clone()));
-        }
+        let captured = self.captured_upstreams.load_full();
+        let before = crate::dns::resolver::live_upstreams(&captured).await;
         anyhow::ensure!(
-            !before.is_empty() || !before_v6.is_empty() || self.operator_upstreams,
+            self.can_forward(&before),
             "no DNS server named in /etc/resolv.conf is answering right now, so taking it \
              over would leave this host unable to resolve anything; this is a plain retry, \
              not a verdict about NetworkManager"
         );
         // Keep what the probe just learned, for the same reason the `Degraded`
-        // arm below does: this set is what `fallbacks` renders into the file and
+        // arm below does: this set is what `fallback_upstreams` renders into the file and
         // what `adopt_configurator` seeds the forwarder with, and a server that
         // has stopped answering costs a full lookup timeout in either.
         if before.len() != captured.len() {
@@ -1820,26 +1728,12 @@ impl DnsConfigurator for DirectResolvConf {
         nm_quiet_install().await;
         // `before`, not `captured`: comparing like with like, so a server that was
         // already dead cannot be counted against the quiet.
-        let (after, after_v6) = futures::join!(
-            crate::dns::resolver::live_upstreams(&before),
-            crate::dns::resolver::live_upstreams(&before_v6)
-        );
-        if after_v6.len() != before_v6.len() {
-            tracing::warn!(
-                dead = ?before_v6.iter().filter(|ip| !after_v6.contains(ip)).collect::<Vec<_>>(),
-                "some IPv6 DNS servers stopped answering once NetworkManager was quieted; \
-                 dropping them from the upstreams and from the file"
-            );
-            self.captured_v6.store(Arc::new(after_v6.clone()));
-        }
-        // A surviving IPv6 server is somewhere to forward, the same waiver the
-        // operator's own `dns_upstreams` gives.
-        let waived = self.operator_upstreams || !after_v6.is_empty();
-        match nm_quiet_outcome(&before, &after, waived) {
+        let after = crate::dns::resolver::live_upstreams(&before).await;
+        match nm_quiet_outcome(&before, &after, self.operator_upstreams) {
             NmQuietOutcome::Proceed => {
                 NM_ABORTS.store(0, AtomicOrdering::Relaxed);
             }
-            // Narrowed, not just reported: this set is what `fallbacks` renders
+            // Narrowed, not just reported: this set is what `fallback_upstreams` renders
             // into the file and what `adopt_configurator` seeds the forwarder
             // with, and a dead server in either costs a full lookup timeout per
             // off-mesh name. The capture in `new` probed for exactly this reason;
@@ -1890,7 +1784,8 @@ impl DnsConfigurator for DirectResolvConf {
                 }
             }
         }
-        let new_content = render_direct_resolv_conf(&self.search.load(), &self.fallbacks());
+        let new_content =
+            render_direct_resolv_conf(&self.search.load(), &self.fallback_upstreams());
         if let Err(e) = write_resolv_file(path, new_content.as_bytes()) {
             // The file is still the host's (the write renames into place, so a
             // failure leaves it as it was), but NetworkManager is quieted and a
@@ -1908,7 +1803,7 @@ impl DnsConfigurator for DirectResolvConf {
             return Err(anyhow::Error::new(e).context("writing /etc/resolv.conf"));
         }
         tracing::info!(
-            upstreams = ?self.fallbacks(),
+            upstreams = ?self.fallback_upstreams(),
             "configured /etc/resolv.conf directly (fallback); verified upstream resolvers"
         );
         Ok(())
@@ -1927,7 +1822,7 @@ impl DnsConfigurator for DirectResolvConf {
         "direct-resolv.conf"
     }
 
-    fn captured_upstreams(&self) -> Vec<Ipv4Addr> {
+    fn captured_upstreams(&self) -> Vec<IpAddr> {
         self.captured_upstreams.load().as_ref().clone()
     }
 
@@ -1951,7 +1846,7 @@ impl DnsConfigurator for DirectResolvConf {
         }
         write_resolv_file(
             path,
-            render_direct_resolv_conf(&self.search.load(), &self.fallbacks()).as_bytes(),
+            render_direct_resolv_conf(&self.search.load(), &self.fallback_upstreams()).as_bytes(),
         )
         .context("writing search domains to /etc/resolv.conf")
     }
@@ -1960,12 +1855,10 @@ impl DnsConfigurator for DirectResolvConf {
         Some(Arc::clone(&self.search))
     }
 
-    fn captured_upstreams_v6(&self) -> Vec<Ipv6Addr> {
-        self.captured_v6.load().as_ref().clone()
-    }
-
+    /// The upstreams written into resolv.conf after ours, so the host keeps
+    /// resolving if our resolver stops answering: the captured ones.
     fn fallback_upstreams(&self) -> Vec<IpAddr> {
-        self.fallbacks()
+        self.captured_upstreams()
     }
 
     fn shared_resolver(&self) -> Option<Ipv4Addr> {
