@@ -44,7 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   WireGuard, Mullvad or kube-proxy, and container traffic is no longer routed
   around the tunnel.
 - Exit-node rules removed by a firewall reload or `nft flush ruleset` are
-  restored within 30 seconds. TCP MSS is clamped on exit traffic.
+  restored within 30 seconds, and so is the mesh SSH firewall accept. TCP MSS
+  is clamped on exit traffic.
 - The mesh SSH firewall check now sees a native nftables drop on hosts that use
   iptables-nft.
 - Linux: if the TUN device fails, the daemon exits and the service manager
