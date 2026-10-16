@@ -72,7 +72,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Services reached through the IPv4 bridge see the host's own address instead
   of `127.0.0.1`, so mesh peers no longer get trust meant for local clients.
   Services that trust the host's own subnet now treat bridged peers as LAN
-  clients.
+  clients. On hosts with no IPv4 address besides loopback, the bridge now
+  serves nothing.
 - The local control socket limits concurrent and stalled clients.
 
 ### Performance

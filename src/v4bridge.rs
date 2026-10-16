@@ -24,7 +24,8 @@
 //! a mesh peer must not inherit that. A wildcard listener accepts on every
 //! address, so dialing the host's own LAN address reaches the same socket, and
 //! the kernel picks that address as the source. A host with no IPv4 address
-//! but loopback bridges nothing: its wildcard service is local-only in fact.
+//! but loopback bridges nothing, and binds nothing: its wildcard service is
+//! local-only in fact.
 //!
 //! Three rules keep this from widening what the host exposes:
 //!
@@ -134,6 +135,9 @@ impl V4Bridge {
             // this on its timer alone.
             let mut events = listen_events::watch(&token);
             let mut ports: HashMap<u16, PortState> = HashMap::new();
+            // Whether the last pass found no IPv4 address to dial, so the
+            // reason is logged once per stretch rather than every scan.
+            let mut no_host = false;
             loop {
                 // The ports we hold on the mesh address, so the enumeration can
                 // tell our own listeners from a service's.
@@ -154,7 +158,14 @@ impl V4Bridge {
                 let found = match scan {
                     Ok((found, host)) => {
                         self.host.set(host);
-                        found
+                        if host.is_none() && !no_host {
+                            info!(
+                                "v4 bridge: this host has no IPv4 address but loopback, \
+                                 so there is nothing to bridge to"
+                            );
+                        }
+                        no_host = host.is_none();
+                        with_upstream(found, host)
                     }
                     Err(_) => None,
                 };
@@ -447,6 +458,16 @@ async fn bridge_conn(mut inbound: TcpStream, from: SocketAddr, port: u16, upstre
     debug!(port, %from, "v4 bridge: connection open");
     if let Err(e) = copy_bidirectional(&mut inbound, &mut stream).await {
         debug!(port, %from, error = %e, "v4 bridge: connection ended early");
+    }
+}
+
+/// The ports to hold given whether the host has an IPv4 address to dial. With
+/// none, a bridged port could only accept and then drop every connection, so
+/// none is held: the peer gets a plain refusal and the port stays free.
+fn with_upstream(found: Option<BTreeSet<u16>>, host: Option<Ipv4Addr>) -> Option<BTreeSet<u16>> {
+    match host {
+        Some(_) => found,
+        None => found.map(|_| BTreeSet::new()),
     }
 }
 
@@ -884,6 +905,16 @@ tcp6       0      0  {MESH}.4000            *.*                    LISTEN
             pick_host_v4([addr("100.101.102.103")]),
             Some(addr("100.101.102.103"))
         );
+    }
+
+    #[test]
+    fn no_ports_are_held_without_an_ipv4_address_to_dial() {
+        let found = Some(BTreeSet::from([80, 8080]));
+        let lan = Some(Ipv4Addr::new(192, 168, 1, 10));
+        assert_eq!(with_upstream(found.clone(), lan), found);
+        assert_eq!(with_upstream(found, None), Some(BTreeSet::new()));
+        // Unreadable listeners stay unreadable, so nothing is unbound on a guess.
+        assert_eq!(with_upstream(None, None), None);
     }
 
     #[cfg(unix)]
