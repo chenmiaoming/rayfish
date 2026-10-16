@@ -336,26 +336,28 @@ fn evaluate_inbound(
             InboundDecision::DropExit
         };
     }
-    let now = tokio::time::Instant::now();
-    if let Some(f) = &ip_fragment
-        && !f.first
-    {
-        return if fragments.admits(&f.key, now) {
+    match ip_fragment {
+        // A later fragment has no ports to judge; its first fragment decided.
+        Some(f) if !f.first => {
+            if fragments.admits(&f.key, tokio::time::Instant::now()) {
+                InboundDecision::Accept(info)
+            } else {
+                InboundDecision::DropFragment
+            }
+        }
+        whole_or_first => {
+            if firewall
+                .evaluate_packet(Direction::In, &info, peer_id, shares_network)
+                .is_deny()
+            {
+                return InboundDecision::DropFirewall(info);
+            }
+            if let Some(f) = whole_or_first {
+                fragments.allow(f.key, tokio::time::Instant::now());
+            }
             InboundDecision::Accept(info)
-        } else {
-            InboundDecision::DropFragment
-        };
+        }
     }
-    if firewall
-        .evaluate_packet(Direction::In, &info, peer_id, shares_network)
-        .is_deny()
-    {
-        return InboundDecision::DropFirewall(info);
-    }
-    if let Some(f) = ip_fragment {
-        fragments.allow(f.key, now);
-    }
-    InboundDecision::Accept(info)
 }
 
 /// Application close code a peer sends when it deliberately leaves a network
