@@ -1062,21 +1062,35 @@ pub(super) fn nm_present() -> bool {
 }
 
 /// Ask NetworkManager to reload its configuration so a conf.d change takes effect.
+///
+/// Through NetworkManager's own `Reload` method rather than the service manager:
+/// this is NM's configuration, not a service we manage, and the D-Bus call works
+/// the same under every init. `nmcli` is the fallback for an NM too old to have
+/// the method (it arrived in 1.22).
 #[cfg(target_os = "linux")]
 pub(super) async fn nm_reload() {
-    use tokio::process::Command;
-    if Command::new("nmcli")
-        .args(["general", "reload"])
-        .status()
-        .await
-        .is_ok_and(|s| s.success())
+    if let Ok(conn) = Connection::system().await
+        && conn
+            .call_method(
+                Some("org.freedesktop.NetworkManager"),
+                "/org/freedesktop/NetworkManager",
+                Some("org.freedesktop.NetworkManager"),
+                "Reload",
+                &(0u32,),
+            )
+            .await
+            .is_ok()
     {
         return;
     }
-    let _ = Command::new("systemctl")
-        .args(["reload", "NetworkManager"])
+    let reloaded = tokio::process::Command::new("nmcli")
+        .args(["general", "reload"])
         .status()
-        .await;
+        .await
+        .is_ok_and(|s| s.success());
+    if !reloaded {
+        tracing::warn!("could not ask NetworkManager to reload its DNS configuration");
+    }
 }
 
 /// Install the `dns=none` drop-in and reload NM (no-op if NM isn't present, or
@@ -1398,6 +1412,30 @@ pub(super) fn first_nameserver(contents: &str) -> Option<IpAddr> {
     })
 }
 
+/// The search domains a resolv.conf names, from its `search` and `domain`
+/// lines, minus our own.
+///
+/// Split on whitespace for the same reason as [`parse_resolv_nameservers`]:
+/// `search\tlan` is as valid as `search lan`.
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn parse_resolv_search(contents: &str) -> Vec<SearchDomain> {
+    contents
+        .lines()
+        .flat_map(|l| {
+            let mut f = l.split_whitespace();
+            let keyword = f.next();
+            matches!(keyword, Some("search" | "domain"))
+                .then_some(f)
+                .into_iter()
+                .flatten()
+        })
+        .map(SearchDomain::from_host)
+        // Ours are re-derived from the joined networks on every refresh;
+        // keeping the ones this file already names would outlive a leave.
+        .filter(|d| !d.is_ours())
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 impl DirectResolvConf {
     /// Read the current resolv.conf to capture upstreams + existing search
@@ -1414,18 +1452,7 @@ impl DirectResolvConf {
         let contents = tokio::fs::read_to_string("/etc/resolv.conf")
             .await
             .unwrap_or_default();
-        let search: Vec<SearchDomain> = contents
-            .lines()
-            .filter_map(|l| {
-                l.trim()
-                    .strip_prefix("search ")
-                    .or_else(|| l.trim().strip_prefix("domain "))
-            })
-            .flat_map(|s| s.split_whitespace().map(SearchDomain::from_host))
-            // Ours are re-derived from the joined networks on every refresh;
-            // keeping the ones this file already names would outlive a leave.
-            .filter(|d| !d.is_ours())
-            .collect();
+        let search = parse_resolv_search(&contents);
 
         let captured = parse_resolv_nameservers(&contents);
         let live = crate::dns::resolver::live_upstreams(&captured).await;

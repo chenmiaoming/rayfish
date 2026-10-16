@@ -553,10 +553,10 @@ mod tests {
     use super::{
         MAX_NAMESERVERS, NmQuietOutcome, Reassert, SearchDomain, StaleBackup, first_nameserver,
         foreign_mesh_resolver, join_domains, merge_search_domains, nm_dns_none_dropin,
-        nm_quiet_outcome, other_overlay_resolver, parse_resolv_nameservers, reassert_decision,
-        render_direct_resolv_conf, render_direct_resolv_conf_with, resolv_conf_is_ours,
-        resolvectl_domain_args, resolved_link_domains, search_domains_for, stale_backup_action,
-        strip_our_resolv_entries,
+        nm_quiet_outcome, other_overlay_resolver, parse_resolv_nameservers, parse_resolv_search,
+        reassert_decision, render_direct_resolv_conf, render_direct_resolv_conf_with,
+        resolv_conf_is_ours, resolvectl_domain_args, resolved_link_domains, search_domains_for,
+        stale_backup_action, strip_our_resolv_entries,
     };
 
     /// Domains as the host had them, i.e. read back from its own config.
@@ -1096,6 +1096,15 @@ mod tests {
                 "192.168.1.1".parse::<Ipv4Addr>().unwrap(),
                 "8.8.8.8".parse::<Ipv4Addr>().unwrap()
             ]
+        );
+    }
+
+    #[test]
+    fn parse_resolv_search_accepts_any_whitespace_and_drops_ours() {
+        let c = "search\tlan corp.example\ndomain   home\nsearch homelab.ray ray\n# search nope\nsearchx bad\n";
+        assert_eq!(
+            join_domains(&parse_resolv_search(c)),
+            "lan corp.example home"
         );
     }
 
