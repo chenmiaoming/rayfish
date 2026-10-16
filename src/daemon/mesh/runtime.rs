@@ -8,6 +8,8 @@ use super::super::*;
 #[cfg(any(feature = "desktop", target_os = "macos"))]
 use std::net::IpAddr;
 use std::sync::RwLock;
+#[cfg(target_os = "linux")]
+use tokio::time::MissedTickBehavior;
 
 use super::create_join::{RestoredGroupBlob, mesh_version_is_speakable};
 
@@ -17,6 +19,10 @@ use super::create_join::{RestoredGroupBlob, mesh_version_is_speakable};
 /// enough that a broken exit node does not hang the command.
 #[cfg(target_os = "macos")]
 const EXIT_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often the exit node's kernel state is checked for removal by another tool.
+#[cfg(target_os = "linux")]
+const EXIT_KERNEL_CHECK: Duration = Duration::from_secs(30);
 
 /// Per-attempt wait for a control pong. Also paces the readiness loop.
 #[cfg(target_os = "macos")]
@@ -1467,6 +1473,88 @@ impl Daemon {
                 }
             }
         });
+    }
+
+    /// Spawn the daemon-lifetime check that the exit node's kernel state is still
+    /// there. Our nft tables and `ip rule`s live outside the process, and a
+    /// firewall reload, `nft flush ruleset` or a network manager restart removes
+    /// them without telling us: a gateway then forwards without masquerading, and
+    /// a client's tunnel quietly stops. Every [`EXIT_KERNEL_CHECK`] this re-applies
+    /// whatever went missing, re-reads the gateway's own addresses, and re-adds
+    /// the host-firewall forwarding exceptions a reload dropped. Linux only, the
+    /// one platform whose exit state another tool commonly flushes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {
+        let daemon = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(EXIT_KERNEL_CHECK);
+            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            // The first tick is immediate, and `activate` has just applied.
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = daemon.shutdown_token.cancelled() => break,
+                    _ = tick.tick() => {}
+                }
+                if daemon.active.load(Ordering::SeqCst) {
+                    daemon.check_exit_kernel_state().await;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {}
+
+    /// One pass of [`spawn_exit_kernel_watch`](Self::spawn_exit_kernel_watch).
+    #[cfg(target_os = "linux")]
+    async fn check_exit_kernel_state(&self) {
+        let server = self.registry.exit_server.clone();
+        let serving = server.is_active();
+        // A failed install was already reported and rolled back; retrying it on
+        // a timer is not this check's job.
+        let using = self.registry.exit_client.is_active()
+            && self.registry.exit_install_error.load().is_none();
+        if !serving && !using {
+            return;
+        }
+        let carries = self.tunnel_carries();
+        let tun_name = self.tun_name.load().as_str().to_owned();
+        let missing = {
+            // Not concurrently with a reconcile, which would be seen half-done.
+            let _guard = self.exit_reconcile.lock().await;
+            tokio::task::spawn_blocking(move || {
+                let mut missing = Vec::new();
+                if serving {
+                    server.refresh_host_interfaces();
+                    if !crate::exit_node::server_state_intact() {
+                        missing.push("gateway");
+                    } else {
+                        crate::exit_node::reassert_forward_firewall(&tun_name);
+                    }
+                }
+                if using && !crate::exit_node::client_state_intact(carries) {
+                    missing.push("client tunnel");
+                }
+                missing
+            })
+            .await
+            .unwrap_or_default()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            missing = %missing.join(", "),
+            "exit-node kernel state was removed from outside rayfish (a firewall \
+             reload or `nft flush ruleset`?); re-applying"
+        );
+        if let Some(warning) = self.apply_exit_node().await {
+            tracing::warn!(
+                warning,
+                "exit-node re-apply after kernel state went missing"
+            );
+        }
     }
 
     /// After a `ray exit-node` mutation: if the data plane is up, reconcile the

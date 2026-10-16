@@ -87,6 +87,7 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
     daemon.registry.connect_all_networks().await;
     tokio::spawn(Arc::clone(&daemon.registry).run_restore_supervisor());
     daemon.spawn_exit_reapply_listener();
+    daemon.spawn_exit_kernel_watch();
     // A failed activation returns its reason to whoever asked, and at service
     // start that is nobody: log it here, or a daemon that never got its data
     // plane up says nothing about why in `ray logs`. (Warnings from a partial
@@ -168,6 +169,7 @@ pub async fn build_headless(on_demand: bool) -> Result<Arc<Daemon>> {
     daemon.registry.connect_all_networks().await;
     tokio::spawn(Arc::clone(&daemon.registry).run_restore_supervisor());
     daemon.spawn_exit_reapply_listener();
+    daemon.spawn_exit_kernel_watch();
     // Control readers and the join path now run their network ops (promotion,
     // self-unpair) directly via NetworkRegistry, so a headless embedder needs no
     // hand-off drain loop.
