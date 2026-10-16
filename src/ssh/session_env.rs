@@ -10,13 +10,13 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 #[cfg(target_os = "linux")]
-use std::thread;
-#[cfg(target_os = "linux")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use super::login::LoginInfo;
+#[cfg(target_os = "linux")]
+use crate::child::wait_bounded;
 
 /// Whether a client-controlled variable is safe to pass to a login session.
 pub(super) fn env_accepted(name: &str) -> bool {
@@ -150,24 +150,13 @@ fn probe_scope(systemd_run: &Path) -> bool {
             return false;
         }
     };
-    let started = Instant::now();
-    let outcome = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < TIMEOUT => thread::sleep(Duration::from_millis(20)),
-            Ok(None) => break Err(Error::from(ErrorKind::TimedOut)),
-            Err(error) => break Err(error),
-        }
-    };
-    match outcome {
+    match wait_bounded(&mut child, TIMEOUT) {
         Ok(status) if status.success() => true,
         Ok(status) => {
             tracing::warn!(%status, "systemd-run --scope failed, SSH sessions stay in the daemon's cgroup");
             false
         }
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
             tracing::warn!(%error, "systemd-run --scope failed, SSH sessions stay in the daemon's cgroup");
             false
         }

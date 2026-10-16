@@ -1396,29 +1396,17 @@ pub fn emergency_restore_resolv_conf() {
 #[cfg(target_os = "linux")]
 fn nm_reload_blocking() {
     use std::process::{Command, Stdio};
-    use std::thread;
-    use std::time::Instant;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
-    let Ok(mut child) = Command::new("nmcli")
+    if let Ok(mut child) = Command::new("nmcli")
         .args(["general", "reload"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-    else {
-        return;
-    };
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if started.elapsed() < TIMEOUT => thread::sleep(Duration::from_millis(20)),
-            _ => break,
-        }
+    {
+        let _ = crate::child::wait_bounded(&mut child, TIMEOUT);
     }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[cfg(target_os = "linux")]
