@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -39,6 +41,8 @@ const BLOB_GC_INTERVAL: Duration = Duration::from_secs(600);
 
 pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) -> Result<()> {
     let overrides = Overrides::default();
+    #[cfg(target_os = "linux")]
+    crate::rlimit::raise_nofile_limit();
 
     // Claim the process-wide IPC endpoint before constructing anything that
     // changes host state. In particular, a second daemon must fail before it
@@ -912,6 +916,21 @@ async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
     })
 }
 
+/// Most IPC connections served at once. The socket is open to every local
+/// user, and each connection costs a task, a descriptor, a request buffer of up
+/// to a frame and any descriptors it carries, so an unbounded count lets one
+/// user exhaust the daemon's fd table. Past the cap the daemon stops accepting
+/// and new clients wait in the listen backlog.
+#[cfg(unix)]
+const MAX_IPC_CLIENTS: usize = 64;
+
+/// How long a client gets to deliver its request, and the daemon to deliver a
+/// single-frame reply. Bounds how long a client that connects and then stalls
+/// can hold one of the [`MAX_IPC_CLIENTS`] slots. The `ray logs` stream is not
+/// covered: it runs after the request and gives its slot back first.
+#[cfg(unix)]
+const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[cfg(unix)]
 async fn accept_ipc(
     socket: IpcSocket,
@@ -919,7 +938,14 @@ async fn accept_ipc(
     token: CancellationToken,
     host: IpcHost,
 ) -> Result<()> {
+    let slots = Arc::new(Semaphore::new(MAX_IPC_CLIENTS));
     loop {
+        let permit = tokio::select! {
+            _ = token.cancelled() => {
+                return Ok(());
+            }
+            permit = Arc::clone(&slots).acquire_owned() => permit?,
+        };
         tokio::select! {
             _ = token.cancelled() => {
                 return Ok(());
@@ -928,7 +954,7 @@ async fn accept_ipc(
                 Ok((stream, _)) => {
                     let daemon = Arc::clone(daemon);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_ipc_client(stream, &daemon, host).await {
+                        if let Err(e) = handle_ipc_client(stream, &daemon, host, permit).await {
                             tracing::debug!(error = %e, "IPC client error");
                         }
                     });
@@ -1144,14 +1170,22 @@ fn truncate(s: &str) -> String {
 }
 
 #[cfg(unix)]
-async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHost) -> Result<()> {
+async fn handle_ipc_client(
+    stream: UnixStream,
+    daemon: &Arc<Daemon>,
+    host: IpcHost,
+    slot: OwnedSemaphorePermit,
+) -> Result<()> {
     let peer_cred = stream.peer_cred().ok().map(|c| PeerIdentity::Unix {
         uid: c.uid(),
         gid: c.gid(),
     });
     // The request is read fd-aware: `SendFileFd` arrives with the file as
     // SCM_RIGHTS ancillary data, which a plain framed read would drop.
-    let (req, fds) = match ipc::recv_with_fds(&stream).await {
+    let received = tokio::time::timeout(IPC_IO_TIMEOUT, ipc::recv_with_fds(&stream))
+        .await
+        .context("timed out waiting for the IPC request")?;
+    let (req, fds) = match received {
         Ok(v) => v,
         // A request this build cannot decode (a settings key it does not know, a
         // variant from a newer `ray`) gets the reason back rather than a bare
@@ -1171,7 +1205,8 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
             let msg = truncate(&format!("{e:#}"));
             tracing::debug!(error = %msg, "undecodable IPC request");
             let mut framed = ipc::framed(stream);
-            let _ = ipc::send(&mut framed, ipc_err(msg)).await;
+            let _ =
+                tokio::time::timeout(IPC_IO_TIMEOUT, ipc::send(&mut framed, ipc_err(msg))).await;
             return Ok(());
         }
     };
@@ -1182,6 +1217,8 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
     // open read tier, alongside `Status` and `Report`.
     if let IpcMessage::Logs { since, follow } = &req {
         let (since, follow) = (*since, *follow);
+        // A follow stream can run for days; it must not hold a client slot.
+        drop(slot);
         let mut framed = ipc::framed(stream);
         if let Some(denied) = host.check_authorized(&req, peer_cred.as_ref()) {
             let _ = ipc::send(&mut framed, denied).await;
@@ -1227,7 +1264,10 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<Daemon>, host: IpcHo
         }
     };
     let mut framed = ipc::framed(stream);
-    ipc::send(&mut framed, resp).await?;
+    tokio::time::timeout(IPC_IO_TIMEOUT, ipc::send(&mut framed, resp))
+        .await
+        .context("timed out sending the IPC response")??;
+    drop(slot);
     Ok(())
 }
 

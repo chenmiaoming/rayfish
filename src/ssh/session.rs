@@ -229,6 +229,11 @@ pub(super) async fn run_pty_session(
     if handoff.is_none() {
         cmd = cmd.current_dir(&info.home);
     }
+    // SAFETY: one setrlimit call, async-signal-safe.
+    #[cfg(target_os = "linux")]
+    {
+        cmd = unsafe { cmd.pre_exec(crate::rlimit::restore_nofile_limit) };
+    }
     if drop_in_child {
         let drop = drop_privs(info.uid, info.gid, &info.name)?;
         // SAFETY: drops supplementary groups, group, and user before exec.
@@ -296,6 +301,11 @@ pub(super) async fn run_pipe_session(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // SAFETY: one setrlimit call, async-signal-safe.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        cmd.pre_exec(crate::rlimit::restore_nofile_limit);
+    }
     if launch.drop_in_child {
         let drop = drop_privs(info.uid, info.gid, &info.name)?;
         // SAFETY: drops supplementary groups, group, and user before exec.
