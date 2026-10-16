@@ -7,6 +7,7 @@ use super::super::*;
 // desktop feature (the ray-mobile host build) still needs the import.
 #[cfg(any(feature = "desktop", target_os = "macos"))]
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use tokio::sync::MutexGuard as AsyncMutexGuard;
