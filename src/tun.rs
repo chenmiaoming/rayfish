@@ -148,15 +148,32 @@ pub const TUN_MTU: u16 = 1500;
 /// IPv6's minimum link MTU, used when the device rejects the preferred MTU.
 pub const MIN_TUN_MTU: u16 = 1280;
 
+/// The MTU a desktop TUN is created with. Linux uses IPv6's minimum, as
+/// Tailscale does: a 1500-byte packet never fits one QUIC datagram (about
+/// 1420 bytes on a 1500-byte path once discovery has run, about 1170 before),
+/// so at 1500 every full-sized packet went out as two mesh fragments, doubling
+/// the packet rate and the chance of losing it. 1280 fits one datagram on any
+/// ordinary path after discovery; mesh fragmentation still covers the rest.
+///
+/// Nothing on the wire changes. Each side announces the size it accepts and
+/// the other clamps to it, and [`TUN_MTU`] stays the largest packet the mesh
+/// carries, so a peer at 1500 and one at 1280 interoperate. Other platforms
+/// keep 1500 until their packet interfaces are moved together.
+#[cfg(target_os = "linux")]
+const PREFERRED_TUN_MTU: u16 = MIN_TUN_MTU;
+#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
+const PREFERRED_TUN_MTU: u16 = TUN_MTU;
+
 #[cfg(not(target_os = "android"))]
-fn configure_mtu(mut set: impl FnMut(u16) -> std::io::Result<()>) -> Result<u16> {
-    match set(TUN_MTU) {
-        Ok(()) => Ok(TUN_MTU),
-        Err(error) => {
+fn configure_mtu(preferred: u16, mut set: impl FnMut(u16) -> std::io::Result<()>) -> Result<u16> {
+    match set(preferred) {
+        Ok(()) => Ok(preferred),
+        Err(error) if preferred > MIN_TUN_MTU => {
             tracing::warn!(%error, mtu = MIN_TUN_MTU, "TUN rejected preferred MTU; trying fallback");
             set(MIN_TUN_MTU).context("set fallback TUN MTU to 1280")?;
             Ok(MIN_TUN_MTU)
         }
+        Err(error) => Err(error).context("set TUN MTU to 1280"),
     }
 }
 
@@ -235,7 +252,7 @@ pub async fn create(v6: Ipv6Addr) -> Result<(TunReader, TunWriter, String)> {
     let device = builder.build_async().context("create tun-rs device")?;
     #[cfg(target_os = "linux")]
     configure_linux_tun(&device.name().context("read TUN device name")?, v6).await?;
-    let mtu = configure_mtu(|mtu| {
+    let mtu = configure_mtu(PREFERRED_TUN_MTU, |mtu| {
         device.set_mtu(mtu)?;
         #[cfg(target_os = "windows")]
         device.set_mtu_v6(mtu)?;
@@ -1032,7 +1049,7 @@ mod tests {
     #[test]
     fn preferred_mtu_rejection_retries_at_ipv6_minimum() {
         let mut attempts = Vec::new();
-        let mtu = super::configure_mtu(|mtu| {
+        let mtu = super::configure_mtu(super::TUN_MTU, |mtu| {
             attempts.push(mtu);
             if mtu > 1280 {
                 Err(std::io::ErrorKind::InvalidInput.into())
@@ -1049,7 +1066,7 @@ mod tests {
     #[test]
     fn mtu_setup_does_not_hide_a_failed_fallback() {
         let mut attempts = Vec::new();
-        let result = super::configure_mtu(|mtu| {
+        let result = super::configure_mtu(super::TUN_MTU, |mtu| {
             attempts.push(mtu);
             Err(std::io::ErrorKind::PermissionDenied.into())
         });
@@ -1100,9 +1117,21 @@ mod tests {
 
     #[cfg(not(target_os = "android"))]
     #[test]
+    fn a_minimum_preferred_mtu_is_set_once() {
+        let mut attempts = Vec::new();
+        let result = super::configure_mtu(super::MIN_TUN_MTU, |mtu| {
+            attempts.push(mtu);
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, [1280]);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
     fn supported_preferred_mtu_needs_no_retry() {
         let mut attempts = Vec::new();
-        let mtu = super::configure_mtu(|mtu| {
+        let mtu = super::configure_mtu(super::TUN_MTU, |mtu| {
             attempts.push(mtu);
             Ok(())
         })
