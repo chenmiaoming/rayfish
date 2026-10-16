@@ -1408,10 +1408,11 @@ pub fn emergency_withdraw_resolvconf() {
 }
 
 /// [`nm_reload`] for a caller with no async runtime to use, such as the panic
-/// hook. Only the `nmcli` path, since the D-Bus client here is async, and
-/// bounded so a hung NM cannot stall the abort.
+/// hook, or a synchronous one such as the startup sweep. Only the `nmcli`
+/// path, since the D-Bus client here is async, and bounded so a hung NM cannot
+/// stall the abort.
 #[cfg(target_os = "linux")]
-fn nm_reload_blocking() {
+pub(super) fn nm_reload_blocking() {
     use std::process::{Command, Stdio};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
