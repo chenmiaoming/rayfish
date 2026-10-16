@@ -226,8 +226,8 @@ pub async fn detect_and_configure(
         if !resolved_in_path {
             tracing::info!(
                 "systemd-resolved is not in this host's resolution path \
-                 (/etc/resolv.conf does not point at the stub and nsswitch.conf has no \
-                 `resolve`); configuring /etc/resolv.conf directly instead"
+                 (/etc/resolv.conf does not point at its stub, or it is not running); \
+                 configuring /etc/resolv.conf directly instead"
             );
         }
 
@@ -568,7 +568,7 @@ mod tests {
         names.iter().map(|n| n.to_string()).collect()
     }
     #[cfg(target_os = "linux")]
-    use super::{nsswitch_uses_resolve, resolv_conf_points_at_resolved};
+    use super::{resolv_conf_owned_by_resolved, resolv_conf_points_at_resolved};
 
     /// Windows is handed only the search domains and has to recover the bare
     /// network names from them, for the NRPT namespaces. The two lists must not
@@ -1024,7 +1024,7 @@ mod tests {
         // asks it: registering `.ray` on the tun link there resolves nothing.
         let c = "nameserver 108.61.10.10\nnameserver 9.9.9.9\nnameserver 2001:19f0:300:1704::6\n";
         assert!(!resolv_conf_points_at_resolved(c));
-        assert!(!nsswitch_uses_resolve("hosts:          files dns\n"));
+        assert!(!resolv_conf_owned_by_resolved(c, None));
     }
 
     #[test]
@@ -1036,17 +1036,28 @@ mod tests {
         assert!(resolv_conf_points_at_resolved("nameserver 127.0.0.54\n"));
     }
 
+    /// A symlink to resolved's stub file counts even when the file cannot be
+    /// read; one to its uplink file does not, since that lists the upstreams
+    /// glibc then asks directly.
     #[test]
     #[cfg(target_os = "linux")]
-    fn nsswitch_resolve_module_counts_as_reaching_resolved() {
-        // glibc calls resolved over D-Bus here, so resolv.conf never matters.
-        assert!(nsswitch_uses_resolve(
-            "passwd: files\nhosts: mymachines resolve [!UNAVAIL=return] files dns\n"
+    fn a_link_to_the_stub_file_counts_as_reaching_resolved() {
+        use std::path::Path;
+        let stub = Path::new("../run/systemd/resolve/stub-resolv.conf");
+        assert!(resolv_conf_owned_by_resolved("", Some(stub)));
+        assert!(resolv_conf_owned_by_resolved(
+            "",
+            Some(Path::new("/run/systemd/resolve/stub-resolv.conf"))
         ));
-        // A commented-out line is not configuration, and `resolve` has to be a
-        // whole module name rather than a substring of another one.
-        assert!(!nsswitch_uses_resolve("# hosts: resolve files\n"));
-        assert!(!nsswitch_uses_resolve("hosts: files resolvectl dns\n"));
+        let uplink = Path::new("/run/systemd/resolve/resolv.conf");
+        assert!(!resolv_conf_owned_by_resolved(
+            "nameserver 192.0.2.1\n",
+            Some(uplink)
+        ));
+        assert!(!resolv_conf_owned_by_resolved(
+            "",
+            Some(Path::new("/run/NetworkManager/resolv.conf"))
+        ));
     }
 
     #[test]

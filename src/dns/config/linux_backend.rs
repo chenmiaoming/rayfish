@@ -272,7 +272,7 @@ mod linux {
 
 /// The stub listeners systemd-resolved binds. A `nameserver` line naming either
 /// one means glibc queries reach resolved.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(super) const RESOLVED_STUB_IPS: [Ipv4Addr; 2] =
     [Ipv4Addr::new(127, 0, 0, 53), Ipv4Addr::new(127, 0, 0, 54)];
 
@@ -282,40 +282,64 @@ pub(super) const RESOLVED_STUB_IPS: [Ipv4Addr; 2] =
 /// ship it enabled while leaving a static `/etc/resolv.conf` full of upstream
 /// servers (`resolvectl status` calls this `resolv.conf mode: foreign`). There
 /// glibc talks to the upstreams directly and every split-DNS domain we register
-/// is dead on arrival. Two ways in, either is enough:
-///   - `/etc/resolv.conf` names a stub listener, so the normal DNS path lands on
-///     resolved;
-///   - `/etc/nsswitch.conf` lists the `resolve` module, so glibc calls resolved
-///     over D-Bus before it ever reads resolv.conf.
+/// is dead on arrival. So the decision follows who owns `/etc/resolv.conf`, as
+/// Tailscale's does: it names a stub listener, or links to resolved's stub file.
+/// A link to resolved's uplink file (`/run/systemd/resolve/resolv.conf`) does
+/// not count, since that file lists the upstreams themselves.
+///
+/// `nsswitch.conf` listing `resolve` is deliberately not enough. On such a host
+/// with a foreign resolv.conf, resolved reads that file for its own servers, so
+/// writing it directly reaches glibc through resolved as well as every program
+/// that reads the file itself; registering on the link would reach only glibc.
+///
+/// And it has to be running: a stub address with no resolved behind it is a
+/// leftover, and choosing resolved there fails every apply (the resolvconf shim
+/// included) instead of falling through to writing the file.
 #[cfg(target_os = "linux")]
 pub(super) async fn resolved_is_in_resolution_path() -> bool {
-    let resolv = tokio::fs::read_to_string("/etc/resolv.conf")
-        .await
-        .unwrap_or_default();
-    if resolv_conf_points_at_resolved(&resolv) {
-        return true;
-    }
-
-    let nsswitch = tokio::fs::read_to_string("/etc/nsswitch.conf")
-        .await
-        .unwrap_or_default();
-    nsswitch_uses_resolve(&nsswitch)
+    let path = Path::new("/etc/resolv.conf");
+    let resolv = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let link = tokio::fs::read_link(path).await.ok();
+    resolv_conf_owned_by_resolved(&resolv, link.as_deref()) && resolved_reachable().await
 }
 
-#[cfg(target_os = "linux")]
+/// The pure half of [`resolved_is_in_resolution_path`]: `link` is the target of
+/// `/etc/resolv.conf` when it is a symlink.
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn resolv_conf_owned_by_resolved(contents: &str, link: Option<&Path>) -> bool {
+    resolv_conf_points_at_resolved(contents) || link.is_some_and(links_to_resolved_stub)
+}
+
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn resolv_conf_points_at_resolved(contents: &str) -> bool {
     parse_resolv_nameservers(contents)
         .iter()
         .any(|ip| RESOLVED_STUB_IPS.contains(ip))
 }
 
+/// `/run/systemd/resolve/stub-resolv.conf`, absolute or relative (the usual
+/// `../run/...`). resolved owns the directory and only the stub file routes
+/// lookups through it.
+#[cfg(any(target_os = "linux", test))]
+fn links_to_resolved_stub(target: &Path) -> bool {
+    target.ends_with("run/systemd/resolve/stub-resolv.conf")
+}
+
+/// resolved answers on the system bus.
 #[cfg(target_os = "linux")]
-pub(super) fn nsswitch_uses_resolve(contents: &str) -> bool {
-    contents
-        .lines()
-        .map(|l| l.split('#').next().unwrap_or("").trim())
-        .filter_map(|l| l.strip_prefix("hosts:"))
-        .any(|l| l.split_whitespace().any(|m| m == "resolve"))
+async fn resolved_reachable() -> bool {
+    let Ok(conn) = Connection::system().await else {
+        return false;
+    };
+    conn.call_method(
+        Some(RESOLVED_BUS),
+        RESOLVED_PATH,
+        Some("org.freedesktop.DBus.Peer"),
+        "Ping",
+        &(),
+    )
+    .await
+    .is_ok()
 }
 
 /// Whether the `resolvconf` binary is systemd's compatibility symlink to
