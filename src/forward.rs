@@ -545,6 +545,11 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
                 continue;
             }
             tracing::trace!(len = n, first_byte = pkt[0], "TUN read");
+            // Router solicitations and MLD reports from the kernel's own IPv6
+            // stack. Not traffic, and not a drop worth counting.
+            if firewall::is_link_scoped_v6(&pkt) {
+                continue;
+            }
             let Some(info) = firewall::parse_packet_info(&pkt) else {
                 // Not IP, truncated, a fragment, or IPv6 with an extension-header
                 // chain the parser refuses to walk. Counted rather than merely

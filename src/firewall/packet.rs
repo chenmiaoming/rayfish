@@ -35,6 +35,22 @@ pub fn parse_packet_info(packet: &[u8]) -> Option<PacketInfo> {
     }
 }
 
+/// Whether an IPv6 packet is addressed within its own link: a link-local
+/// unicast destination (`fe80::/10`) or an interface- or link-scoped multicast
+/// group (`ff01::/16`, `ff02::/16`). The kernel sends router solicitations and
+/// MLD reports like this into any interface it runs IPv6 on. They have no peer
+/// to go to and must not leave the link, so the forwarding loop discards them
+/// without counting them as drops.
+pub fn is_link_scoped_v6(packet: &[u8]) -> bool {
+    if packet.len() < 40 || packet[0] >> 4 != 6 {
+        return false;
+    }
+    let dst = &packet[24..40];
+    let link_local_unicast = dst[0] == 0xfe && dst[1] & 0xc0 == 0x80;
+    let link_scoped_multicast = dst[0] == 0xff && matches!(dst[1] & 0x0f, 1 | 2);
+    link_local_unicast || link_scoped_multicast
+}
+
 fn parse_ipv4(packet: &[u8]) -> Option<PacketInfo> {
     if packet.len() < 20 {
         return None;
@@ -172,4 +188,36 @@ fn icmp_id(packet: &[u8], protocol: u8, header_len: usize) -> u16 {
         None => return 0,
     };
     u16::from_be_bytes([bytes[0], bytes[1]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ipv6_to(dst: Ipv6Addr) -> Vec<u8> {
+        let mut packet = vec![0u8; 48];
+        packet[0] = 0x60;
+        packet[24..40].copy_from_slice(&dst.octets());
+        packet
+    }
+
+    #[test]
+    fn link_scoped_destinations_are_recognised() {
+        for dst in ["ff02::2", "ff02::16", "ff01::1", "fe80::1", "febf::1"] {
+            let dst: Ipv6Addr = dst.parse().expect("address");
+            assert!(is_link_scoped_v6(&ipv6_to(dst)), "{dst}");
+        }
+    }
+
+    #[test]
+    fn routable_destinations_are_not_link_scoped() {
+        for dst in ["200::1", "2001:db8::1", "ff05::2", "ff0e::1", "fec0::1"] {
+            let dst: Ipv6Addr = dst.parse().expect("address");
+            assert!(!is_link_scoped_v6(&ipv6_to(dst)), "{dst}");
+        }
+        let mut v4 = ipv6_to("ff02::2".parse().expect("address"));
+        v4[0] = 0x45;
+        assert!(!is_link_scoped_v6(&v4));
+        assert!(!is_link_scoped_v6(&[0x60; 39]));
+    }
 }

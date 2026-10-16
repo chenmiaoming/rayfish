@@ -85,7 +85,7 @@ mod packet;
 
 #[cfg(test)]
 pub(crate) use packet::{IPV6_AH, IPV6_FRAGMENT};
-pub use packet::{IPV6_EXTENSION_HEADERS, PacketInfo, parse_packet_info};
+pub use packet::{IPV6_EXTENSION_HEADERS, PacketInfo, is_link_scoped_v6, parse_packet_info};
 
 // Direction / Protocol / Action live in `ray-proto` so the IPC layer carries them
 // typed (not stringified); re-exported here so the daemon keeps its original
