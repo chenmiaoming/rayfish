@@ -46,12 +46,6 @@ do_start() {
 		return 0
 	fi
 	echo "Starting $NAME"
-	# The daemon raises its soft open-file limit to this hard limit itself.
-	# Only ever raise it: a host may already allow more.
-	hard=$(ulimit -H -n 2>/dev/null)
-	if [ "$hard" != unlimited ] && [ "${hard:-0}" -lt 65536 ] 2>/dev/null; then
-		ulimit -H -n 65536 2>/dev/null || true
-	fi
 	if command -v start-stop-daemon >/dev/null 2>&1; then
 		start-stop-daemon --start --quiet --background --make-pidfile \
 			--pidfile "$PIDFILE" --exec "$DAEMON" -- $DAEMON_ARGS

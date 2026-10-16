@@ -21,7 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   systemd scope, so background jobs started from them survive a daemon
   restart. Open SSH sessions still disconnect.
 - The systemd, OpenRC and SysV services now restore DNS and exit-node settings
-  when the daemon stops or crashes, and raise the open file limit.
+  when the daemon stops or crashes. The daemon raises its own open file limit
+  and never lowers one the host set higher.
 - On systemd-resolved, Rayfish is chosen only when `/etc/resolv.conf` points at
   the resolved stub and resolved is running; otherwise it writes resolv.conf.
 

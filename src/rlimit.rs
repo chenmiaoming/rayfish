@@ -2,9 +2,11 @@
 //!
 //! Every peer connection, IPC client and transfer costs descriptors, and the
 //! usual soft limit of 1024 is reached long before the hard limit. The daemon
-//! raises its soft limit at startup and remembers the original, so the user
-//! shells mesh SSH spawns get the limit a login would give them: a soft limit
-//! above 1024 breaks programs that still pass descriptors to `select(2)`.
+//! raises its own limits at startup, so no service file has to (and none can
+//! lower a hard limit the host already set higher). It remembers the original,
+//! so the user shells mesh SSH spawns get the limit a login would give them: a
+//! soft limit above 1024 breaks programs that still pass descriptors to
+//! `select(2)`.
 
 use std::io::Error;
 use std::sync::OnceLock;
@@ -14,14 +16,29 @@ const NOFILE_CEILING: libc::rlim_t = 65_536;
 
 static ORIGINAL: OnceLock<libc::rlimit> = OnceLock::new();
 
+/// The hard limit to ask for: at least [`NOFILE_CEILING`], never lower than
+/// what the host already allows. Only root can raise it.
+fn raised_hard(current: libc::rlimit) -> libc::rlim_t {
+    current.rlim_max.max(NOFILE_CEILING)
+}
+
 /// The soft limit to ask for: the hard limit, capped at [`NOFILE_CEILING`],
 /// never below the current soft limit.
 fn raised_soft(current: libc::rlimit) -> libc::rlim_t {
     current.rlim_max.min(NOFILE_CEILING).max(current.rlim_cur)
 }
 
-/// Raise the soft `RLIMIT_NOFILE` toward the hard limit. Best effort: on
-/// failure the daemon keeps running with the limit it was given.
+fn set_nofile(limit: &libc::rlimit) -> Result<(), Error> {
+    // SAFETY: setrlimit reads one rlimit from memory we own.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, limit) } != 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Raise `RLIMIT_NOFILE`: the hard limit to at least [`NOFILE_CEILING`] when
+/// running as root, then the soft limit toward it. Best effort: on failure the
+/// daemon keeps running with the limit it was given.
 pub fn raise_nofile_limit() {
     let mut current = libc::rlimit {
         rlim_cur: 0,
@@ -32,16 +49,26 @@ pub fn raise_nofile_limit() {
         return;
     }
     let _ = ORIGINAL.set(current);
+    let mut base = current;
+    let hard = raised_hard(current);
+    if hard != current.rlim_max {
+        let lifted = libc::rlimit {
+            rlim_cur: current.rlim_cur,
+            rlim_max: hard,
+        };
+        match set_nofile(&lifted) {
+            Ok(()) => base = lifted,
+            Err(error) => tracing::debug!(%error, "could not raise the hard open-file limit"),
+        }
+    }
     let raised = libc::rlimit {
-        rlim_cur: raised_soft(current),
-        rlim_max: current.rlim_max,
+        rlim_cur: raised_soft(base),
+        rlim_max: base.rlim_max,
     };
     if raised.rlim_cur == current.rlim_cur {
         return;
     }
-    // SAFETY: setrlimit reads one rlimit from memory we own.
-    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
-        let error = Error::last_os_error();
+    if let Err(error) = set_nofile(&raised) {
         tracing::debug!(%error, "could not raise the open-file limit");
         return;
     }
@@ -58,11 +85,7 @@ pub fn restore_nofile_limit() -> Result<(), Error> {
     let Some(original) = ORIGINAL.get() else {
         return Ok(());
     };
-    // SAFETY: setrlimit reads one rlimit from memory that lives for the process.
-    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, original) } != 0 {
-        return Err(Error::last_os_error());
-    }
-    Ok(())
+    set_nofile(original)
 }
 
 #[cfg(test)]
@@ -83,6 +106,16 @@ mod tests {
         assert_eq!(
             raised_soft(limit(1024, libc::RLIM_INFINITY)),
             NOFILE_CEILING
+        );
+    }
+
+    #[test]
+    fn hard_limit_rises_to_the_ceiling_and_never_drops() {
+        assert_eq!(raised_hard(limit(1024, 4096)), NOFILE_CEILING);
+        assert_eq!(raised_hard(limit(1024, 524_288)), 524_288);
+        assert_eq!(
+            raised_hard(limit(1024, libc::RLIM_INFINITY)),
+            libc::RLIM_INFINITY
         );
     }
 

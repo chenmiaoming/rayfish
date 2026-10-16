@@ -14,9 +14,6 @@ ExecStopPost=-/usr/local/bin/ray daemon --cleanup
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
-# The daemon raises its soft limit to the hard one itself; SSH sessions it
-# starts get the soft limit back.
-LimitNOFILE=1024:65536
 
 [Install]
 WantedBy=multi-user.target
