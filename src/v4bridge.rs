@@ -9,20 +9,30 @@
 //! happen in this process.
 //!
 //! It happens as a bridge, not as a translation. We bind `[<mesh-v6>]:<port>`
-//! ourselves and splice each accepted connection to `127.0.0.1:<port>` over
-//! IPv4. The alternative, rewriting the IPv6 header to IPv4 in the forwarding
-//! path, would need a synthetic IPv4 source pool, IPv4 on the TUN, ICMP
-//! translation and fragmentation handling, and would end the overlay's
+//! ourselves and splice each accepted connection to `<host-v4>:<port>` over
+//! IPv4, where `<host-v4>` is one of the host's own non-loopback IPv4
+//! addresses. The alternative, rewriting the IPv6 header to IPv4 in the
+//! forwarding path, would need a synthetic IPv4 source pool, IPv4 on the TUN,
+//! ICMP translation and fragmentation handling, and would end the overlay's
 //! IPv6-only invariant, all to buy one thing: a distinct source address per
-//! peer for the local service to see. Here the service sees `127.0.0.1`
-//! instead, and per-peer policy lives in `ray firewall` rather than in the app.
+//! peer for the local service to see. Here the service sees the host's own
+//! address instead, and per-peer policy lives in `ray firewall` rather than in
+//! the app.
 //!
-//! Two rules keep this from widening what the host exposes:
+//! Not loopback: plenty of services trust a loopback client more than any
+//! other (Redis protected mode, a `trust` line for `127.0.0.1` in pg_hba), and
+//! a mesh peer must not inherit that. A wildcard listener accepts on every
+//! address, so dialing the host's own LAN address reaches the same socket, and
+//! the kernel picks that address as the source. A host with no IPv4 address
+//! but loopback bridges nothing: its wildcard service is local-only in fact.
+//!
+//! Three rules keep this from widening what the host exposes:
 //!
 //! - **Only a wildcard listener is bridged.** A service bound to `127.0.0.1` is
 //!   meant to be local and is left alone. A service on `0.0.0.0` already
 //!   answers on every other interface the host has, so putting it on the mesh
 //!   address adds no reachability the operator had not already granted.
+//! - **The service never sees a loopback client.** See above.
 //! - **The firewall is upstream of the socket.** `forward::evaluate_inbound`
 //!   runs the mesh firewall and the ingress anti-spoof check before a packet
 //!   reaches the TUN, so a bridged port is denied by default like any other and
@@ -125,7 +135,14 @@ impl V4Bridge {
                     .map(|(port, _)| *port)
                     .collect();
                 let ssh_port = self.ssh_port.unwrap_or_else(forward::ssh_port);
-                match bridgeable_ports(self.v6, &ours, ssh_port) {
+                // Reading `/proc/net/tcp*` (or running `netstat`) blocks.
+                let v6 = self.v6;
+                let found =
+                    tokio::task::spawn_blocking(move || bridgeable_ports(v6, &ours, ssh_port))
+                        .await
+                        .ok()
+                        .flatten();
+                match found {
                     Some(found) => self.reconcile(&found, &mut ports, &token),
                     // Nothing readable here (an unsupported host, or a listing
                     // we could not parse). Bridge nothing and stay quiet: a
@@ -192,7 +209,7 @@ impl V4Bridge {
                 }
             };
             let token = parent.child_token();
-            spawn_port(port, listener, token.clone());
+            spawn_port(port, listener, Upstream::HostAddress, token.clone());
             ports.insert(port, PortState::Bound(token));
             info!(
                 port,
@@ -226,8 +243,103 @@ fn drain(events: &mut Option<Receiver<()>>) {
     }
 }
 
+/// Which IPv4 address a bridged connection dials.
+#[derive(Clone, Copy)]
+enum Upstream {
+    /// One of the host's own non-loopback addresses, looked up per connection
+    /// so a DHCP renumbering is followed. See the module docs.
+    HostAddress,
+    /// A fixed address. Tests only: there it is loopback, the one address a
+    /// test host is sure to have.
+    #[cfg(test)]
+    Fixed(Ipv4Addr),
+}
+
+impl Upstream {
+    async fn resolve(self) -> Option<Ipv4Addr> {
+        match self {
+            Self::HostAddress => tokio::task::spawn_blocking(|| pick_host_v4(host_v4_addrs()))
+                .await
+                .ok()
+                .flatten(),
+            #[cfg(test)]
+            Self::Fixed(addr) => Some(addr),
+        }
+    }
+}
+
+/// The address to dial a wildcard IPv4 service on: a private or global one if
+/// there is one, a shared-address-space (`100.64.0.0/10`) one if that is all,
+/// never loopback, link-local or unspecified. First of the best rank wins, so
+/// the choice is stable while the host's addresses are.
+fn pick_host_v4(addrs: impl IntoIterator<Item = Ipv4Addr>) -> Option<Ipv4Addr> {
+    let rank = |addr: &Ipv4Addr| {
+        if addr.is_loopback()
+            || addr.is_link_local()
+            || addr.is_unspecified()
+            || addr.is_broadcast()
+            || addr.is_multicast()
+        {
+            None
+        } else if addr.octets()[0] == 100 && addr.octets()[1] & 0xc0 == 64 {
+            Some(1)
+        } else {
+            Some(0)
+        }
+    };
+    let mut best: Option<(u8, Ipv4Addr)> = None;
+    for addr in addrs {
+        if let Some(r) = rank(&addr)
+            && best.is_none_or(|(b, _)| r < b)
+        {
+            best = Some((r, addr));
+        }
+    }
+    best.map(|(_, addr)| addr)
+}
+
+/// The IPv4 addresses on the host's interfaces that are up and not loopback.
+#[cfg(unix)]
+fn host_v4_addrs() -> Vec<Ipv4Addr> {
+    use libc::{AF_INET, IFF_LOOPBACK, IFF_UP, freeifaddrs, getifaddrs, ifaddrs, sockaddr_in};
+
+    let mut head: *mut ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` writes a list head it allocated, freed below.
+    if unsafe { getifaddrs(&mut head) } != 0 {
+        return Vec::new();
+    }
+    let mut addrs = Vec::new();
+    let mut cursor = head;
+    while !cursor.is_null() {
+        // SAFETY: `cursor` is a node of the list `getifaddrs` returned, which
+        // stays valid until `freeifaddrs`.
+        let entry = unsafe { &*cursor };
+        cursor = entry.ifa_next;
+        let flags = entry.ifa_flags as i32;
+        if entry.ifa_addr.is_null() || flags & IFF_UP == 0 || flags & IFF_LOOPBACK != 0 {
+            continue;
+        }
+        // SAFETY: `ifa_addr` is non-null and points at a sockaddr whose family
+        // field is valid to read for every family.
+        if i32::from(unsafe { (*entry.ifa_addr).sa_family }) != AF_INET {
+            continue;
+        }
+        // SAFETY: the family is AF_INET, so the address is a `sockaddr_in`.
+        let sin = unsafe { &*entry.ifa_addr.cast::<sockaddr_in>() };
+        addrs.push(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)));
+    }
+    // SAFETY: `head` came from a successful `getifaddrs` and is freed once.
+    unsafe { freeifaddrs(head) };
+    addrs
+}
+
+#[cfg(not(unix))]
+fn host_v4_addrs() -> Vec<Ipv4Addr> {
+    Vec::new()
+}
+
 /// Accept on one bridged port until the token is cancelled.
-fn spawn_port(port: u16, listener: TcpListener, token: CancellationToken) {
+fn spawn_port(port: u16, listener: TcpListener, upstream: Upstream, token: CancellationToken) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -244,7 +356,7 @@ fn spawn_port(port: u16, listener: TcpListener, token: CancellationToken) {
                     tokio::spawn(async move {
                         tokio::select! {
                             _ = token.cancelled() => {},
-                            _ = bridge_conn(inbound, from, port) => {},
+                            _ = bridge_conn(inbound, from, port, upstream) => {},
                         }
                     });
                 }
@@ -255,13 +367,17 @@ fn spawn_port(port: u16, listener: TcpListener, token: CancellationToken) {
 }
 
 /// Join one accepted mesh connection to the local IPv4 service.
-async fn bridge_conn(mut inbound: TcpStream, from: SocketAddr, port: u16) {
+async fn bridge_conn(mut inbound: TcpStream, from: SocketAddr, port: u16, upstream: Upstream) {
     // The extra hop must not add a stall of its own: a small write held by
     // Nagle here waits on the far end's delayed ACK exactly as it does on a
     // direct connection, and this connection is one of two carrying the same
     // bytes.
     let _ = inbound.set_nodelay(true);
-    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let Some(host) = upstream.resolve().await else {
+        debug!(port, %from, "v4 bridge: this host has no IPv4 address but loopback to dial");
+        return;
+    };
+    let target = SocketAddr::from((host, port));
     let mut upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(target)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
@@ -654,13 +770,18 @@ tcp6       0      0  {MESH}.4000            *.*                    LISTEN
             let _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        // Stand in for the mesh address with IPv6 loopback: the bridge only
-        // ever binds one specific v6 address and dials `127.0.0.1:<port>`.
+        // Stand in for the mesh address with IPv6 loopback, and for the host's
+        // address with IPv4 loopback: the one pair every test host has.
         let listener =
             bind_listener(IpAddr::V6(Ipv6Addr::LOCALHOST), port).expect("bind the bridge listener");
         let bridged = listener.local_addr().expect("bridge address");
         let token = CancellationToken::new();
-        spawn_port(port, listener, token.clone());
+        spawn_port(
+            port,
+            listener,
+            Upstream::Fixed(Ipv4Addr::LOCALHOST),
+            token.clone(),
+        );
 
         let mut client = TcpStream::connect(bridged)
             .await
@@ -688,6 +809,35 @@ tcp6       0      0  {MESH}.4000            *.*                    LISTEN
         token.cancel();
     }
 
+    /// Loopback would let a mesh peer pass for a local client.
+    #[test]
+    fn the_bridge_never_dials_loopback() {
+        let addr = |s: &str| s.parse::<Ipv4Addr>().expect("address");
+        assert_eq!(
+            pick_host_v4([addr("127.0.0.1"), addr("169.254.1.1"), addr("0.0.0.0")]),
+            None
+        );
+        assert_eq!(
+            pick_host_v4([addr("127.0.0.1"), addr("192.168.1.10"), addr("10.0.0.2")]),
+            Some(addr("192.168.1.10"))
+        );
+        // Shared address space (another VPN's) only when nothing else is there.
+        assert_eq!(
+            pick_host_v4([addr("100.101.102.103"), addr("203.0.113.5")]),
+            Some(addr("203.0.113.5"))
+        );
+        assert_eq!(
+            pick_host_v4([addr("100.101.102.103")]),
+            Some(addr("100.101.102.103"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_addresses_exclude_loopback() {
+        assert!(host_v4_addrs().iter().all(|a| !a.is_loopback()));
+    }
+
     #[tokio::test]
     async fn a_dead_local_service_closes_the_bridged_connection() {
         // Nothing listens on the IPv4 side, so the connection must end rather
@@ -702,7 +852,12 @@ tcp6       0      0  {MESH}.4000            *.*                    LISTEN
             bind_listener(IpAddr::V6(Ipv6Addr::LOCALHOST), port).expect("bind the bridge listener");
         let bridged = listener.local_addr().expect("bridge address");
         let token = CancellationToken::new();
-        spawn_port(port, listener, token.clone());
+        spawn_port(
+            port,
+            listener,
+            Upstream::Fixed(Ipv4Addr::LOCALHOST),
+            token.clone(),
+        );
 
         let mut client = TcpStream::connect(bridged)
             .await
@@ -733,7 +888,12 @@ tcp6       0      0  {MESH}.4000            *.*                    LISTEN
             bind_listener(IpAddr::V6(Ipv6Addr::LOCALHOST), port).expect("bind the IPv6 bridge");
         let address = listener.local_addr().expect("bridge address");
         let token = CancellationToken::new();
-        spawn_port(port, listener, token.clone());
+        spawn_port(
+            port,
+            listener,
+            Upstream::Fixed(Ipv4Addr::LOCALHOST),
+            token.clone(),
+        );
         let mut client = TcpStream::connect(address)
             .await
             .expect("connect to the bridge");
