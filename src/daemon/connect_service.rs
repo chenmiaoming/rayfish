@@ -30,10 +30,11 @@ pub(crate) struct PendingConnect {
     pub(crate) stranger: bool,
 }
 
-/// Make room for a connect request from `incoming`: at the cap, drop the oldest
-/// queued request and return its id. A no-op (returns `None`) when `incoming` is
-/// already queued (a re-dial must not cost anyone their slot) or there is spare
-/// capacity. Mirrors `mesh::accept::evict_oldest_pending`, over a `DashMap`.
+/// Make room for a connect request from `incoming`: once the requests that
+/// `counts` selects reach `cap`, drop the oldest of them and return its id. A
+/// no-op (returns `None`) when `incoming` is already queued (a re-dial must not
+/// cost anyone their slot) or there is spare capacity. Mirrors
+/// `mesh::accept::evict_oldest_pending`, over a `DashMap`.
 ///
 /// The oldest id is bound before the removal so no map reference is alive across
 /// it: `DashMap` is sharded and holding one while mutating can deadlock.
@@ -41,12 +42,15 @@ pub(crate) fn evict_oldest_connect(
     pending: &DashMap<EndpointId, PendingConnect>,
     incoming: EndpointId,
     cap: usize,
+    counts: impl Fn(&PendingConnect) -> bool,
 ) -> Option<EndpointId> {
-    if pending.contains_key(&incoming) || pending.len() < cap {
+    if pending.contains_key(&incoming) || pending.iter().filter(|e| counts(e.value())).count() < cap
+    {
         return None;
     }
     let oldest = pending
         .iter()
+        .filter(|e| counts(e.value()))
         .min_by_key(|e| e.value().requested_at)
         .map(|e| *e.key())?;
     pending.remove(&oldest);
@@ -83,7 +87,8 @@ pub(crate) struct ConnectService {
 }
 
 impl ConnectService {
-    pub(crate) fn new(transport: Arc<Transport>, registry: Arc<NetworkRegistry>) -> Self {
+    pub(crate) fn new(registry: Arc<NetworkRegistry>) -> Self {
+        let transport = Arc::clone(&registry.transport);
         Self {
             pending_connects: DashMap::new(),
             approved_connects: DashMap::new(),
@@ -361,11 +366,10 @@ impl ConnectService {
 
     /// Add `remote` to the block list and forget what it has queued.
     pub(crate) async fn block(&self, remote: EndpointId) -> Result<()> {
+        // The same settings arm `ray block` writes through, so there is one
+        // rule for adding to the list.
         let cfg = config::update_settings(|cfg| {
-            if !cfg.blocked.contains(&remote) {
-                cfg.blocked.push(remote);
-            }
-            Ok(())
+            config::config_set(cfg, GlobalKey::Blocked, &remote.to_string(), false)
         })?;
         self.drop_blocked(&cfg.blocked).await;
         Ok(())
@@ -374,11 +378,9 @@ impl ConnectService {
     /// Drop a pending request without blocking the requester. The app Reject
     /// buttons use this: they have no way to unblock, so they must not block.
     pub(crate) fn reject_connection(&self, selector: &str) -> IpcMessage {
-        let req = match self.find_pending(selector) {
-            Ok(req) => req,
-            Err(message) => return ipc_err(message),
-        };
-        self.pending_connects.remove(&req.from_endpoint);
+        if let Err(message) = self.take_pending(selector) {
+            return ipc_err(message);
+        }
         IpcMessage::Ok {
             message: format!("declined connection request '{selector}'"),
         }
@@ -387,11 +389,10 @@ impl ConnectService {
     /// `ray connect deny`: drop a pending request by hostname or endpoint
     /// prefix and block the requester, so it cannot simply ask again.
     pub(crate) async fn deny_connection(&self, selector: &str) -> IpcMessage {
-        let req = match self.find_pending(selector) {
+        let req = match self.take_pending(selector) {
             Ok(req) => req,
             Err(message) => return ipc_err(message),
         };
-        self.pending_connects.remove(&req.from_endpoint);
         if let Err(e) = self.block(req.from_endpoint).await {
             return ipc_err(format!("request dropped, but blocking failed: {e:#}"));
         }
@@ -402,6 +403,13 @@ impl ConnectService {
                 req.from_endpoint
             ),
         }
+    }
+
+    /// Remove and return the pending request named by `selector`.
+    fn take_pending(&self, selector: &str) -> Result<PendingConnect, String> {
+        let req = self.find_pending(selector)?;
+        self.pending_connects.remove(&req.from_endpoint);
+        Ok(req)
     }
 
     /// The pending request named by `selector` (hostname or endpoint
@@ -443,7 +451,7 @@ impl ConnectService {
         let remote_id = conn.remote_id();
         // An unreadable settings file must not quietly lift a block, so it
         // refuses everyone until it is fixed.
-        let cfg = match config::load() {
+        let cfg = match config::load_inbound() {
             Ok(cfg) => cfg,
             Err(e) => {
                 tracing::warn!(error = %e, "connect channel closed: settings unreadable");
@@ -451,7 +459,7 @@ impl ConnectService {
                 return;
             }
         };
-        let class = inbound::classify(&self.registry, &cfg, remote_id);
+        let class = inbound::classify(&self.registry, &cfg.blocked, remote_id);
         if !inbound::admits(cfg.inbound, class) {
             tracing::debug!(peer = %remote_id.fmt_short(), ?class, "connect dial refused");
             conn.close(0u32.into(), b"");
@@ -512,16 +520,18 @@ impl ConnectService {
                         }
                     } else {
                         if stranger {
-                            inbound::evict_oldest_stranger(
+                            evict_oldest_connect(
                                 &self.pending_connects,
                                 from_endpoint,
                                 inbound::MAX_STRANGER_CONNECTS,
+                                |p| p.stranger,
                             );
                         }
                         evict_oldest_connect(
                             &self.pending_connects,
                             from_endpoint,
                             MAX_PENDING_CONNECTS,
+                            |_| true,
                         );
                         self.pending_connects.insert(
                             from_endpoint,
@@ -575,7 +585,7 @@ mod pending_connect_cap_tests {
     fn no_eviction_below_cap() {
         let pending = DashMap::new();
         pending.insert(eid(1), queued_at(eid(1), Instant::now()));
-        assert_eq!(evict_oldest_connect(&pending, eid(2), 4), None);
+        assert_eq!(evict_oldest_connect(&pending, eid(2), 4, |_| true), None);
         assert_eq!(pending.len(), 1);
     }
 
@@ -592,7 +602,10 @@ mod pending_connect_cap_tests {
                 queued_at(eid(s), base + Duration::from_millis(s as u64)),
             );
         }
-        assert_eq!(evict_oldest_connect(&pending, eid(99), 4), Some(eid(0)));
+        assert_eq!(
+            evict_oldest_connect(&pending, eid(99), 4, |_| true),
+            Some(eid(0))
+        );
         assert_eq!(pending.len(), 3);
         assert!(!pending.contains_key(&eid(0)));
     }
@@ -609,7 +622,7 @@ mod pending_connect_cap_tests {
                 queued_at(eid(s), base + Duration::from_millis(s as u64)),
             );
         }
-        assert_eq!(evict_oldest_connect(&pending, eid(1), 4), None);
+        assert_eq!(evict_oldest_connect(&pending, eid(1), 4, |_| true), None);
         assert_eq!(pending.len(), 4);
     }
 }

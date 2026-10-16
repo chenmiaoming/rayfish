@@ -1395,6 +1395,33 @@ pub fn load() -> Result<AppConfig> {
     load_in(&dir)
 }
 
+/// The two settings the connect channel checks on every inbound dial.
+#[derive(Debug, Clone, Default)]
+pub struct InboundSettings {
+    pub inbound: InboundPolicy,
+    pub blocked: Vec<EndpointId>,
+}
+
+/// [`InboundSettings`] from `settings.toml` alone. It runs on every inbound
+/// connect dial, strangers included, so it skips the network files and the
+/// legacy migration [`load`] performs.
+pub fn load_inbound() -> Result<InboundSettings> {
+    ensure_not_in_network_update()?;
+    let path = config_dir()?.join(SETTINGS_FILE);
+    let _guard = NETWORK_CONFIG_LOCK
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !path.exists() {
+        return Ok(InboundSettings::default());
+    }
+    let contents = std::fs::read_to_string(&path).context("reading settings.toml")?;
+    let settings: Settings = toml::from_str(&contents).context("parsing settings.toml")?;
+    Ok(InboundSettings {
+        inbound: settings.inbound,
+        blocked: settings.blocked,
+    })
+}
+
 /// [`load`] for a process that only reads the daemon's config (the CLI when the
 /// daemon is down). Creates nothing and runs no migration; a config tree that
 /// isn't there, or isn't readable by this user, reads as an empty config.

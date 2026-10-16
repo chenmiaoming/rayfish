@@ -571,10 +571,7 @@ async fn build_daemon_inner(
         }
     });
 
-    let connect = Arc::new(ConnectService::new(
-        Arc::clone(&transport),
-        Arc::clone(&registry),
-    ));
+    let connect = Arc::new(ConnectService::new(Arc::clone(&registry)));
     let management = Arc::new(ManagementService::new(
         Arc::clone(&transport),
         Arc::clone(&registry),

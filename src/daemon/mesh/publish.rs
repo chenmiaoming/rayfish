@@ -590,11 +590,6 @@ impl Daemon {
         self.connect.reject_connection(id_prefix)
     }
 
-    /// `ray connect deny`: drop a pending request and block the requester.
-    pub async fn deny_connection(&self, id_prefix: &str) -> IpcMessage {
-        self.connect.deny_connection(id_prefix).await
-    }
-
     /// `ray connect approve <id>`: approve a pending connect request, minting
     /// a 2-peer network with the requester pre-approved.
     pub async fn approve_connection(&self, id_prefix: &str) -> IpcMessage {

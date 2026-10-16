@@ -5,7 +5,6 @@
 //! dialer is closed without a reply, so it cannot tell a block from a full
 //! queue or a closed `inbound` policy. It can still see that the node is up.
 
-use super::connect_service::PendingConnect;
 use super::*;
 use crate::config::InboundPolicy;
 
@@ -22,19 +21,21 @@ pub(crate) enum Inbound {
     Stranger,
 }
 
-/// Classify `remote`, the authenticated endpoint of the dialer.
+/// Classify `remote`, the authenticated endpoint of the dialer. Blocking a
+/// user identity covers the devices a roster binds to it.
 pub(crate) fn classify(
     registry: &NetworkRegistry,
-    config: &AppConfig,
+    blocked: &[EndpointId],
     remote: EndpointId,
 ) -> Inbound {
-    if config.blocked.contains(&remote)
-        || registry
-            .user_identity_of(remote)
-            .is_some_and(|user| config.blocked.contains(&user))
+    let standing = registry.roster_standing(remote);
+    if blocked.contains(&remote)
+        || standing
+            .user_identity
+            .is_some_and(|user| blocked.contains(&user))
     {
         Inbound::Blocked
-    } else if registry.is_known(remote) {
+    } else if standing.known {
         Inbound::Known
     } else {
         Inbound::Stranger
@@ -50,32 +51,9 @@ pub(crate) fn admits(policy: InboundPolicy, class: Inbound) -> bool {
     }
 }
 
-/// Make room for a stranger's connect request: once strangers hold `cap`
-/// entries, drop the oldest stranger and return its id. Known requesters are
-/// never evicted, and a stranger re-dialing keeps its own slot.
-pub(crate) fn evict_oldest_stranger(
-    pending: &DashMap<EndpointId, PendingConnect>,
-    incoming: EndpointId,
-    cap: usize,
-) -> Option<EndpointId> {
-    if pending.contains_key(&incoming) {
-        return None;
-    }
-    let strangers = pending.iter().filter(|e| e.value().stranger).count();
-    if strangers < cap {
-        return None;
-    }
-    let oldest = pending
-        .iter()
-        .filter(|e| e.value().stranger)
-        .min_by_key(|e| e.value().requested_at)
-        .map(|e| *e.key())?;
-    pending.remove(&oldest);
-    Some(oldest)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::connect_service::{PendingConnect, evict_oldest_connect};
     use super::*;
 
     fn id(seed: u8) -> EndpointId {
@@ -119,12 +97,12 @@ mod tests {
         }
         // A re-dial keeps its slot and evicts nobody.
         assert_eq!(
-            evict_oldest_stranger(&pending, id(3), MAX_STRANGER_CONNECTS),
+            evict_oldest_connect(&pending, id(3), MAX_STRANGER_CONNECTS, |p| p.stranger),
             None
         );
         // A new stranger evicts the oldest stranger, not the older known peer.
         assert_eq!(
-            evict_oldest_stranger(&pending, id(99), MAX_STRANGER_CONNECTS),
+            evict_oldest_connect(&pending, id(99), MAX_STRANGER_CONNECTS, |p| p.stranger),
             Some(id(0))
         );
         assert!(pending.contains_key(&id(200)));

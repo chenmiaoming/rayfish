@@ -651,7 +651,11 @@ impl Node {
         // secret) or a bare room id (the network pubkey). Mirrors the CLI's
         // `ipc_join` fallback: on decode failure, treat the input as a room id.
         let (network_key, invite, coordinator) = match invite::decode_invite_code(&code) {
-            Ok((net_pubkey, coord, secret)) => (net_pubkey.to_string(), Some(secret), Some(coord)),
+            Ok(decoded) => (
+                decoded.network_key.to_string(),
+                Some(decoded.secret),
+                Some(decoded.coordinator),
+            ),
             Err(_) => (code.clone(), None, None),
         };
 

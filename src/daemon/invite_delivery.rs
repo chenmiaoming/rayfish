@@ -14,30 +14,47 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// What a delivery attempt did. Both are success for the caller: a queued
 /// delivery is retried by the sweep.
-enum DeliveryOutcome {
+pub(super) enum DeliveryOutcome {
     Done(String),
     Queued(String),
+}
+
+impl DeliveryOutcome {
+    pub(super) fn into_message(self) -> String {
+        match self {
+            Self::Done(message) | Self::Queued(message) => message,
+        }
+    }
+}
+
+/// Whether a delivery may mint a new invite. The sweep never does: if the
+/// invite was redeemed, revoked or expired since it was picked, there is
+/// nothing to resend.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mint {
+    Allow,
+    Never,
 }
 
 impl ConnectService {
     /// `InviteDeliver`: deliver (or reuse and redeliver) an invite to
     /// `recipient` for `network`.
     pub(super) async fn deliver_invite(&self, network: &str, recipient: EndpointId) -> IpcMessage {
-        match self.deliver_locked(network, recipient, true).await {
-            Ok(DeliveryOutcome::Done(message) | DeliveryOutcome::Queued(message)) => {
-                IpcMessage::Ok { message }
-            }
+        match self.deliver_locked(network, recipient, Mint::Allow).await {
+            Ok(outcome) => IpcMessage::Ok {
+                message: outcome.into_message(),
+            },
             Err(e) => ipc_err(e.to_string()),
         }
     }
 
     /// One delivery per recipient at a time, so a slow dial to one recipient
     /// never holds up another.
-    async fn deliver_locked(
+    pub(super) async fn deliver_locked(
         &self,
         network: &str,
         recipient: EndpointId,
-        mint: bool,
+        mint: Mint,
     ) -> Result<DeliveryOutcome> {
         let lock = Arc::clone(
             &self
@@ -53,7 +70,7 @@ impl ConnectService {
         &self,
         network: &str,
         recipient: EndpointId,
-        mint: bool,
+        mint: Mint,
     ) -> Result<DeliveryOutcome> {
         let (network_key, invite_lock) =
             self.registry.coordinator_handle(network).map_err(|_| {
@@ -68,11 +85,9 @@ impl ConnectService {
         let invite: Invite = {
             let _guard = invite_lock.lock().await;
             let mut store = InviteStore::load(network)?;
-            if mint {
+            if mint == Mint::Allow {
                 store.delivery_for(recipient, network_key, self.transport.endpoint.id())?
             } else {
-                // A sweep never mints: redemption, revocation or expiry since
-                // it picked this recipient means there is nothing to resend.
                 match store.live_delivery(recipient) {
                     Some(invite) => invite,
                     None => return Ok(DeliveryOutcome::Done("no pending delivery".to_string())),
@@ -151,7 +166,9 @@ impl ConnectService {
         });
     }
 
-    async fn sweep_deliveries(&self, token: &CancellationToken) {
+    /// Retry every undelivered invite at once: each attempt can wait out a
+    /// dial timeout, and the per-recipient locks keep them apart.
+    pub(super) async fn sweep_deliveries(&self, token: &CancellationToken) {
         let networks: Vec<String> = self
             .registry
             .networks
@@ -159,40 +176,29 @@ impl ConnectService {
             .filter(|n| n.role.is_coordinator())
             .map(|n| n.key().clone())
             .collect();
+        let mut queued = Vec::new();
         for network in networks {
-            let recipients = match InviteStore::load(&network) {
-                Ok(store) => store.pending_deliveries(),
-                Err(_) => {
-                    tracing::warn!(%network, "could not read the invite ledger for delivery");
-                    continue;
-                }
-            };
-            for recipient in recipients {
-                tokio::select! {
-                    _ = token.cancelled() => return,
-                    outcome = self.deliver_locked(&network, recipient, false) => {
-                        if !matches!(outcome, Ok(DeliveryOutcome::Done(_))) {
-                            tracing::debug!(%network, peer = %recipient.fmt_short(), "invite still queued");
-                        }
-                    }
-                }
+            match InviteStore::load(&network) {
+                Ok(store) => queued.extend(
+                    store
+                        .pending_deliveries()
+                        .into_iter()
+                        .map(|recipient| (network.clone(), recipient)),
+                ),
+                Err(_) => tracing::warn!(%network, "could not read the invite ledger for delivery"),
             }
         }
-    }
-}
-
-#[cfg(test)]
-impl ConnectService {
-    /// One sweep pass, for tests that cannot wait a minute.
-    pub(super) async fn sweep_once(&self) {
-        self.sweep_deliveries(&CancellationToken::new()).await;
-    }
-
-    /// The sweep's per-recipient step, which must never mint.
-    pub(super) async fn redeliver(&self, network: &str, recipient: EndpointId) -> String {
-        match self.deliver_locked(network, recipient, false).await {
-            Ok(DeliveryOutcome::Done(message) | DeliveryOutcome::Queued(message)) => message,
-            Err(e) => e.to_string(),
+        let attempts = queued.iter().map(|(network, recipient)| async move {
+            if !matches!(
+                self.deliver_locked(network, *recipient, Mint::Never).await,
+                Ok(DeliveryOutcome::Done(_))
+            ) {
+                tracing::debug!(%network, peer = %recipient.fmt_short(), "invite still queued");
+            }
+        });
+        tokio::select! {
+            _ = token.cancelled() => {}
+            _ = futures::future::join_all(attempts) => {}
         }
     }
 }

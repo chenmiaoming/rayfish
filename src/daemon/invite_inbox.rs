@@ -20,8 +20,9 @@ use crate::invite::InviteCode;
 use crate::membership::now_secs;
 use ray_proto::ipc::{InvitationInfo, InvitationStatus, MachineHostname, NetworkName};
 
-/// An entry ages out this long after it arrived, answered or not.
-const INBOX_TTL_SECS: u64 = 7 * 86400;
+/// An entry ages out this long after it arrived, answered or not: as long as
+/// a delivered invite lives.
+const INBOX_TTL_SECS: u64 = crate::invite::DELIVERY_TTL.as_secs();
 /// Pending offers one known sender may hold.
 const MAX_PENDING_KNOWN: usize = 8;
 /// Pending offers one stranger may hold.
@@ -184,6 +185,24 @@ impl Inbox {
 }
 
 impl ConnectService {
+    /// Read the inbox under `inbox_lock`, aged-out entries dropped.
+    async fn read_inbox<T>(&self, read: impl FnOnce(&mut Inbox) -> Result<T>) -> Result<T> {
+        let _guard = self.inbox_lock.lock().await;
+        let mut inbox = Inbox::load()?;
+        inbox.prune(now_secs());
+        read(&mut inbox)
+    }
+
+    /// Like [`Self::read_inbox`], then save. An error from `edit` saves nothing.
+    async fn edit_inbox<T>(&self, edit: impl FnOnce(&mut Inbox) -> Result<T>) -> Result<T> {
+        let _guard = self.inbox_lock.lock().await;
+        let mut inbox = Inbox::load()?;
+        inbox.prune(now_secs());
+        let out = edit(&mut inbox)?;
+        inbox.save()?;
+        Ok(out)
+    }
+
     /// Handle an `InviteOffer` from `remote`, already past the inbound gate.
     /// `true` acks it with `Pending`; `false` closes without a reply.
     pub(super) async fn receive_offer(
@@ -206,15 +225,11 @@ impl ConnectService {
             now_secs(),
             class == Inbound::Stranger,
         );
-        let _guard = self.inbox_lock.lock().await;
-        let stored = Inbox::load().and_then(|mut inbox| {
-            if inbox.receive(offer, now_secs())? {
-                inbox.save()?;
-            }
-            Ok(())
-        });
-        match stored {
-            Ok(()) => true,
+        match self
+            .edit_inbox(|inbox| inbox.receive(offer, now_secs()))
+            .await
+        {
+            Ok(_) => true,
             Err(e) => {
                 tracing::debug!(peer = %remote.fmt_short(), error = %e, "invitation refused");
                 false
@@ -223,18 +238,17 @@ impl ConnectService {
     }
 
     pub(super) async fn list_invitations(&self) -> IpcMessage {
-        let _guard = self.inbox_lock.lock().await;
-        match Inbox::load() {
-            Ok(mut inbox) => {
-                inbox.prune(now_secs());
-                IpcMessage::InvitationsResponse {
-                    invitations: inbox
-                        .invitations
-                        .iter()
-                        .map(ReceivedInvitation::info)
-                        .collect(),
-                }
-            }
+        let listed = self
+            .read_inbox(|inbox| {
+                Ok(inbox
+                    .invitations
+                    .iter()
+                    .map(ReceivedInvitation::info)
+                    .collect())
+            })
+            .await;
+        match listed {
+            Ok(invitations) => IpcMessage::InvitationsResponse { invitations },
             Err(e) => ipc_err(e.to_string()),
         }
     }
@@ -247,18 +261,16 @@ impl ConnectService {
         hostname: Option<MachineHostname>,
     ) -> IpcMessage {
         let _answer = self.answer_lock.lock().await;
-        let invitation = {
-            let _guard = self.inbox_lock.lock().await;
-            let found = Inbox::load().and_then(|mut inbox| {
-                inbox.prune(now_secs());
+        let found = self
+            .read_inbox(|inbox| {
                 let entry = inbox.find(id)?;
                 anyhow::ensure!(entry.is_pending(), "invitation already answered");
                 Ok(entry.clone())
-            });
-            match found {
-                Ok(entry) => entry,
-                Err(e) => return ipc_err(e.to_string()),
-            }
+            })
+            .await;
+        let invitation = match found {
+            Ok(entry) => entry,
+            Err(e) => return ipc_err(e.to_string()),
         };
         let decoded = match invitation.code.decode() {
             Ok(decoded) => decoded,
@@ -279,15 +291,15 @@ impl ConnectService {
         // `Ok` is a closed network that queued the join; its retry loop now
         // holds the secret, so a second accept must not start another.
         if matches!(reply, IpcMessage::Joined { .. } | IpcMessage::Ok { .. }) {
-            let _guard = self.inbox_lock.lock().await;
-            let saved = Inbox::load().and_then(|mut inbox| {
-                // An entry that aged out during the join is gone; the join stands.
-                if let Ok(entry) = inbox.find(&invitation.id) {
-                    entry.status = InvitationStatus::Accepted;
-                    inbox.save()?;
-                }
-                Ok(())
-            });
+            let saved = self
+                .edit_inbox(|inbox| {
+                    // An entry that aged out during the join is gone; the join stands.
+                    if let Ok(entry) = inbox.find(&invitation.id) {
+                        entry.status = InvitationStatus::Accepted;
+                    }
+                    Ok(())
+                })
+                .await;
             if let Err(e) = saved {
                 tracing::warn!(error = %e, "joined, but could not mark the invitation accepted");
             }
@@ -298,17 +310,14 @@ impl ConnectService {
     /// Refuse an invitation and block its sender on the connect channel.
     pub(super) async fn decline_invitation(&self, id: &str) -> IpcMessage {
         let _answer = self.answer_lock.lock().await;
-        let declined = {
-            let _guard = self.inbox_lock.lock().await;
-            Inbox::load().and_then(|mut inbox| {
+        let declined = self
+            .edit_inbox(|inbox| {
                 let entry = inbox.find(id)?;
                 anyhow::ensure!(entry.is_pending(), "invitation already answered");
                 entry.status = InvitationStatus::Declined;
-                let coordinator = entry.coordinator;
-                inbox.save()?;
-                Ok(coordinator)
+                Ok(entry.coordinator)
             })
-        };
+            .await;
         let coordinator = match declined {
             Ok(coordinator) => coordinator,
             Err(e) => return ipc_err(e.to_string()),
@@ -326,13 +335,12 @@ impl ConnectService {
 
     /// Drop pending offers from blocked senders.
     pub(super) async fn drop_blocked_invitations(&self, blocked: &[EndpointId]) {
-        let _guard = self.inbox_lock.lock().await;
-        let dropped = Inbox::load().and_then(|mut inbox| {
-            if inbox.drop_from(blocked) {
-                inbox.save()?;
-            }
-            Ok(())
-        });
+        let dropped = self
+            .edit_inbox(|inbox| {
+                inbox.drop_from(blocked);
+                Ok(())
+            })
+            .await;
         if let Err(e) = dropped {
             tracing::warn!(error = %e, "could not drop blocked invitations");
         }

@@ -37,46 +37,16 @@ pub fn apply_global(cfg: &mut AppConfig, key: GlobalKey, value: &str, replace: b
     let entries = super::parse_entries(value);
     let reset = entries.is_empty() || entries == ["n0"];
     match key {
-        GlobalKey::FileAutoAcceptPeers => {
-            let mut peers = if replace || value.trim().is_empty() {
-                Vec::new()
-            } else {
-                cfg.file_auto_accept_peers.clone()
-            };
-            for entry in entries {
-                let (remove, identity) = match entry.strip_prefix('-') {
-                    Some(identity) => (true, identity),
-                    None => (false, entry.as_str()),
-                };
-                let peer: EndpointId = identity.parse().context("invalid peer identity")?;
-                if remove {
-                    peers.retain(|saved| *saved != peer);
-                } else if !peers.contains(&peer) {
-                    peers.push(peer);
-                }
-            }
-            cfg.file_auto_accept_peers = peers;
-        }
-        GlobalKey::Blocked => {
-            let mut blocked = if replace || value.trim().is_empty() {
-                Vec::new()
-            } else {
-                cfg.blocked.clone()
-            };
-            for entry in entries {
-                let (remove, identity) = match entry.strip_prefix('-') {
-                    Some(identity) => (true, identity),
-                    None => (false, entry.as_str()),
-                };
-                let peer: EndpointId = identity.parse().context("invalid identity")?;
-                if remove {
-                    blocked.retain(|saved| *saved != peer);
-                } else if !blocked.contains(&peer) {
-                    blocked.push(peer);
-                }
-            }
-            cfg.blocked = blocked;
-        }
+        GlobalKey::FileAutoAcceptPeers => apply_peer_list(
+            &mut cfg.file_auto_accept_peers,
+            &entries,
+            replace || value.trim().is_empty(),
+        )?,
+        GlobalKey::Blocked => apply_peer_list(
+            &mut cfg.blocked,
+            &entries,
+            replace || value.trim().is_empty(),
+        )?,
         GlobalKey::Inbound => {
             cfg.inbound = if value.trim().is_empty() {
                 InboundPolicy::default()
@@ -211,22 +181,40 @@ fn server_override(
     })
 }
 
+/// Edit a peer-identity list: `id` adds, `-id` removes, and `clear` (an empty
+/// value or `--replace`) starts from nothing. All or nothing: one bad entry
+/// leaves the list as it was.
+fn apply_peer_list(list: &mut Vec<EndpointId>, entries: &[String], clear: bool) -> Result<()> {
+    let mut peers = if clear { Vec::new() } else { list.clone() };
+    for entry in entries {
+        let (remove, identity) = match entry.strip_prefix('-') {
+            Some(identity) => (true, identity),
+            None => (false, entry.as_str()),
+        };
+        let peer: EndpointId = identity.parse().context("invalid peer identity")?;
+        if remove {
+            peers.retain(|saved| *saved != peer);
+        } else if !peers.contains(&peer) {
+            peers.push(peer);
+        }
+    }
+    *list = peers;
+    Ok(())
+}
+
+fn render_peer_list(list: &[EndpointId]) -> String {
+    list.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Render one global key. Infallible: an unknown key is not representable, and
 /// the compiler rejects a `GlobalKey` variant with no arm here.
 pub fn render_global(cfg: &AppConfig, key: GlobalKey) -> String {
     match key {
-        GlobalKey::FileAutoAcceptPeers => cfg
-            .file_auto_accept_peers
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(","),
-        GlobalKey::Blocked => cfg
-            .blocked
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(","),
+        GlobalKey::FileAutoAcceptPeers => render_peer_list(&cfg.file_auto_accept_peers),
+        GlobalKey::Blocked => render_peer_list(&cfg.blocked),
         GlobalKey::Inbound => cfg.inbound.as_ref().to_string(),
         GlobalKey::Mdns => on_off(cfg.mdns_enabled),
         GlobalKey::Dns => cfg.dns_mode.as_ref().to_string(),

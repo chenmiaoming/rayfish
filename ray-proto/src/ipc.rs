@@ -782,10 +782,11 @@ pub enum IpcMessage {
         id: String,
         expires_secs: u64,
     },
-    /// The list of invites for a network.
+    /// Received private invitations (reply to `Invitations`).
     InvitationsResponse {
         invitations: Vec<InvitationInfo>,
     },
+    /// The list of invites for a network.
     InviteListResponse {
         invites: Vec<InviteInfo>,
     },

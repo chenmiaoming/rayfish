@@ -694,9 +694,11 @@ impl Node {
     pub fn join_network(&self, code: String, hostname: Option<String>) -> Result<(), AppleError> {
         let state = self.state()?;
         let (network_key, invite, coordinator) = match invite::decode_invite_code(&code) {
-            Ok((network_key, coordinator, secret)) => {
-                (network_key.to_string(), Some(secret), Some(coordinator))
-            }
+            Ok(decoded) => (
+                decoded.network_key.to_string(),
+                Some(decoded.secret),
+                Some(decoded.coordinator),
+            ),
             Err(_) => (code, None, None),
         };
         match self.runtime.block_on(state.join_network(

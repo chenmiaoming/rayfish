@@ -96,6 +96,14 @@ setting_keys! {
     }
 }
 
+impl GlobalKey {
+    /// Keys whose value is a list of peer identities, edited by `-identity`
+    /// entries. The daemon resolves hostnames in them, which the CLI cannot.
+    pub fn is_peer_list(self) -> bool {
+        matches!(self, Self::FileAutoAcceptPeers | Self::Blocked)
+    }
+}
+
 setting_keys! {
     /// Keys backed by `firewall.toml`.
     ///

@@ -844,8 +844,7 @@ pub(crate) async fn ipc_apply(
                 &expanded,
                 &status_networks,
                 &managed_machines,
-                &deliveries,
-                invite_missing
+                if invite_missing { &deliveries } else { &[] },
             )?
         );
         return Ok(());
@@ -1218,7 +1217,6 @@ fn render_apply_dry_run(
     networks: &[ipc::NetworkStatus],
     machines: &[ipc::ManagedMachineInfo],
     deliveries: &[PlannedDelivery],
-    invite_missing: bool,
 ) -> Result<String> {
     use std::fmt::Write;
     let mut out = String::new();
@@ -1253,15 +1251,13 @@ fn render_apply_dry_run(
             writeln!(out, "  leave  {hostname} from {network_name}")?;
         }
     }
-    if invite_missing {
-        for delivery in deliveries {
-            changes += 1;
-            writeln!(
-                out,
-                "  invite {} to {} (private; queued if offline)",
-                delivery.recipient, delivery.network
-            )?;
-        }
+    for delivery in deliveries {
+        changes += 1;
+        writeln!(
+            out,
+            "  invite {} to {} (private; queued if offline)",
+            delivery.recipient, delivery.network
+        )?;
     }
     if changes == 0 {
         writeln!(out, "  no membership changes")?;
@@ -1688,10 +1684,10 @@ networks:
         let mut expanded = apply::DeploySpec::default();
         expanded.networks.insert("n".into(), firewall);
         let deliveries = planned_deliveries("n", &aliases, &empty);
-        let preview = render_apply_dry_run(&expanded, &[], &[], &deliveries, true).unwrap();
+        let preview = render_apply_dry_run(&expanded, &[], &[], &deliveries).unwrap();
         assert!(preview.contains(&format!("invite {invited} to n")));
         assert!(preview.contains("no changes applied"));
-        let without_flag = render_apply_dry_run(&expanded, &[], &[], &deliveries, false).unwrap();
+        let without_flag = render_apply_dry_run(&expanded, &[], &[], &[]).unwrap();
         assert!(!without_flag.contains("invite "));
     }
 
@@ -1702,7 +1698,7 @@ networks:
         expanded
             .networks
             .insert("n".into(), spec.networks["n"].clone());
-        let preview = render_apply_dry_run(&expanded, &[], &[], &[], false).unwrap();
+        let preview = render_apply_dry_run(&expanded, &[], &[], &[]).unwrap();
         let heading = preview.find("Membership diff:").unwrap();
         assert!(preview[..heading].ends_with('\n'));
         assert!(!preview[..heading].ends_with("\n\n"));

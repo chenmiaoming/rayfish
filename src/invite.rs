@@ -62,6 +62,33 @@ pub struct Invite {
     pub delivery: Option<Delivery>,
 }
 
+impl Invite {
+    /// A pending invite for `secret`, identified by its hash.
+    fn new(
+        secret: &[u8],
+        ttl: Duration,
+        hostname: Option<String>,
+        delivery: Option<Delivery>,
+    ) -> Self {
+        let secret_hash = hash_secret(secret);
+        let created = now_secs();
+        Self {
+            id: secret_hash[..8].to_string(),
+            secret_hash,
+            created,
+            expires: created.saturating_add(ttl.as_secs()),
+            status: InviteStatus::Pending,
+            hostname,
+            delivery,
+        }
+    }
+
+    /// Still redeemable: pending and not yet expired.
+    fn is_live(&self, now: u64) -> bool {
+        self.status == InviteStatus::Pending && self.expires > now
+    }
+}
+
 /// A private delivery. The code is kept so retries reuse one credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
@@ -184,18 +211,23 @@ pub struct DecodedInvite {
     pub secret: Vec<u8>,
 }
 
+impl Debug for DecodedInvite {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecodedInvite")
+            .field("network_key", &self.network_key)
+            .field("coordinator", &self.coordinator)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
 impl InviteCode {
     pub fn encode(network_key: &EndpointId, coordinator: &EndpointId, secret: &[u8]) -> Self {
         Self(encode_invite_code(network_key, coordinator, secret))
     }
 
     pub fn decode(&self) -> Result<DecodedInvite> {
-        let (network_key, coordinator, secret) = decode_invite_code(&self.0)?;
-        Ok(DecodedInvite {
-            network_key,
-            coordinator,
-            secret,
-        })
+        decode_invite_code(&self.0)
     }
 
     pub fn as_str(&self) -> &str {
@@ -215,8 +247,12 @@ impl Debug for InviteCode {
 /// minted before the checksum existed (and codes minted by a peer still on an
 /// older build) keep working. A code carrying a checksum must have a correct
 /// one.
-pub fn decode_invite_code(code: &str) -> Result<(EndpointId, EndpointId, Vec<u8>)> {
-    let bytes = bs58::decode(code.trim())
+pub fn decode_invite_code(code: &str) -> Result<DecodedInvite> {
+    let code = code.trim();
+    // Base58 decoding grows with the square of the length, and codes also
+    // arrive from peers, so the length is checked before anything decodes.
+    anyhow::ensure!(code.len() <= MAX_CODE_LEN, "invalid invite code: too long");
+    let bytes = bs58::decode(code)
         .into_vec()
         .map_err(|e| anyhow::anyhow!("invalid invite code: {e}"))?;
 
@@ -242,7 +278,11 @@ pub fn decode_invite_code(code: &str) -> Result<(EndpointId, EndpointId, Vec<u8>
         .map_err(|e| anyhow::anyhow!("invalid network key in invite: {e}"))?;
     let coordinator = EndpointId::from_bytes(&coord)
         .map_err(|e| anyhow::anyhow!("invalid coordinator key in invite: {e}"))?;
-    Ok((network_pubkey, coordinator, secret))
+    Ok(DecodedInvite {
+        network_key: network_pubkey,
+        coordinator,
+        secret,
+    })
 }
 
 impl InviteStore {
@@ -295,19 +335,9 @@ impl InviteStore {
         hostname: Option<String>,
     ) -> Result<([u8; SECRET_LEN], String)> {
         let secret = generate_secret();
-        let secret_hash = hash_secret(&secret);
-        let id = secret_hash[..8].to_string();
-        let created = now_secs();
-        let expires = created.saturating_add(ttl.as_secs());
-        self.invites.push(Invite {
-            id: id.clone(),
-            secret_hash,
-            created,
-            expires,
-            status: InviteStatus::Pending,
-            hostname,
-            delivery: None,
-        });
+        let invite = Invite::new(&secret, ttl, hostname, None);
+        let id = invite.id.clone();
+        self.invites.push(invite);
         self.save()?;
         Ok((secret, id))
     }
@@ -318,8 +348,7 @@ impl InviteStore {
         self.invites
             .iter()
             .find(|invite| {
-                invite.status == InviteStatus::Pending
-                    && invite.expires > now
+                invite.is_live(now)
                     && invite
                         .delivery
                         .as_ref()
@@ -341,21 +370,12 @@ impl InviteStore {
             return Ok(invite);
         }
         let secret = generate_secret();
-        let secret_hash = hash_secret(&secret);
-        let created = now_secs();
-        let invite = Invite {
-            id: secret_hash[..8].to_string(),
-            secret_hash,
-            created,
-            expires: created.saturating_add(DELIVERY_TTL.as_secs()),
-            status: InviteStatus::Pending,
-            hostname: None,
-            delivery: Some(Delivery {
-                recipient,
-                code: InviteCode::encode(&network_key, &coordinator, &secret),
-                delivered: false,
-            }),
+        let delivery = Delivery {
+            recipient,
+            code: InviteCode::encode(&network_key, &coordinator, &secret),
+            delivered: false,
         };
+        let invite = Invite::new(&secret, DELIVERY_TTL, None, Some(delivery));
         self.invites.push(invite.clone());
         self.save()?;
         Ok(invite)
@@ -377,7 +397,7 @@ impl InviteStore {
         let now = now_secs();
         self.invites
             .iter()
-            .filter(|i| i.status == InviteStatus::Pending && i.expires > now)
+            .filter(|i| i.is_live(now))
             .filter_map(|i| i.delivery.as_ref())
             .filter(|d| !d.delivered)
             .map(|d| d.recipient)
@@ -594,6 +614,7 @@ mod tests {
         let json = |s: &str| serde_json::to_string(s).unwrap();
         assert!(serde_json::from_str::<InviteCode>(&json(valid.as_str())).is_ok());
         assert!(serde_json::from_str::<InviteCode>(&json(&"1".repeat(65_000))).is_err());
+        assert!(decode_invite_code(&"1".repeat(65_000)).is_err());
         assert!(
             serde_json::from_str::<InviteCode>(&json(&format!(" {}", valid.as_str()))).is_err()
         );
@@ -624,10 +645,10 @@ mod tests {
         let coord = test_id(2);
         let secret = generate_secret();
         let code = encode_invite_code(&net, &coord, &secret);
-        let (dn, dc, ds) = decode_invite_code(&code).unwrap();
-        assert_eq!(dn, net);
-        assert_eq!(dc, coord);
-        assert_eq!(ds, secret.to_vec());
+        let decoded = decode_invite_code(&code).unwrap();
+        assert_eq!(decoded.network_key, net);
+        assert_eq!(decoded.coordinator, coord);
+        assert_eq!(decoded.secret, secret.to_vec());
     }
 
     #[test]
@@ -648,10 +669,10 @@ mod tests {
         bytes.extend_from_slice(&secret);
         let legacy = bs58::encode(&bytes).into_string();
 
-        let (dn, dc, ds) = decode_invite_code(&legacy).unwrap();
-        assert_eq!(dn, net);
-        assert_eq!(dc, coord);
-        assert_eq!(ds, secret.to_vec());
+        let decoded = decode_invite_code(&legacy).unwrap();
+        assert_eq!(decoded.network_key, net);
+        assert_eq!(decoded.coordinator, coord);
+        assert_eq!(decoded.secret, secret.to_vec());
     }
 
     #[test]
