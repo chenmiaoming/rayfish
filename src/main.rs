@@ -596,8 +596,8 @@ pub(crate) enum Command {
         #[arg(long)]
         dry_run: bool,
         /// Mint one-time invites for hosts the spec expects but that haven't
-        /// joined yet (hostname-bound). Without this flag, the commands are
-        /// only printed.
+        /// joined yet (hostname-bound), and privately invite aliases that have
+        /// no joined device. Without this flag, they are only listed.
         #[arg(long)]
         invite_missing: bool,
         /// Print an example spec file and exit.

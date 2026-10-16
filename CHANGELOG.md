@@ -17,6 +17,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ray config set inbound anyone|known|none` refuses strangers or everyone.
   Refused peers get no reply, so they cannot tell you are online.
 
+- `ray apply --invite-missing` privately invites aliases that have no joined
+  device. The invitation waits in their `ray invitations` until they accept or
+  decline; nothing joins on its own. Offline recipients get it when they come
+  back, until it expires after 7 days.
+
 ### Changed
 
 - `ray connect` takes the peer's identity, shown by `ray status` and
