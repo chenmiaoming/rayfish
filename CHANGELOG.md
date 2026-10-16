@@ -15,7 +15,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ray connect deny`, `ray block`, `ray unblock` and `ray blocked` control who
   can send you connect requests; denying a request blocks its sender.
   `ray config set inbound anyone|known|none` refuses strangers or everyone.
-  Refused peers get no reply, so they cannot tell you are online.
+  Refused peers get no reply, so they cannot tell a block from a full queue.
 
 - `ray apply --invite-missing` privately invites aliases that have no joined
   device. The invitation waits in their `ray invitations` until they accept or

@@ -584,6 +584,12 @@ impl Daemon {
         self.connect.list_connections()
     }
 
+    /// Decline a pending connect request: drop it without minting a network or
+    /// blocking. The requester's retry loop eventually times out.
+    pub fn reject_connect(&self, id_prefix: &str) -> IpcMessage {
+        self.connect.reject_connection(id_prefix)
+    }
+
     /// `ray connect deny`: drop a pending request and block the requester.
     pub async fn deny_connection(&self, id_prefix: &str) -> IpcMessage {
         self.connect.deny_connection(id_prefix).await

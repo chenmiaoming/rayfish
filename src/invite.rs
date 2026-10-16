@@ -155,10 +155,27 @@ pub fn encode_invite_code(
     bs58::encode(&bytes).into_string()
 }
 
+/// Longest code accepted from a peer or a file. A checksummed code is about
+/// 115 base58 characters; base58 decoding grows with the square of the
+/// length, so anything longer is refused before it is decoded.
+const MAX_CODE_LEN: usize = 120;
+
 /// An encoded invite code. A credential: `Debug` never prints it.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Deserializing bounds its length and refuses whitespace, since it also
+/// arrives from peers.
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct InviteCode(String);
+
+impl<'de> Deserialize<'de> for InviteCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(deserializer)?;
+        if code.len() > MAX_CODE_LEN || code.chars().any(char::is_whitespace) {
+            return Err(serde::de::Error::custom("malformed invite code"));
+        }
+        Ok(Self(code))
+    }
+}
 
 /// [`decode_invite_code`]'s result, with names instead of positions.
 pub struct DecodedInvite {
@@ -567,6 +584,25 @@ mod tests {
             store.delivery_for(recipient, net, coord).unwrap().id,
             third.id
         );
+    }
+
+    /// Base58 decoding grows with the square of the length, so a peer-supplied
+    /// code must be bounded before anything decodes it.
+    #[test]
+    fn oversized_or_padded_codes_are_refused_when_deserialized() {
+        let valid = InviteCode::encode(&test_id(1), &test_id(2), &generate_secret());
+        let json = |s: &str| serde_json::to_string(s).unwrap();
+        assert!(serde_json::from_str::<InviteCode>(&json(valid.as_str())).is_ok());
+        assert!(serde_json::from_str::<InviteCode>(&json(&"1".repeat(65_000))).is_err());
+        assert!(
+            serde_json::from_str::<InviteCode>(&json(&format!(" {}", valid.as_str()))).is_err()
+        );
+        let offer = crate::control::ConnectMsg::InviteOffer {
+            network: ray_proto::ipc::NetworkName::new("sample-net".into()),
+            code: InviteCode("1".repeat(65_000)),
+        };
+        let body = rmp_serde::to_vec(&offer).unwrap();
+        assert!(rmp_serde::from_slice::<crate::control::ConnectMsg>(&body).is_err());
     }
 
     #[test]

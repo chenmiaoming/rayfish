@@ -553,6 +553,15 @@ impl NetworkRegistry {
                 .is_some_and(|cert| cert.user_identity == remote)
     }
 
+    /// The user identity a roster binds `device` to, if any roster does. Rosters
+    /// are coordinator-signed, so this is not the dialer's own claim.
+    pub(crate) fn user_identity_of(&self, device: EndpointId) -> Option<EndpointId> {
+        self.networks.iter().find_map(|network| {
+            let state = network.state.read().ok()?;
+            state.members.get(&device)?.user_identity
+        })
+    }
+
     /// What a person shares to reach this user: the paired user identity, or
     /// this endpoint when unpaired. Also the target of `ray connect`.
     pub(crate) fn own_identity(&self) -> EndpointId {

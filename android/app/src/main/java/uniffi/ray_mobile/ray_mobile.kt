@@ -1569,7 +1569,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_ray_mobile_checksum_method_node_quic_engine() != 16059.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_ray_mobile_checksum_method_node_reject_connect_request() != 63274.toShort()) {
+    if (lib.uniffi_ray_mobile_checksum_method_node_reject_connect_request() != 60575.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ray_mobile_checksum_method_node_reject_file_offer() != 10539.toShort()) {
@@ -2514,7 +2514,7 @@ public interface NodeInterface {
     fun `quicEngine`(): QuicEngine
 
     /**
-     * Decline an incoming connect request and block the requester.
+     * Decline an incoming connect request.
      */
     fun `rejectConnectRequest`(`shortId`: kotlin.String)
 
@@ -3213,7 +3213,7 @@ open class Node :
         )
 
     /**
-     * Decline an incoming connect request and block the requester.
+     * Decline an incoming connect request.
      */
     @Throws(RayException::class)
     override fun `rejectConnectRequest`(`shortId`: kotlin.String) =

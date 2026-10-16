@@ -2,8 +2,8 @@
 //!
 //! Every decision uses the dialer's authenticated endpoint id, never a claim
 //! inside a message: a request's `from_identity` is display only. A refused
-//! dialer is closed without a reply, so it cannot tell a block from an
-//! offline node.
+//! dialer is closed without a reply, so it cannot tell a block from a full
+//! queue or a closed `inbound` policy. It can still see that the node is up.
 
 use super::connect_service::PendingConnect;
 use super::*;
@@ -28,7 +28,11 @@ pub(crate) fn classify(
     config: &AppConfig,
     remote: EndpointId,
 ) -> Inbound {
-    if config.blocked.contains(&remote) {
+    if config.blocked.contains(&remote)
+        || registry
+            .user_identity_of(remote)
+            .is_some_and(|user| config.blocked.contains(&user))
+    {
         Inbound::Blocked
     } else if registry.is_known(remote) {
         Inbound::Known

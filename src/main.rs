@@ -476,9 +476,10 @@ pub(crate) enum Command {
     },
     /// Refuse a peer's connect requests and invitations
     ///
-    /// The peer is closed without a reply, so it cannot tell you from an
-    /// offline node. Networks you already share are unaffected; `ray kick`
-    /// removes a member.
+    /// The peer gets no reply, so it cannot tell a block from a full queue,
+    /// though it can see you are online. Blocking a paired user's identity
+    /// also covers their devices that appear in your networks. Membership of
+    /// shared networks is unaffected; `ray kick` removes a member.
     Block {
         /// Identity or hostname of the peer
         #[arg(add = complete::peers())]

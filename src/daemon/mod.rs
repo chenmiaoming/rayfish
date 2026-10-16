@@ -2583,6 +2583,38 @@ mod accept_handler_tests {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
+    async fn blocking_a_user_identity_covers_its_roster_devices() {
+        let env = TestConfigDir::new();
+        let (endpoint, registry) = test_registry(env.dir.path()).await;
+        let primary = SecretKey::from_bytes(&[28u8; 32]).public();
+        let laptop = SecretKey::from_bytes(&[29u8; 32]).public();
+        let unrelated = SecretKey::from_bytes(&[36u8; 32]).public();
+        hold_network(
+            &registry,
+            "sample-net",
+            vec![
+                roster_member(laptop, Some(primary)),
+                roster_member(unrelated, None),
+            ],
+            vec![],
+        );
+        let cfg = AppConfig {
+            blocked: vec![primary],
+            ..Default::default()
+        };
+        assert_eq!(
+            inbound::classify(&registry, &cfg, laptop),
+            inbound::Inbound::Blocked
+        );
+        assert_eq!(
+            inbound::classify(&registry, &cfg, unrelated),
+            inbound::Inbound::Known
+        );
+        endpoint.close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
     async fn blocked_member_is_refused_on_connect_but_stays_known_elsewhere() {
         let env = TestConfigDir::new();
         let (endpoint, registry) = test_registry(env.dir.path()).await;
@@ -2603,6 +2635,30 @@ mod accept_handler_tests {
         );
         assert!(registry.is_known(member));
         assert!(registry.networks.get("sample-net").is_some());
+        endpoint.close().await;
+    }
+
+    /// The app Reject buttons have no way to unblock, so they only drop.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn rejecting_from_an_app_drops_without_blocking() {
+        let env = TestConfigDir::new();
+        let (endpoint, registry) = test_registry(env.dir.path()).await;
+        let connect = ConnectService::new(Arc::clone(&registry.transport), registry);
+        let requester = SecretKey::from_bytes(&[37u8; 32]).public();
+        connect.pending_connects.insert(
+            requester,
+            connect_service::PendingConnect {
+                from_endpoint: requester,
+                hostname: Some("tablet".to_string()),
+                requested_at: Instant::now(),
+                stranger: true,
+            },
+        );
+        let reply = connect.reject_connection("tablet");
+        assert!(matches!(reply, IpcMessage::Ok { .. }), "{reply:?}");
+        assert!(connect.pending_connects.is_empty());
+        assert!(config::load().unwrap().blocked.is_empty());
         endpoint.close().await;
     }
 

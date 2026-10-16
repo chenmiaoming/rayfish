@@ -371,6 +371,19 @@ impl ConnectService {
         Ok(())
     }
 
+    /// Drop a pending request without blocking the requester. The app Reject
+    /// buttons use this: they have no way to unblock, so they must not block.
+    pub(crate) fn reject_connection(&self, selector: &str) -> IpcMessage {
+        let req = match self.find_pending(selector) {
+            Ok(req) => req,
+            Err(message) => return ipc_err(message),
+        };
+        self.pending_connects.remove(&req.from_endpoint);
+        IpcMessage::Ok {
+            message: format!("declined connection request '{selector}'"),
+        }
+    }
+
     /// `ray connect deny`: drop a pending request by hostname or endpoint
     /// prefix and block the requester, so it cannot simply ask again.
     pub(crate) async fn deny_connection(&self, selector: &str) -> IpcMessage {
