@@ -14,9 +14,7 @@
 //! `resolve` (reader side), on top of `configure` / `revert` (lifecycle).
 
 use super::*;
-#[cfg(target_os = "macos")]
-use std::net::IpAddr;
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 /// First and last backoff step for the OS-DNS configuration retry loop.
 const DNS_CONFIG_RETRY_MIN: Duration = Duration::from_secs(5);
@@ -31,6 +29,25 @@ fn search_domains_for_mode(
     } else {
         Vec::new()
     }
+}
+
+/// Add the captured IPv6 servers after the IPv4 ones, under the same rule
+/// [`config::resolve_upstreams`] applies to the captured set: an override in
+/// replace mode drops them.
+fn with_captured_v6(
+    mut upstreams: Vec<IpAddr>,
+    captured_v6: Vec<Ipv6Addr>,
+    dns_override: &config::ServerOverride,
+) -> Vec<IpAddr> {
+    if dns_override.replace && !dns_override.servers.is_empty() {
+        return upstreams;
+    }
+    for ip in captured_v6.into_iter().map(IpAddr::V6) {
+        if !upstreams.contains(&ip) {
+            upstreams.push(ip);
+        }
+    }
+    upstreams
 }
 
 /// How often the forwarder re-checks which system resolvers actually answer.
@@ -154,7 +171,11 @@ impl DnsService {
         // Merge any user-configured DNS upstreams over the system-captured
         // set (replace drops the captured ones; augment tries custom first).
         let dns_override = config::load().map(|c| c.dns_upstreams).unwrap_or_default();
-        let upstreams = config::resolve_upstreams(&dns_override, captured);
+        let upstreams = with_captured_v6(
+            config::resolve_upstreams(&dns_override, captured),
+            c.captured_upstreams_v6(),
+            &dns_override,
+        );
         #[cfg(target_os = "linux")]
         let search_handle = c.search_handle();
         let fallbacks = c.fallback_upstreams();
@@ -610,6 +631,28 @@ impl DnsService {
 mod tests {
     use super::*;
 
+    /// A host whose resolv.conf names an IPv6 server keeps forwarding to it.
+    #[test]
+    fn captured_v6_upstreams_follow_the_override_rules() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let none = config::ServerOverride::default();
+        assert_eq!(
+            with_captured_v6(vec![v4], vec![v6], &none),
+            vec![v4, IpAddr::V6(v6)]
+        );
+        let replace = config::ServerOverride {
+            servers: vec!["9.9.9.9".into()],
+            replace: true,
+        };
+        assert_eq!(with_captured_v6(vec![v4], vec![v6], &replace), vec![v4]);
+        // Already listed (the operator named it too): not twice.
+        assert_eq!(
+            with_captured_v6(vec![IpAddr::V6(v6)], vec![v6], &none),
+            vec![IpAddr::V6(v6)]
+        );
+    }
+
     #[test]
     fn partial_mode_has_no_ray_search_domains() {
         let networks = vec!["example-net".to_string()];
@@ -675,7 +718,7 @@ mod tests {
 
         struct Backend {
             shared: Option<Ipv4Addr>,
-            fallbacks: Vec<Ipv4Addr>,
+            fallbacks: Vec<IpAddr>,
         }
         #[async_trait::async_trait]
         impl dns_config::DnsConfigurator for Backend {
@@ -691,22 +734,22 @@ mod tests {
             fn shared_resolver(&self) -> Option<Ipv4Addr> {
                 self.shared
             }
-            fn fallback_upstreams(&self) -> Vec<Ipv4Addr> {
+            fn fallback_upstreams(&self) -> Vec<IpAddr> {
                 self.fallbacks.clone()
             }
         }
         let theirs = Ipv4Addr::new(100, 100, 100, 100);
         let real = Ipv4Addr::new(192, 168, 1, 1);
         use dns_config::DnsConfigurator;
-        let defers = |shared, fallbacks: Vec<Ipv4Addr>| {
+        let defers = |shared, fallbacks: Vec<IpAddr>| {
             let b = Backend { shared, fallbacks };
             b.shared_resolver().is_some() && !b.fallback_upstreams().is_empty()
         };
 
-        assert!(defers(Some(theirs), vec![theirs]));
+        assert!(defers(Some(theirs), vec![IpAddr::V4(theirs)]));
         // No one to share with: ours is the only nameserver in the file, so
         // declining would take the host's DNS down.
-        assert!(!defers(None, vec![real]));
+        assert!(!defers(None, vec![IpAddr::V4(real)]));
         // Sharing, but nothing rendered behind us to fall through to.
         assert!(!defers(Some(theirs), vec![]));
     }

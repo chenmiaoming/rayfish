@@ -445,10 +445,13 @@ async fn probe_query(up: SocketAddr, query: &[u8]) -> bool {
 /// question times out, then the dotted fallback), but the whole set pays that
 /// once, not per entry. Order is preserved: callers treat the first as
 /// preferred.
-pub async fn live_upstreams(candidates: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
+pub async fn live_upstreams<A>(candidates: &[A]) -> Vec<A>
+where
+    A: Into<IpAddr> + Copy,
+{
     let probes = candidates
         .iter()
-        .map(|ip| async move { probe_upstream(SocketAddr::from((*ip, 53u16))).await });
+        .map(|ip| async move { probe_upstream(SocketAddr::from(((*ip).into(), 53u16))).await });
     let alive = futures::future::join_all(probes).await;
     candidates
         .iter()
@@ -889,7 +892,7 @@ mod tests {
                 .await
                 .is_empty()
         );
-        assert!(live_upstreams(&[]).await.is_empty());
+        assert!(live_upstreams::<Ipv4Addr>(&[]).await.is_empty());
     }
 
     /// #111: with no upstream that answers, a forwarded query must come back
