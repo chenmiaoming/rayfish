@@ -112,7 +112,10 @@ async fn watch(
     let result = async {
         let index = tun_link_index(&handle, tun_name).await?;
         loop {
+            // Biased: once `ray down` cancels, a notification that arrives in
+            // the same poll (its own link going down) must not win.
             let message = tokio::select! {
+                biased;
                 _ = token.cancelled() => return Ok(()),
                 message = messages.next() => message.context("netlink notifications ended")?,
             };
@@ -123,6 +126,7 @@ async fn watch(
                 continue;
             }
             tokio::select! {
+                biased;
                 _ = token.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(SETTLE) => {}
             }
@@ -131,10 +135,13 @@ async fn watch(
                 continue;
             }
             tracing::warn!(tun = %tun_name, "TUN lost its link, address or route; restoring");
+            let stopped = || token.is_cancelled() || !active.load(Ordering::SeqCst);
             tokio::select! {
+                biased;
                 _ = token.cancelled() => return Ok(()),
-                result = repair(tun_name, v6) => match result {
-                    Ok(()) => exit_reapply.notify_one(),
+                result = repair(tun_name, v6, &stopped) => match result {
+                    Ok(Repair::Done) => exit_reapply.notify_one(),
+                    Ok(Repair::Stopped) => {}
                     Err(error) => tracing::warn!(error = %format!("{error:#}"), tun = %tun_name, "failed to restore the TUN"),
                 },
             }
@@ -145,11 +152,36 @@ async fn watch(
     result
 }
 
+/// How a [`repair`] ended without an error.
+#[derive(Debug, PartialEq, Eq)]
+enum Repair {
+    Done,
+    /// `ray down` began partway through, so the rest was left undone: it is
+    /// taking the link down on purpose.
+    Stopped,
+}
+
 /// The same three steps `ray up` takes, in the same order. Each is idempotent.
-async fn repair(tun_name: &str, v6: Ipv6Addr) -> Result<()> {
+/// `stopped` is checked before each one, so a repair that races `ray down`
+/// does not bring back up what it is tearing down.
+async fn repair(
+    tun_name: &str,
+    v6: Ipv6Addr,
+    stopped: &(dyn Fn() -> bool + Sync),
+) -> Result<Repair> {
+    if stopped() {
+        return Ok(Repair::Stopped);
+    }
     super::set_link_up(tun_name).await?;
+    if stopped() {
+        return Ok(Repair::Stopped);
+    }
     super::ensure_ipv6_addr(tun_name, v6).await?;
-    super::route_peer_range(tun_name).await
+    if stopped() {
+        return Ok(Repair::Stopped);
+    }
+    super::route_peer_range(tun_name).await?;
+    Ok(Repair::Done)
 }
 
 /// A route on another interface that covers part of the overlay range.
@@ -239,6 +271,14 @@ mod tests {
     use rtnetlink::packet_route::link::LinkMessage;
 
     const TUN: u32 = 7;
+
+    /// A repair that finds `ray down` already under way touches nothing. The
+    /// interface name does not exist, so any step it did take would fail.
+    #[tokio::test]
+    async fn a_stopped_repair_changes_nothing() {
+        let repaired = repair("rf-none-such", Ipv6Addr::LOCALHOST, &|| true).await;
+        assert_eq!(repaired.expect("no step ran"), Repair::Stopped);
+    }
 
     fn link(index: u32, flags: LinkFlags) -> RouteNetlinkMessage {
         let mut message = LinkMessage::default();

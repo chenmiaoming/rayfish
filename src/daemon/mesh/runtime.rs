@@ -1598,6 +1598,12 @@ impl Daemon {
         }
         let started = tokio::time::Instant::now();
         let guard = self.exit_reconcile.lock().await;
+        // `ray down` may have run while this waited for the lock. It tears the
+        // exit state down under the same lock, so re-applying now would put
+        // back the forwarding and NAT it just removed.
+        if !self.active.load(Ordering::SeqCst) {
+            return;
+        }
         let Some(check) = self.probe_exit_kernel().await else {
             return;
         };
