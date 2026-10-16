@@ -77,6 +77,7 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
             .await
             .context("failed to create TUN device")?;
         daemon.tun_name.store(Arc::new(tun_name));
+        daemon.fatal.arm();
         daemon.attach_tun(tun_reader, tun_writer).await;
     }
 
@@ -109,6 +110,11 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
     // Close connections while protocol handlers flush their persistent state.
     daemon.shutdown_and_close().await;
 
+    // A data-plane failure cancelled the token: exit non-zero so the service
+    // manager brings up a fresh daemon with a new TUN.
+    if let Some(reason) = daemon.fatal.take() {
+        return Err(anyhow::anyhow!(reason));
+    }
     result
 }
 
@@ -717,6 +723,7 @@ async fn build_daemon_inner(
         auto_update,
         tun_name,
         tun_tasks: Mutex::new(None),
+        fatal: Arc::default(),
         exit_reconcile: AsyncMutex::new(()),
         _metrics_server: metrics_server,
         router,
@@ -735,6 +742,8 @@ async fn build_daemon_inner(
         app_ssh_helper: AtomicBool::new(false),
         #[cfg(feature = "desktop")]
         v4_bridge_token: Mutex::new(None),
+        #[cfg(target_os = "linux")]
+        tun_watch_token: Mutex::new(None),
     });
     daemon.management.bind_daemon(&daemon);
     tokio::spawn(Arc::clone(&daemon.registry).republish_destructions());
