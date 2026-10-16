@@ -40,7 +40,8 @@ pub enum InviteStatus {
 }
 
 /// A single invite record. `secret_hash` (not the secret) is persisted, like a
-/// password hash: the raw secret only ever exists in the code handed to the joiner.
+/// password hash: the raw secret only ever exists in the code handed to the
+/// joiner, except for a private delivery, which keeps its code for retries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invite {
     /// Short human id: the first 8 hex chars of `blake3(secret)`.
@@ -56,7 +57,22 @@ pub struct Invite {
     /// networks). `None` = the joiner's `--hostname` claim is used as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Set for an invite delivered privately (`ray apply --invite-missing`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
 }
+
+/// A private delivery. The code is kept so retries reuse one credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivery {
+    pub recipient: EndpointId,
+    pub code: InviteCode,
+    /// The recipient's daemon acknowledged storing the offer.
+    pub delivered: bool,
+}
+
+/// How long a privately delivered invite stays redeemable.
+pub const DELIVERY_TTL: Duration = Duration::from_secs(7 * 86400);
 
 /// On-disk container (so the toml file has a stable `[[invites]]` shape).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -246,9 +262,9 @@ impl InviteStore {
             invites: self.invites.clone(),
         };
         let contents = toml::to_string_pretty(&file).context("serializing invites")?;
-        // The ledger holds only hashes, never raw secrets, but it does expose
-        // invite metadata (expiry, redeemers, bound hostnames); treat it as
-        // secret-bearing (owner-only 0600), written atomically.
+        // Private deliveries keep their code for retries, and the rest exposes
+        // invite metadata (expiry, redeemers, bound hostnames), so this stays
+        // owner-only (0600) and atomic.
         crate::config::write_file(&self.path, contents.as_bytes(), true)
     }
 
@@ -273,9 +289,82 @@ impl InviteStore {
             expires,
             status: InviteStatus::Pending,
             hostname,
+            delivery: None,
         });
         self.save()?;
         Ok((secret, id))
+    }
+
+    /// The live (pending, unexpired) private delivery for `recipient`.
+    pub fn live_delivery(&self, recipient: EndpointId) -> Option<Invite> {
+        let now = now_secs();
+        self.invites
+            .iter()
+            .find(|invite| {
+                invite.status == InviteStatus::Pending
+                    && invite.expires > now
+                    && invite
+                        .delivery
+                        .as_ref()
+                        .is_some_and(|d| d.recipient == recipient)
+            })
+            .cloned()
+    }
+
+    /// Reuse the live delivery for `recipient`, or mint one whose code names
+    /// `network_key` and `coordinator`. Repeated applies and lost acks
+    /// therefore share one credential.
+    pub fn delivery_for(
+        &mut self,
+        recipient: EndpointId,
+        network_key: EndpointId,
+        coordinator: EndpointId,
+    ) -> Result<Invite> {
+        if let Some(invite) = self.live_delivery(recipient) {
+            return Ok(invite);
+        }
+        let secret = generate_secret();
+        let secret_hash = hash_secret(&secret);
+        let created = now_secs();
+        let invite = Invite {
+            id: secret_hash[..8].to_string(),
+            secret_hash,
+            created,
+            expires: created.saturating_add(DELIVERY_TTL.as_secs()),
+            status: InviteStatus::Pending,
+            hostname: None,
+            delivery: Some(Delivery {
+                recipient,
+                code: InviteCode::encode(&network_key, &coordinator, &secret),
+                delivered: false,
+            }),
+        };
+        self.invites.push(invite.clone());
+        self.save()?;
+        Ok(invite)
+    }
+
+    pub fn mark_delivered(&mut self, id: &str) -> Result<()> {
+        let delivery = self
+            .invites
+            .iter_mut()
+            .find(|i| i.id == id)
+            .and_then(|i| i.delivery.as_mut())
+            .context("delivery invite missing")?;
+        delivery.delivered = true;
+        self.save()
+    }
+
+    /// Recipients with a live delivery that has not been acknowledged yet.
+    pub fn pending_deliveries(&self) -> Vec<EndpointId> {
+        let now = now_secs();
+        self.invites
+            .iter()
+            .filter(|i| i.status == InviteStatus::Pending && i.expires > now)
+            .filter_map(|i| i.delivery.as_ref())
+            .filter(|d| !d.delivered)
+            .map(|d| d.recipient)
+            .collect()
     }
 
     /// Verify a presented secret and burn it (single-use). Errors if the secret is
@@ -357,6 +446,7 @@ impl InviteStore {
             expires,
             status: InviteStatus::Pending,
             hostname: None,
+            delivery: None,
         });
         self.save()
     }
@@ -427,6 +517,56 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("net.toml");
         (InviteStore::with_path(path), dir)
+    }
+
+    #[test]
+    fn delivery_reuses_the_live_invite_across_reloads() {
+        let (mut store, _dir) = temp_store();
+        let (recipient, net, coord) = (test_id(4), test_id(5), test_id(6));
+        let first = store.delivery_for(recipient, net, coord).unwrap();
+        let mut store = InviteStore::from_path(store.path.clone()).unwrap();
+        let again = store.delivery_for(recipient, net, coord).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(store.pending_deliveries(), [recipient]);
+        let code = first.delivery.as_ref().unwrap().code.decode().unwrap();
+        assert_eq!((code.network_key, code.coordinator), (net, coord));
+        assert_eq!(hash_secret(&code.secret), first.secret_hash);
+        store.mark_delivered(&first.id).unwrap();
+        let store = InviteStore::from_path(store.path.clone()).unwrap();
+        assert!(store.pending_deliveries().is_empty());
+        assert_eq!(store.list().len(), 1);
+        assert!(!format!("{first:?}").contains(first.delivery.unwrap().code.as_str()));
+    }
+
+    #[test]
+    fn redeem_revoke_and_expiry_stop_retries() {
+        let (mut store, _dir) = temp_store();
+        let (recipient, net, coord) = (test_id(4), test_id(5), test_id(6));
+        let first = store.delivery_for(recipient, net, coord).unwrap();
+        let secret = first
+            .delivery
+            .as_ref()
+            .unwrap()
+            .code
+            .decode()
+            .unwrap()
+            .secret;
+        store.redeem(&secret, test_id(7)).unwrap();
+        assert!(store.pending_deliveries().is_empty());
+        assert!(store.live_delivery(recipient).is_none());
+        let second = store.delivery_for(recipient, net, coord).unwrap();
+        assert_ne!(second.id, first.id);
+        store.revoke(&second.id).unwrap();
+        assert!(store.pending_deliveries().is_empty());
+        let third = store.delivery_for(recipient, net, coord).unwrap();
+        store.invites.last_mut().unwrap().expires = now_secs();
+        store.save().unwrap();
+        assert!(store.pending_deliveries().is_empty());
+        assert!(store.live_delivery(recipient).is_none());
+        assert_ne!(
+            store.delivery_for(recipient, net, coord).unwrap().id,
+            third.id
+        );
     }
 
     #[test]

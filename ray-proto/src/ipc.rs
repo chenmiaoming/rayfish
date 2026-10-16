@@ -400,6 +400,12 @@ pub enum IpcMessage {
         #[serde(default)]
         reusable: bool,
     },
+    /// Deliver an invite privately to `recipient` for a network this node
+    /// coordinates (`ray apply --invite-missing`). Queued while unreachable.
+    InviteDeliver {
+        network: NetworkName,
+        recipient: EndpointId,
+    },
     /// `ray invitations`: received private invitations, metadata only. Open
     /// read.
     Invitations,

@@ -710,6 +710,11 @@ impl Daemon {
             IpcMessage::ApproveConnection { id } => self.approve_connection(&id).await,
             IpcMessage::ConnectDeny { id } => self.deny_connection(&id).await,
             IpcMessage::Invitations => self.connect.list_invitations().await,
+            IpcMessage::InviteDeliver { network, recipient } => {
+                self.connect
+                    .deliver_invite(network.as_ref(), recipient)
+                    .await
+            }
             IpcMessage::InvitationAccept { id, hostname } => {
                 self.connect.accept_invitation(&id, hostname).await
             }
@@ -765,6 +770,10 @@ mod tests {
             },
             IpcMessage::ConnectDeny {
                 id: "example-id".into(),
+            },
+            IpcMessage::InviteDeliver {
+                network: ipc::NetworkName::new("sample-net".into()),
+                recipient: SecretKey::from([7; 32]).public(),
             },
         ] {
             assert!(!Daemon::is_open_read(&request));

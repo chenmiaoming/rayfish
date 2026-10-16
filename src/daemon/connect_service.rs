@@ -70,7 +70,7 @@ pub(crate) struct ConnectService {
     /// other, only the higher endpoint id mints, avoiding a duplicate network.
     pub(crate) outgoing_connects: DashSet<EndpointId>,
     /// Foundation handles (endpoint, LAN sightings) for the connect handshake.
-    transport: Arc<Transport>,
+    pub(super) transport: Arc<Transport>,
     /// The network-owning service, for minting/joining the 2-peer direct network
     /// once a connect request is approved.
     pub(super) registry: Arc<NetworkRegistry>,
@@ -78,6 +78,8 @@ pub(crate) struct ConnectService {
     pub(super) inbox_lock: AsyncMutex<()>,
     /// Spans a whole invitation accept or decline.
     pub(super) answer_lock: AsyncMutex<()>,
+    /// One invite delivery per recipient at a time.
+    pub(super) delivery_locks: DashMap<EndpointId, Arc<AsyncMutex<()>>>,
 }
 
 impl ConnectService {
@@ -90,6 +92,7 @@ impl ConnectService {
             registry,
             inbox_lock: AsyncMutex::new(()),
             answer_lock: AsyncMutex::new(()),
+            delivery_locks: DashMap::new(),
         }
     }
 

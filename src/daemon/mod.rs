@@ -260,6 +260,7 @@ pub mod transfers;
 
 mod connect_service;
 mod inbound;
+mod invite_delivery;
 mod invite_inbox;
 pub(crate) use connect_service::ConnectService;
 mod management_service;
@@ -2843,6 +2844,209 @@ mod accept_handler_tests {
         };
         assert_eq!(invitations[0].status, ipc::InvitationStatus::Pending);
         endpoint.close().await;
+    }
+
+    /// A loopback-only endpoint on the connect ALPN, found through `lookup`.
+    async fn loopback_endpoint(lookup: iroh::address_lookup::memory::MemoryLookup) -> Endpoint {
+        Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![transport::CONNECT_ALPN.to_vec()])
+            .address_lookup(lookup)
+            .clear_ip_transports()
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap()
+    }
+
+    /// A coordinator-side connect service for `sample-net`, dialing through
+    /// `lookup`. Returns the network's shared state so tests can add members.
+    async fn delivering_service(
+        dir: &std::path::Path,
+        lookup: iroh::address_lookup::memory::MemoryLookup,
+    ) -> (Endpoint, Arc<ConnectService>, SharedNetworkState) {
+        let endpoint = loopback_endpoint(lookup).await;
+        let store = FsStore::load(dir.join("sender-blobs")).await.unwrap();
+        let registry = sample_registry(
+            endpoint.clone(),
+            IrohIdentityProvider::new(endpoint.id()),
+            store,
+        );
+        let state = make_network_state();
+        let network_key = state.read().unwrap().network_public_key;
+        registry.networks.insert(
+            "sample-net".to_string(),
+            NetworkHandle {
+                name: "sample-net".to_string(),
+                network_key,
+                role: NetworkRole::Coordinator,
+                state: Arc::clone(&state),
+                dht_notify: None,
+                cancel: CancellationToken::new(),
+                tasks: vec![],
+                invite_lock: Arc::new(AsyncMutex::new(())),
+                incompatible: None,
+            },
+        );
+        let connect = Arc::new(ConnectService::new(
+            Arc::clone(&registry.transport),
+            registry,
+        ));
+        (endpoint, connect, state)
+    }
+
+    async fn receiving_service(dir: &std::path::Path) -> (Endpoint, Arc<ConnectService>) {
+        let endpoint = loopback_endpoint(iroh::address_lookup::memory::MemoryLookup::new()).await;
+        let store = FsStore::load(dir.join("receiver-blobs")).await.unwrap();
+        let registry = sample_registry(
+            endpoint.clone(),
+            IrohIdentityProvider::new(endpoint.id()),
+            store,
+        );
+        let connect = Arc::new(ConnectService::new(
+            Arc::clone(&registry.transport),
+            registry,
+        ));
+        (endpoint, connect)
+    }
+
+    fn reply_text(reply: IpcMessage) -> String {
+        match reply {
+            IpcMessage::Ok { message } => message,
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_delivery_reuses_one_invite_and_reports_queued() {
+        let env = TestConfigDir::new();
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        let (sender, connect, _) = delivering_service(env.dir.path(), lookup).await;
+        // Nobody knows where this recipient is, so the dial fails.
+        let recipient = SecretKey::from_bytes(&[40u8; 32]).public();
+        for _ in 0..2 {
+            let message = reply_text(connect.deliver_invite("sample-net", recipient).await);
+            assert!(message.contains("queued"), "{message}");
+        }
+        let store = crate::invite::InviteStore::load("sample-net").unwrap();
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.pending_deliveries(), [recipient]);
+        sender.close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn delivery_to_a_member_is_skipped() {
+        let env = TestConfigDir::new();
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        let (sender, connect, state) = delivering_service(env.dir.path(), lookup).await;
+        let device = SecretKey::from_bytes(&[41u8; 32]).public();
+        let user = SecretKey::from_bytes(&[42u8; 32]).public();
+        state
+            .write()
+            .unwrap()
+            .members
+            .add(roster_member(device, Some(user)));
+        let message = reply_text(connect.deliver_invite("sample-net", user).await);
+        assert!(message.contains("already has a device"), "{message}");
+        assert!(
+            crate::invite::InviteStore::load("sample-net")
+                .unwrap()
+                .list()
+                .is_empty()
+        );
+        sender.close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn sweep_never_mints() {
+        let env = TestConfigDir::new();
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        let (sender, connect, _) = delivering_service(env.dir.path(), lookup).await;
+        let recipient = SecretKey::from_bytes(&[43u8; 32]).public();
+        // Nothing queued: the sweep step has nothing to send.
+        assert_eq!(
+            connect.redeliver("sample-net", recipient).await,
+            "no pending delivery"
+        );
+        connect.deliver_invite("sample-net", recipient).await;
+        // Revoked after the sweep picked it: still nothing new is minted.
+        let id = crate::invite::InviteStore::load("sample-net")
+            .unwrap()
+            .list()[0]
+            .id
+            .clone();
+        crate::invite::InviteStore::load("sample-net")
+            .unwrap()
+            .revoke(&id)
+            .unwrap();
+        assert_eq!(
+            connect.redeliver("sample-net", recipient).await,
+            "no pending delivery"
+        );
+        connect.sweep_once().await;
+        let store = crate::invite::InviteStore::load("sample-net").unwrap();
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.list()[0].status, "revoked");
+        sender.close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_then_online_then_delivered_without_duplicates() {
+        let env = TestConfigDir::new();
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        let (sender, connect, _) = delivering_service(env.dir.path(), lookup.clone()).await;
+        let (receiver, inbox) = receiving_service(env.dir.path()).await;
+        // Offline: the sender cannot find the recipient yet.
+        let message = reply_text(connect.deliver_invite("sample-net", receiver.id()).await);
+        assert!(message.contains("queued"), "{message}");
+        let first = crate::invite::InviteStore::load("sample-net")
+            .unwrap()
+            .list();
+        lookup.add_endpoint_info(receiver.addr());
+        let server = tokio::spawn({
+            let inbox = Arc::clone(&inbox);
+            let receiver = receiver.clone();
+            async move {
+                // Store the first offer, then drop the ack.
+                let conn = receiver.accept().await.unwrap().await.unwrap();
+                let remote = conn.remote_id();
+                let (_send, mut recv) = conn.accept_bi().await.unwrap();
+                let control::ConnectMsg::InviteOffer { network, code } =
+                    control::recv_framed(&mut recv).await.unwrap()
+                else {
+                    panic!("expected an offer");
+                };
+                assert!(
+                    inbox
+                        .receive_offer(remote, inbound::Inbound::Stranger, network, code)
+                        .await
+                );
+                conn.close(0u32.into(), b"lost ack");
+                // The retry goes through the real handler and is acked.
+                let conn = receiver.accept().await.unwrap().await.unwrap();
+                inbox.accept_connect_request(conn).await;
+            }
+        });
+        let message = reply_text(connect.deliver_invite("sample-net", receiver.id()).await);
+        assert!(message.contains("queued"), "{message}");
+        connect.sweep_once().await;
+        server.await.unwrap();
+        let store = crate::invite::InviteStore::load("sample-net").unwrap();
+        assert!(store.pending_deliveries().is_empty());
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.list()[0].id, first[0].id);
+        let IpcMessage::InvitationsResponse { invitations } = inbox.list_invitations().await else {
+            panic!("expected invitations");
+        };
+        assert_eq!(invitations.len(), 1);
+        assert_eq!(invitations[0].coordinator, sender.id());
+        assert_eq!(invitations[0].status, ipc::InvitationStatus::Pending);
+        sender.close().await;
+        receiver.close().await;
     }
 
     #[allow(clippy::await_holding_lock)]
