@@ -787,6 +787,9 @@ pub(crate) struct FatalExit {
 }
 
 impl FatalExit {
+    /// Only the desktop daemon arms it, after creating its own TUN; Android
+    /// gets its TUN from the embedding app.
+    #[cfg(any(not(target_os = "android"), test))]
     pub(crate) fn arm(&self) {
         self.armed.store(true, Ordering::Relaxed);
     }

@@ -906,9 +906,10 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
         ]));
     }
     dels.push(bypass_rule_args("del"));
-    // The unmasked spelling older builds installed. A del with no mask matches a
-    // masked rule too, so it goes after the masked one: by then that is gone, and
-    // this finds only a leftover.
+    // The unmasked spelling older builds installed. The kernel reads a del
+    // with no mask as mask 0xffffffff, so it matches only that old rule and
+    // never the masked one; each del removes its own spelling, in either
+    // order, and the batch's `-force` keeps a miss from stopping the rest.
     let legacy_mark = format!("{SOCKET_MARK:#x}");
     dels.push(argv(&[
         "rule",
