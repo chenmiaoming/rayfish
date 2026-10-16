@@ -9,6 +9,7 @@ use super::super::*;
 use std::net::IpAddr;
 use std::sync::PoisonError;
 use std::sync::RwLock;
+use tokio::sync::MutexGuard as AsyncMutexGuard;
 #[cfg(target_os = "linux")]
 use tokio::time::MissedTickBehavior;
 
@@ -1444,7 +1445,17 @@ impl Daemon {
         // One reconcile at a time (see `Daemon::exit_reconcile`): the kernel
         // enable's snapshot-then-write is not safe to interleave.
         let started = tokio::time::Instant::now();
-        let _guard = self.exit_reconcile.lock().await;
+        let guard = self.exit_reconcile.lock().await;
+        self.apply_exit_node_locked(&guard, started).await
+    }
+
+    /// [`apply_exit_node`](Self::apply_exit_node) for a caller already holding
+    /// `exit_reconcile`, which `_guard` proves. `started` is when it asked.
+    async fn apply_exit_node_locked(
+        &self,
+        _guard: &AsyncMutexGuard<'_, ()>,
+        started: tokio::time::Instant,
+    ) -> Option<String> {
         let locked = started.elapsed();
         let tun_name = self.tun_name.load().as_str().to_owned();
         let reload = self.registry.reload_exit_state();
@@ -1539,40 +1550,32 @@ impl Daemon {
     pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {}
 
     /// One pass of [`spawn_exit_kernel_watch`](Self::spawn_exit_kernel_watch).
+    /// The read-only probe runs without the reconcile lock, so a clean pass
+    /// never waits on (or holds up) a reconcile. Anything found is read again
+    /// under the lock before acting, since the first read may have caught a
+    /// reconcile half-done.
     #[cfg(target_os = "linux")]
     async fn check_exit_kernel_state(&self) {
-        let server = self.registry.exit_server.clone();
-        let serving = server.is_active();
-        // A failed install was already reported and rolled back; retrying it on
-        // a timer is not this check's job.
-        let using = self.registry.exit_client.is_active()
-            && self.registry.exit_install_error.load().is_none();
-        if !serving && !using {
+        if self
+            .probe_exit_kernel()
+            .await
+            .is_none_or(|check| check.is_clean())
+        {
             return;
         }
-        let carries = self.tunnel_carries();
-        let tun_name = self.tun_name.load().as_str().to_owned();
-        let missing = {
-            // Not concurrently with a reconcile, which would be seen half-done.
-            let _guard = self.exit_reconcile.lock().await;
-            tokio::task::spawn_blocking(move || {
-                let mut missing = Vec::new();
-                if serving {
-                    server.refresh_host_interfaces();
-                    if !crate::exit_node::server_state_intact() {
-                        missing.push("gateway");
-                    } else {
-                        crate::exit_node::reassert_forward_firewall(&tun_name);
-                    }
-                }
-                if using && !crate::exit_node::client_state_intact(carries) {
-                    missing.push("client tunnel");
-                }
-                missing
-            })
-            .await
-            .unwrap_or_default()
+        let started = tokio::time::Instant::now();
+        let guard = self.exit_reconcile.lock().await;
+        let Some(check) = self.probe_exit_kernel().await else {
+            return;
         };
+        if check.forward_firewall {
+            let tun_name = self.tun_name.load().as_str().to_owned();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::exit_node::reassert_forward_firewall(&tun_name)
+            })
+            .await;
+        }
+        let missing = check.missing();
         if missing.is_empty() {
             return;
         }
@@ -1581,12 +1584,37 @@ impl Daemon {
             "exit-node kernel state was removed from outside rayfish (a firewall \
              reload or `nft flush ruleset`?); re-applying"
         );
-        if let Some(warning) = self.apply_exit_node().await {
+        if let Some(warning) = self.apply_exit_node_locked(&guard, started).await {
             tracing::warn!(
                 warning,
                 "exit-node re-apply after kernel state went missing"
             );
         }
+    }
+
+    /// Read what the exit roles in effect need from the kernel, and re-read the
+    /// gateway's own addresses. `None` when neither role is in effect.
+    #[cfg(target_os = "linux")]
+    async fn probe_exit_kernel(&self) -> Option<crate::exit_node::KernelCheck> {
+        let server = self.registry.exit_server.clone();
+        let serving = server.is_active();
+        // A failed install was already reported and rolled back; retrying it on
+        // a timer is not this check's job.
+        let using = (self.registry.exit_client.is_active()
+            && self.registry.exit_install_error.load().is_none())
+        .then(|| self.tunnel_carries());
+        if !serving && using.is_none() {
+            return None;
+        }
+        let tun_name = self.tun_name.load().as_str().to_owned();
+        tokio::task::spawn_blocking(move || {
+            if serving {
+                server.refresh_host_interfaces();
+            }
+            crate::exit_node::check_kernel_state(serving, using, &tun_name)
+        })
+        .await
+        .ok()
     }
 
     /// After a `ray exit-node` mutation: if the data plane is up, reconcile the

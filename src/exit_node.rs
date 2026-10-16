@@ -946,8 +946,8 @@ mod linux;
 use linux::*;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    client_state_intact, disable, install_client_routing, reassert_forward_firewall,
-    server_state_intact, teardown_client_routing,
+    KernelCheck, check_kernel_state, disable, install_client_routing, reassert_forward_firewall,
+    teardown_client_routing,
 };
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]

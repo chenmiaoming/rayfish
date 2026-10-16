@@ -12,11 +12,25 @@
 //! That keeps removal stateless, so the panic hook and a restart after a crash can
 //! clean up without knowing the TUN name or what was added.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::Deserialize;
+
 use crate::hostfw::{self, Manager};
 
 const COMMENT_IN: &str = "rayfish-exit-in";
 const COMMENT_OUT: &str = "rayfish-exit-out";
 const COMMENT_PREFIX: &str = "rayfish-exit-";
+
+const IP6TABLES_DUMP: [&str; 5] = ["ip6tables", "-w", "5", "-S", "FORWARD"];
+pub(super) const NFT_RULESET: [&str; 4] = ["nft", "-j", "list", "ruleset"];
+
+/// The key of the dumps a periodic re-add last failed on (0 for none), so the
+/// check does not retry the same failing inserts every pass. Any change to
+/// either dump retries.
+static FAILED_ON: AtomicU64 = AtomicU64::new(0);
 
 /// What [`allow`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -33,6 +47,89 @@ pub(super) struct ForwardReport {
 /// another TUN name (a rename, or a crash before teardown) are removed.
 pub(super) fn allow(tun: &str) -> ForwardReport {
     allow_with(tun, &mut hostfw::run)
+}
+
+/// The two dumps the exceptions are decided from.
+pub(super) struct ForwardDumps {
+    ip6tables: Option<String>,
+    nft: Option<String>,
+}
+
+impl ForwardDumps {
+    /// Reads the ip6tables dump; `nft` is the ruleset the caller already holds.
+    pub(super) fn read(nft: Option<String>) -> Self {
+        Self {
+            ip6tables: hostfw::run(&IP6TABLES_DUMP),
+            nft,
+        }
+    }
+
+    /// What decides the exceptions for `tun`, hashed: the TUN name, the
+    /// ip6tables dump, and the dropping nft chains with our rules in them. Not
+    /// the raw nft dump, whose counters change on every read.
+    fn key(&self, tun: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        tun.hash(&mut hasher);
+        self.ip6tables.hash(&mut hasher);
+        self.nft
+            .as_deref()
+            .map(nft_dropping_forward_chains)
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Whether [`reassert`] has anything to do: a dropping chain lacks one of our
+/// accepts for `tun`, or holds one for another TUN, and the last attempt did
+/// not already fail on these same dumps. Reads only.
+pub(super) fn needs_reassert(tun: &str, dumps: &ForwardDumps) -> bool {
+    needs_allow(tun, dumps) && FAILED_ON.load(Ordering::Relaxed) != dumps.key(tun)
+}
+
+/// [`allow`] for the periodic check, from fresh dumps. Remembers a failure so
+/// [`needs_reassert`] stays quiet until something changes.
+pub(super) fn reassert(tun: &str, dumps: &ForwardDumps) -> Option<String> {
+    let report = allow_from(tun, dumps, &mut hostfw::run);
+    let failed = report.manual_fix.is_some().then(|| dumps.key(tun));
+    FAILED_ON.store(failed.unwrap_or(0), Ordering::Relaxed);
+    report.manual_fix
+}
+
+fn needs_allow(tun: &str, dumps: &ForwardDumps) -> bool {
+    let ip6tables = dumps
+        .ip6tables
+        .as_deref()
+        .filter(|dump| ip6tables_forward_drops(dump))
+        .is_some_and(|dump| {
+            let ours: Vec<&str> = dump
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("-A FORWARD ") && line.contains(COMMENT_PREFIX))
+                .collect();
+            let names = |line: &str, flag: &str| {
+                line.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|w| w[0] == flag && w[1] == tun)
+            };
+            let has = |comment: &str, flag: &str| {
+                ours.iter()
+                    .any(|line| line.contains(comment) && names(line, flag))
+            };
+            ours.iter()
+                .any(|line| !names(line, "-i") && !names(line, "-o"))
+                || !has(COMMENT_IN, "-i")
+                || !has(COMMENT_OUT, "-o")
+        });
+    let nft = dumps.nft.as_deref().is_some_and(|json| {
+        nft_dropping_forward_chains(json).iter().any(|chain| {
+            chain.ours.iter().any(|r| r.iface != tun)
+                || [COMMENT_IN, COMMENT_OUT]
+                    .iter()
+                    .any(|c| !chain.ours.iter().any(|r| r.comment == *c))
+        })
+    });
+    ip6tables || nft
 }
 
 /// Remove every rule [`allow`] ever inserted, by comment. Best-effort.
@@ -87,20 +184,30 @@ fn nft_rules(tun: &str) -> [(&'static str, String); 2] {
 }
 
 fn allow_with(tun: &str, run: &mut impl FnMut(&[&str]) -> Option<String>) -> ForwardReport {
+    let dumps = ForwardDumps {
+        ip6tables: run(&IP6TABLES_DUMP),
+        nft: run(&NFT_RULESET),
+    };
+    allow_from(tun, &dumps, run)
+}
+
+fn allow_from(
+    tun: &str,
+    dumps: &ForwardDumps,
+    run: &mut impl FnMut(&[&str]) -> Option<String>,
+) -> ForwardReport {
     let mut report = ForwardReport::default();
     let mut failed: Vec<String> = Vec::new();
 
-    if let Some(dump) = run(&["ip6tables", "-w", "5", "-S", "FORWARD"])
-        && ip6tables_forward_drops(&dump)
+    if let Some(dump) = dumps.ip6tables.as_deref()
+        && ip6tables_forward_drops(dump)
     {
-        for del in ip6tables_deletions(&dump) {
+        for del in ip6tables_deletions(dump) {
             if !del
                 .windows(2)
                 .any(|w| matches!(w[0].as_str(), "-i" | "-o") && w[1] == tun)
             {
-                let mut args = vec!["ip6tables", "-w", "5"];
-                args.extend(del.iter().map(String::as_str));
-                let _ = run(&args);
+                ip6tables_delete(run, &del);
             }
         }
         for spec in ip6tables_specs(tun) {
@@ -119,19 +226,10 @@ fn allow_with(tun: &str, run: &mut impl FnMut(&[&str]) -> Option<String>) -> For
         }
     }
 
-    if let Some(json) = run(&["nft", "-j", "list", "ruleset"]) {
-        for chain in nft_dropping_forward_chains(&json) {
+    if let Some(json) = dumps.nft.as_deref() {
+        for chain in nft_dropping_forward_chains(json) {
             for stale in chain.ours.iter().filter(|r| r.iface != tun) {
-                let _ = run(&[
-                    "nft",
-                    "delete",
-                    "rule",
-                    &chain.family,
-                    &chain.table,
-                    &chain.name,
-                    "handle",
-                    &stale.handle.to_string(),
-                ]);
+                nft_delete(run, stale);
             }
             for (comment, rule) in nft_rules(tun) {
                 if chain
@@ -203,27 +301,38 @@ fn manager_fix(manager: Manager, tun: &str) -> String {
 }
 
 fn remove_with(run: &mut impl FnMut(&[&str]) -> Option<String>) {
-    if let Some(dump) = run(&["ip6tables", "-w", "5", "-S", "FORWARD"]) {
+    if let Some(dump) = run(&IP6TABLES_DUMP) {
         for del in ip6tables_deletions(&dump) {
-            let mut args = vec!["ip6tables", "-w", "5"];
-            args.extend(del.iter().map(String::as_str));
-            let _ = run(&args);
+            ip6tables_delete(run, &del);
         }
     }
-    if let Some(json) = run(&["nft", "-j", "list", "ruleset"]) {
+    if let Some(json) = run(&NFT_RULESET) {
         for rule in nft_our_rules(&json) {
-            let _ = run(&[
-                "nft",
-                "delete",
-                "rule",
-                &rule.family,
-                &rule.table,
-                &rule.chain,
-                "handle",
-                &rule.handle.to_string(),
-            ]);
+            nft_delete(run, &rule);
         }
     }
+}
+
+/// Run one `-D` argv from [`ip6tables_deletions`]. Best-effort.
+fn ip6tables_delete(run: &mut impl FnMut(&[&str]) -> Option<String>, del: &[String]) {
+    let mut args = vec!["ip6tables", "-w", "5"];
+    args.extend(del.iter().map(String::as_str));
+    let _ = run(&args);
+}
+
+/// Delete one rule of ours by its handle. Best-effort.
+fn nft_delete(run: &mut impl FnMut(&[&str]) -> Option<String>, rule: &NftRule) {
+    let handle = rule.handle.to_string();
+    let _ = run(&[
+        "nft",
+        "delete",
+        "rule",
+        &rule.family,
+        &rule.table,
+        &rule.chain,
+        "handle",
+        &handle,
+    ]);
 }
 
 /// Whether an `ip6tables -S FORWARD` dump drops what it does not accept: a `DROP`
@@ -254,39 +363,60 @@ pub(super) fn ip6tables_deletions(dump: &str) -> Vec<Vec<String>> {
 }
 
 /// An nft forward base chain that drops what it does not accept.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub(super) struct NftChain {
     pub(super) family: String,
     pub(super) table: String,
     pub(super) name: String,
     /// The chain's rules that carry one of our comments, to tell whether ours
     /// are already there and for which TUN.
-    pub(super) ours: Vec<NftOurRule>,
+    pub(super) ours: Vec<NftRule>,
 }
 
-/// A rule of ours inside an [`NftChain`].
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct NftOurRule {
+/// One rule of ours, found by its comment.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(super) struct NftRule {
+    pub(super) family: String,
+    pub(super) table: String,
+    pub(super) chain: String,
     pub(super) comment: String,
     /// The `iifname`/`oifname` it matches, empty when it names none.
     pub(super) iface: String,
     pub(super) handle: u64,
 }
 
-/// One rule of ours, found by its comment.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct NftRuleRef {
-    pub(super) family: String,
-    pub(super) table: String,
-    pub(super) chain: String,
-    pub(super) handle: u64,
+/// The rule of ours `rule` is, if it carries one of our comments.
+fn our_rule(rule: &serde_json::Value) -> Option<NftRule> {
+    let comment = rule.get("comment")?.as_str()?;
+    if !comment.starts_with(COMMENT_PREFIX) {
+        return None;
+    }
+    Some(NftRule {
+        family: str_field(rule, "family").to_string(),
+        table: str_field(rule, "table").to_string(),
+        chain: str_field(rule, "chain").to_string(),
+        comment: comment.to_string(),
+        iface: rule_iface(rule).to_string(),
+        handle: rule.get("handle")?.as_u64()?,
+    })
 }
 
 fn nft_items(json: &str) -> Vec<serde_json::Value> {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| v.get("nftables")?.as_array().cloned())
+    #[derive(Deserialize)]
+    struct Ruleset {
+        nftables: Vec<serde_json::Value>,
+    }
+    serde_json::from_str::<Ruleset>(json)
+        .map(|r| r.nftables)
         .unwrap_or_default()
+}
+
+/// Whether `nft -j list ruleset` output has the table `family` `name`.
+pub(super) fn nft_has_table(json: &str, family: &str, name: &str) -> bool {
+    nft_items(json).iter().any(|item| {
+        item.get("table")
+            .is_some_and(|t| str_field(t, "family") == family && str_field(t, "name") == name)
+    })
 }
 
 fn str_field<'a>(obj: &'a serde_json::Value, key: &str) -> &'a str {
@@ -338,15 +468,8 @@ pub(super) fn nft_dropping_forward_chains(json: &str) -> Vec<NftChain> {
                     && s.chain.name == str_field(rule, "chain")
             })
         {
-            if let Some(comment) = rule.get("comment").and_then(|c| c.as_str())
-                && comment.starts_with(COMMENT_PREFIX)
-                && let Some(handle) = rule.get("handle").and_then(|h| h.as_u64())
-            {
-                seen.chain.ours.push(NftOurRule {
-                    comment: comment.to_string(),
-                    iface: rule_iface(rule).to_string(),
-                    handle,
-                });
+            if let Some(ours) = our_rule(rule) {
+                seen.chain.ours.push(ours);
             }
             seen.last_rule_drops = rule_drops_unconditionally(rule);
         }
@@ -392,22 +515,10 @@ fn rule_drops_unconditionally(rule: &serde_json::Value) -> bool {
 }
 
 /// Every rule in `nft -j list ruleset` output that carries one of our comments.
-pub(super) fn nft_our_rules(json: &str) -> Vec<NftRuleRef> {
+pub(super) fn nft_our_rules(json: &str) -> Vec<NftRule> {
     nft_items(json)
         .iter()
-        .filter_map(|item| {
-            let rule = item.get("rule")?;
-            let comment = rule.get("comment")?.as_str()?;
-            if !comment.starts_with(COMMENT_PREFIX) {
-                return None;
-            }
-            Some(NftRuleRef {
-                family: str_field(rule, "family").to_string(),
-                table: str_field(rule, "table").to_string(),
-                chain: str_field(rule, "chain").to_string(),
-                handle: rule.get("handle")?.as_u64()?,
-            })
-        })
+        .filter_map(|item| our_rule(item.get("rule")?))
         .collect()
 }
 
@@ -632,5 +743,57 @@ mod tests {
         assert!(!ip6tables_forward_drops(
             "-P FORWARD ACCEPT\n-A FORWARD -i eth0 -j DROP\n"
         ));
+    }
+
+    fn dumps(ip6tables: Option<&str>, nft: Option<&str>) -> ForwardDumps {
+        ForwardDumps {
+            ip6tables: ip6tables.map(str::to_owned),
+            nft: nft.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_periodic_check_reads_whether_anything_needs_adding() {
+        assert!(needs_allow("tun0", &dumps(Some(DOCKER_FORWARD), None)));
+        let done = format!(
+            "{DOCKER_FORWARD}-A FORWARD -i tun0 -m comment --comment rayfish-exit-in -j ACCEPT\n\
+             -A FORWARD -o tun0 -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment rayfish-exit-out -j ACCEPT\n"
+        );
+        assert!(!needs_allow("tun0", &dumps(Some(&done), None)));
+        // Ours for another TUN is stale and has to go.
+        let stale =
+            format!("{done}-A FORWARD -i old0 -m comment --comment rayfish-exit-in -j ACCEPT\n");
+        assert!(needs_allow("tun0", &dumps(Some(&stale), None)));
+        // A firewall that forwards anyway needs nothing.
+        assert!(!needs_allow(
+            "tun0",
+            &dumps(Some("-P FORWARD ACCEPT\n"), Some(r#"{"nftables": []}"#))
+        ));
+        assert!(needs_allow("tun0", &dumps(None, Some(FIREWALLD_JSON))));
+    }
+
+    #[test]
+    fn the_failure_key_ignores_nft_counters_but_not_the_tun() {
+        let a = r#"{"nftables": [
+{"chain": {"family": "inet", "table": "filter", "name": "forward", "handle": 1,
+  "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}},
+{"rule": {"family": "inet", "table": "filter", "chain": "forward", "handle": 2,
+  "expr": [{"counter": {"packets": 1, "bytes": 80}}, {"accept": null}]}}
+]}"#;
+        let b = a.replace(
+            "\"packets\": 1, \"bytes\": 80",
+            "\"packets\": 9, \"bytes\": 720",
+        );
+        let one = dumps(Some(DOCKER_FORWARD), Some(a));
+        let two = dumps(Some(DOCKER_FORWARD), Some(&b));
+        assert_eq!(one.key("tun0"), two.key("tun0"));
+        assert_ne!(one.key("tun0"), one.key("tun1"));
+    }
+
+    #[test]
+    fn tables_are_found_in_the_ruleset() {
+        assert!(nft_has_table(FIREWALLD_JSON, "inet", "firewalld"));
+        assert!(!nft_has_table(FIREWALLD_JSON, "ip6", "firewalld"));
+        assert!(!nft_has_table("not json", "inet", "firewalld"));
     }
 }

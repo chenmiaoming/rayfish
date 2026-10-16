@@ -32,6 +32,9 @@ pub(super) use names::*;
 
 pub(super) use crate::sysctl::{ipv6_conf, read_sysctl, write_sysctl};
 
+#[cfg(target_os = "linux")]
+use crate::hostfw;
+
 /// Turn this host into an exit node: enable IPv4/IPv6 forwarding and install an
 /// nftables table that masquerades overlay-sourced traffic that arrived on the
 /// TUN and is leaving by another interface, so replies come back to us and we
@@ -105,14 +108,64 @@ pub(super) fn enable(tun_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Re-add the host-firewall forwarding exceptions if a firewall reload dropped
-/// them, for the periodic kernel check. Quiet when nothing changed, and only a
-/// debug line when they cannot be added: [`enable`] already warned with the fix.
+/// Re-add the host-firewall forwarding exceptions a firewall reload dropped, for
+/// the periodic kernel check once [`check_kernel_state`] said they need it. Only
+/// a debug line when they cannot be added: [`enable`] already warned with the fix.
 #[cfg(target_os = "linux")]
 pub fn reassert_forward_firewall(tun_name: &str) {
-    if let Some(fix) = forward_fw::allow(tun_name).manual_fix {
+    let dumps = forward_fw::ForwardDumps::read(hostfw::run(&forward_fw::NFT_RULESET));
+    if let Some(fix) = forward_fw::reassert(tun_name, &dumps) {
         tracing::debug!(fix, "host firewall still drops exit-node forwarding");
     }
+}
+
+/// What one pass of the periodic kernel check found missing.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+pub struct KernelCheck {
+    /// The gateway's forwarding sysctl or nft table.
+    pub gateway: bool,
+    /// The client full tunnel's table, rules or default route.
+    pub client: bool,
+    /// The host-firewall forwarding exceptions (see [`reassert_forward_firewall`]).
+    pub forward_firewall: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl KernelCheck {
+    pub fn is_clean(&self) -> bool {
+        !self.gateway && !self.client && !self.forward_firewall
+    }
+
+    /// The roles to re-apply, for the log line.
+    pub fn missing(&self) -> Vec<&'static str> {
+        [(self.gateway, "gateway"), (self.client, "client tunnel")]
+            .into_iter()
+            .filter_map(|(gone, name)| gone.then_some(name))
+            .collect()
+    }
+}
+
+/// Read what the gateway (when `serving`) and the client tunnel (when `using`,
+/// with the families it carries) need from the kernel, changing nothing. One
+/// `nft list ruleset` answers for both tables and the forwarding exceptions.
+#[cfg(target_os = "linux")]
+pub fn check_kernel_state(
+    serving: bool,
+    using: Option<ExitFamilies>,
+    tun_name: &str,
+) -> KernelCheck {
+    let ruleset = hostfw::run(&forward_fw::NFT_RULESET);
+    let mut check = KernelCheck::default();
+    if let Some(carries) = using {
+        check.client = !client_state_intact(carries, ruleset.as_deref());
+    }
+    if serving {
+        check.gateway = !server_state_intact(ruleset.as_deref());
+        check.forward_firewall = !check.gateway
+            && forward_fw::needs_reassert(tun_name, &forward_fw::ForwardDumps::read(ruleset));
+    }
+    check
 }
 
 /// Every interface's own IPv6 `forwarding` value (and `default`'s), for the
@@ -205,16 +258,16 @@ pub(super) fn ra_interfaces_to_raise(current: &[(String, String)], tun_name: &st
 /// and our table loaded. A firewall reload or `nft flush ruleset` removes the
 /// table, and with it the masquerade, without telling us.
 #[cfg(target_os = "linux")]
-pub fn server_state_intact() -> bool {
-    read_sysctl(V6_FORWARD) == "1" && nft_table_exists(SERVER_TABLE)
+fn server_state_intact(ruleset: Option<&str>) -> bool {
+    read_sysctl(V6_FORWARD) == "1" && nft_table_exists(ruleset, SERVER_TABLE)
 }
 
 /// Whether the client full tunnel is still installed: our nft table, and for each
 /// family the tunnel carries, the bypass and catch-all rules and the tunnel
 /// table's default route.
 #[cfg(target_os = "linux")]
-pub fn client_state_intact(carries: ExitFamilies) -> bool {
-    nft_table_exists(CLIENT_TABLE)
+fn client_state_intact(carries: ExitFamilies, ruleset: Option<&str>) -> bool {
+    nft_table_exists(ruleset, CLIENT_TABLE)
         && tunnel_families(carries).iter().all(|family| {
             ip_output(&[family, "rule", "show"]).is_some_and(|show| client_rules_present(&show))
                 && ip_output(&[family, "route", "show", "table", EXIT_TABLE])
@@ -251,12 +304,10 @@ pub(super) fn client_rules_present(show: &str) -> bool {
     ) && parse_catch_all(show)
 }
 
+/// Whether `ruleset` (`nft -j list ruleset` output) has our `inet` table.
 #[cfg(target_os = "linux")]
-fn nft_table_exists(table: &str) -> bool {
-    Command::new("nft")
-        .args(["list", "table", "inet", table])
-        .output()
-        .is_ok_and(|out| out.status.success())
+fn nft_table_exists(ruleset: Option<&str>, table: &str) -> bool {
+    ruleset.is_some_and(|json| forward_fw::nft_has_table(json, "inet", table))
 }
 
 /// The nftables ruleset masquerading overlay traffic out of `tun_name`'s host.
