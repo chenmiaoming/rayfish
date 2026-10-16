@@ -69,12 +69,19 @@ struct ScopeTools {
 /// the pid we signal, the exit status, the environment and the stdio pipes are
 /// those of the shell itself, the same as a direct spawn. `setpriv` does the
 /// group and user switch in that fresh single-threaded process.
-pub(super) fn shell_launch(info: &LoginInfo, command: Option<&str>) -> Launch {
+///
+/// Finding the tools stats a few paths and, once per daemon, runs a probe, so
+/// it happens on the blocking pool rather than a runtime worker.
+pub(super) async fn shell_launch(info: &LoginInfo, command: Option<&str>) -> Launch {
     let shell_args: Vec<OsString> = match command {
         Some(command) => vec!["-c".into(), command.into()],
         None => vec!["-l".into()],
     };
-    match scope_tools() {
+    let tools = tokio::task::spawn_blocking(scope_tools)
+        .await
+        .ok()
+        .flatten();
+    match tools {
         Some(tools) => scoped_launch(&tools, info, shell_args),
         None => Launch {
             program: info.shell.clone(),
@@ -123,22 +130,34 @@ fn scope_tools() -> Option<ScopeTools> {
         systemd_run: find("systemd-run")?,
         setpriv: find("setpriv")?,
     };
-    // The binaries can exist while scopes still fail (no access to PID 1 in
-    // a container, an SELinux denial). The wrapper would then exit 1 after
-    // the session started, so check once that a scope really starts.
+    // The binaries can exist while the wrapper still fails: no access to PID 1
+    // in a container, an SELinux denial, or a busybox `setpriv` without
+    // `--reuid` and `--init-groups`. It would then exit 1 after the session
+    // started, so check once that the whole wrapper really runs.
     static SCOPES_WORK: OnceLock<bool> = OnceLock::new();
     SCOPES_WORK
-        .get_or_init(|| probe_scope(&tools.systemd_run))
+        .get_or_init(|| probe_scope(&tools, find("true").as_deref()))
         .then_some(tools)
 }
 
-/// Run `true` in a transient scope, within a short bound. This blocks, but
-/// only on the first session after the daemon starts.
+/// Find the scope tools and run their probe now, off the session path, so the
+/// first session does not wait for it. Called when the SSH server starts.
+pub(super) fn warm_scope_tools() {
+    #[cfg(target_os = "linux")]
+    tokio::task::spawn_blocking(scope_tools);
+}
+
+/// Run `true` through the same wrapper a session uses, switching to root as
+/// root (a no-op), within a short bound. This blocks, but only once per daemon.
 #[cfg(target_os = "linux")]
-fn probe_scope(systemd_run: &Path) -> bool {
+fn probe_scope(tools: &ScopeTools, true_bin: Option<&Path>) -> bool {
     const TIMEOUT: Duration = Duration::from_secs(3);
-    let spawned = Command::new(systemd_run)
-        .args(["--scope", "--quiet", "--collect", "--", "true"])
+    let true_bin = true_bin.unwrap_or(Path::new("true"));
+    let spawned = Command::new(&tools.systemd_run)
+        .args(["--scope", "--quiet", "--collect", "--"])
+        .arg(&tools.setpriv)
+        .args(["--reuid=0", "--regid=0", "--init-groups", "--"])
+        .arg(true_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -153,11 +172,11 @@ fn probe_scope(systemd_run: &Path) -> bool {
     match wait_bounded(&mut child, TIMEOUT) {
         Ok(status) if status.success() => true,
         Ok(status) => {
-            tracing::warn!(%status, "systemd-run --scope failed, SSH sessions stay in the daemon's cgroup");
+            tracing::warn!(%status, "systemd-run --scope with setpriv failed, SSH sessions stay in the daemon's cgroup");
             false
         }
         Err(error) => {
-            tracing::warn!(%error, "systemd-run --scope failed, SSH sessions stay in the daemon's cgroup");
+            tracing::warn!(%error, "systemd-run --scope with setpriv failed, SSH sessions stay in the daemon's cgroup");
             false
         }
     }

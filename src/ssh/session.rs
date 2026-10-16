@@ -216,7 +216,7 @@ pub(super) async fn run_pty_session(
             .arg("-f")
             .arg(&info.name),
         None => {
-            let launch = shell_launch(&info, command.as_deref());
+            let launch = shell_launch(&info, command.as_deref()).await;
             drop_in_child = launch.drop_in_child;
             pty_process::Command::new(&launch.program).args(&launch.args)
         }
@@ -292,7 +292,7 @@ pub(super) async fn run_pipe_session(
         child_proc,
         ..
     } = spec;
-    let launch = shell_launch(&info, command.as_deref());
+    let launch = shell_launch(&info, command.as_deref()).await;
     let mut cmd = Command::new(&launch.program);
     cmd.args(&launch.args)
         .current_dir(&info.home)
