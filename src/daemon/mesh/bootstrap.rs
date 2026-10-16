@@ -898,7 +898,9 @@ impl Drop for IpcSocket {
 /// faster one just bound. The lock serializes them. The file itself is never
 /// removed; the lock dies with the descriptor, including on a crash.
 #[cfg(unix)]
-pub(crate) struct DaemonLock(std::fs::File);
+pub(crate) struct DaemonLock {
+    _file: std::fs::File,
+}
 
 #[cfg(unix)]
 pub(crate) fn daemon_lock_path(socket: &Path) -> PathBuf {
@@ -931,7 +933,7 @@ impl DaemonLock {
             }
             return Err(error).with_context(|| format!("failed to lock {}", path.display()));
         }
-        Ok(Some(Self(file)))
+        Ok(Some(Self { _file: file }))
     }
 }
 
