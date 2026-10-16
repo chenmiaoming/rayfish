@@ -835,12 +835,27 @@ const V6_FORWARD: &str = "net.inet6.ip6.forwarding";
 ///
 /// Present-but-empty fields mean "we could not read the original, so do not touch
 /// it on the way out". `pf_token` is BSD-only (see [`pf_enable`]).
+///
+/// `extra` holds further sysctls to put back after `v4`/`v6`, in order: on Linux the
+/// per-interface IPv6 `forwarding` values (writing `all` overwrites every one of
+/// them) and any `accept_ra` we raised. Each is its own `sysctl:<path>=<value>` line,
+/// which an older build reading the file skips, and a file an older build wrote
+/// simply has none.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[derive(Default)]
 struct Snapshot {
     v4: String,
     v6: String,
     pf_token: Option<String>,
+    extra: Vec<SavedSysctl>,
+}
+
+/// One sysctl value to restore on teardown.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SavedSysctl {
+    path: String,
+    value: String,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
@@ -852,6 +867,18 @@ impl Snapshot {
             return snap;
         };
         for line in body.lines() {
+            // Split on the last `=`: values are numbers or a pf token, while an
+            // interface name inside a `sysctl:` path may itself contain one.
+            if let Some((path, value)) = line
+                .strip_prefix("sysctl:")
+                .and_then(|rest| rest.rsplit_once('='))
+            {
+                snap.extra.push(SavedSysctl {
+                    path: path.to_string(),
+                    value: value.to_string(),
+                });
+                continue;
+            }
             match line.split_once('=') {
                 Some(("v4", v)) => snap.v4 = v.to_string(),
                 Some(("v6", v)) => snap.v6 = v.to_string(),
@@ -867,15 +894,24 @@ impl Snapshot {
         if let Some(token) = &self.pf_token {
             body.push_str(&format!("pf_token={token}\n"));
         }
+        for saved in &self.extra {
+            body.push_str(&format!("sysctl:{}={}\n", saved.path, saved.value));
+        }
         crate::config::write_file(path, body.as_bytes(), false)
     }
 
     /// Put the forwarding sysctls back, skipping any we never managed to read.
+    /// `extra` goes last, because writing `all/forwarding` resets every
+    /// interface's own value and those have to land on top of it. An interface
+    /// that has gone away since fails its write, which is ignored.
     fn restore_sysctls(&self) {
         for (name, value) in [(V4_FORWARD, &self.v4), (V6_FORWARD, &self.v6)] {
             if !value.is_empty() {
                 let _ = write_sysctl(name, value);
             }
+        }
+        for saved in &self.extra {
+            let _ = write_sysctl(&saved.path, &saved.value);
         }
     }
 }
@@ -889,6 +925,8 @@ fn snapshot_path() -> Option<PathBuf> {
         .map(|d| d.join("exit-forward.snapshot"))
 }
 
+#[cfg(target_os = "linux")]
+mod forward_fw;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -1423,6 +1461,82 @@ mod tests {
             batch_script(&[bypass_rule_args("add"), strs(&["rule", "del", "pref", "1"])]),
             "rule add fwmark 0x7261/0x7261 table main pref 100\nrule del pref 1\n"
         );
+    }
+
+    /// The gateway clamps the MSS of SYNs crossing the TUN in both directions,
+    /// and the chain that does it filters nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_server_nft_ruleset_clamps_mss_on_the_tun() {
+        let rules = server_nft_ruleset("tun-rayfish");
+        assert!(
+            rules.contains("type filter hook forward priority mangle; policy accept;"),
+            "{rules}"
+        );
+        for dir in ["iifname", "oifname"] {
+            assert!(
+                rules.contains(&format!(
+                    "{dir} \"tun-rayfish\" tcp flags & (syn | rst) == syn tcp option maxseg size set rt mtu"
+                )),
+                "{rules}"
+            );
+        }
+        assert!(!rules.contains(" drop"), "{rules}");
+    }
+
+    /// Only real interfaces at `accept_ra=1` are raised: not the templates, not
+    /// loopback, not our TUN, and not one already at 0 or 2.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn accept_ra_is_raised_only_where_forwarding_would_silence_it() {
+        let current: Vec<(String, String)> = [
+            ("all", "1"),
+            ("default", "1"),
+            ("lo", "1"),
+            ("tun-rayfish", "1"),
+            ("eth0", "1"),
+            ("eth1", "0"),
+            ("wlan0", "2"),
+            ("enp3s0", "1"),
+        ]
+        .iter()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(
+            ra_interfaces_to_raise(&current, "tun-rayfish"),
+            ["eth0", "enp3s0"]
+        );
+    }
+
+    /// The snapshot keeps its extra sysctls in order and still reads a file an
+    /// older build wrote, which has none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_snapshot_round_trips_extra_sysctls_and_reads_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exit-forward.snapshot");
+        fs::write(&path, "v4=0\nv6=0\n").unwrap();
+        let old = Snapshot::load(&path);
+        assert_eq!((old.v4.as_str(), old.v6.as_str()), ("0", "0"));
+        assert!(old.extra.is_empty());
+
+        let saved = |path: &str, value: &str| SavedSysctl {
+            path: path.to_string(),
+            value: value.to_string(),
+        };
+        let snap = Snapshot {
+            v4: "0".into(),
+            v6: "0".into(),
+            pf_token: None,
+            extra: vec![
+                saved("net/ipv6/conf/eth0/forwarding", "1"),
+                saved("net/ipv6/conf/odd=name/accept_ra", "1"),
+            ],
+        };
+        snap.save(&path).unwrap();
+        let back = Snapshot::load(&path);
+        assert_eq!(back.extra, snap.extra);
+        assert_eq!(back.v6, "0");
     }
 
     /// The Linux twin of the above, and the same argument: `nft_load` never runs in

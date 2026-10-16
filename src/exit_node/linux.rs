@@ -42,11 +42,19 @@ pub(super) use names::*;
 /// has no input interface and so never matches, which is correct: nothing this
 /// host originates is a peer's transit traffic.
 ///
-/// Nothing here opens the forward path: with no other ruleset the kernel forwards
-/// once the sysctls are on, and a host firewall that drops forwarding (ufw,
-/// firewalld, Docker's iptables policy) cannot be overridden from our own table
-/// anyway (an `accept` ends only the chain it is in, never another chain's drop).
-/// Such a host must be told to permit forwarding on its own terms.
+/// A host firewall that drops forwarding (ufw, firewalld, Docker's ip6tables
+/// policy) cannot be overridden from our own table (an `accept` ends only the chain
+/// it is in, never another chain's drop), so [`forward_fw::allow`] puts two accepts
+/// for the TUN at the top of the chain that drops, the way Tailscale does. Where
+/// that fails the warning names the command for the firewall in charge.
+///
+/// Turning on `all/forwarding` also makes the kernel ignore router advertisements
+/// on every interface left at `accept_ra=1`, so a host that learned its IPv6
+/// default route from one would lose it when the route expires, and with it the
+/// uplink the exit node exists to provide. Those interfaces are raised to
+/// `accept_ra=2` first (accept RAs even while forwarding) and put back on
+/// teardown. A host that was already forwarding had chosen to ignore RAs, so it is
+/// left alone.
 ///
 /// Idempotent, and safe to re-run while already enabled: the prior sysctl values
 /// are snapshotted to disk exactly once (a re-apply must not capture the values we
@@ -58,13 +66,22 @@ pub(super) use names::*;
 #[cfg(target_os = "linux")]
 pub(super) fn enable(tun_name: &str) -> Result<()> {
     let path = snapshot_path().context("no config dir to snapshot the forwarding sysctls into")?;
-    if !path.exists() {
-        Snapshot {
+    let mut snap = if path.exists() {
+        Snapshot::load(&path)
+    } else {
+        let snap = Snapshot {
             v4: read_sysctl(V4_FORWARD),
             v6: read_sysctl(V6_FORWARD),
             pf_token: None,
-        }
-        .save(&path)?;
+            // Writing `all/forwarding` sets every interface's own value, so
+            // restoring `all` alone would flatten whatever they held before.
+            extra: interface_forwarding(),
+        };
+        snap.save(&path)?;
+        snap
+    };
+    if snap.v6 != "1" {
+        keep_accepting_ras(tun_name, &mut snap, &path)?;
     }
     // IPv6 alone. The overlay routes no IPv4, so nothing can ever enter the TUN
     // from `100.64.0.0/10` to be masqueraded, and turning on `ip_forward` would
@@ -73,8 +90,103 @@ pub(super) fn enable(tun_name: &str) -> Result<()> {
     // and teardown may not assume which build turned it on.
     write_sysctl(V6_FORWARD, "1")?;
     nft_load(&server_nft_ruleset(tun_name))?;
+    let report = forward_fw::allow(tun_name);
+    if let Some(fix) = &report.manual_fix {
+        tracing::warn!(
+            tun = tun_name,
+            fix,
+            "the host firewall drops forwarded traffic and rayfish could not add an \
+             exception, so exit-node clients will get no replies until you run the fix"
+        );
+    }
     tracing::info!(tun = tun_name, "exit node forwarding + NAT enabled");
     Ok(())
+}
+
+/// Every interface's own IPv6 `forwarding` value (and `default`'s), for the
+/// snapshot. `all` is left out: it is the snapshot's `v6`.
+#[cfg(target_os = "linux")]
+fn interface_forwarding() -> Vec<SavedSysctl> {
+    ipv6_conf_interfaces()
+        .into_iter()
+        .filter(|name| name != "all")
+        .filter_map(|name| {
+            let path = format!("net/ipv6/conf/{name}/forwarding");
+            let value = read_sysctl(&path);
+            (!value.is_empty()).then_some(SavedSysctl { path, value })
+        })
+        .collect()
+}
+
+/// The entries of `/proc/sys/net/ipv6/conf`: every interface plus `all` and
+/// `default`. Empty when IPv6 is disabled.
+#[cfg(target_os = "linux")]
+fn ipv6_conf_interfaces() -> Vec<String> {
+    let Ok(dir) = fs::read_dir("/proc/sys/net/ipv6/conf") else {
+        return Vec::new();
+    };
+    dir.filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect()
+}
+
+/// Raise `accept_ra` from 1 to 2 on every interface that has it, recording the
+/// original in the snapshot (and saving it) before the write. See [`enable`].
+///
+/// Runs on every enable, not just the first, so an interface that appeared or was
+/// reset since is covered too; one already recorded is not recorded twice.
+#[cfg(target_os = "linux")]
+fn keep_accepting_ras(tun_name: &str, snap: &mut Snapshot, path: &Path) -> Result<()> {
+    let current: Vec<(String, String)> = ipv6_conf_interfaces()
+        .into_iter()
+        .map(|name| {
+            let value = read_sysctl(&accept_ra_path(&name));
+            (name, value)
+        })
+        .collect();
+    let raise = ra_interfaces_to_raise(&current, tun_name);
+    if raise.is_empty() {
+        return Ok(());
+    }
+    for name in &raise {
+        let path = accept_ra_path(name);
+        if !snap.extra.iter().any(|s| s.path == path) {
+            snap.extra.push(SavedSysctl {
+                path,
+                value: "1".to_string(),
+            });
+        }
+    }
+    snap.save(path)?;
+    for name in &raise {
+        if let Err(e) = write_sysctl(&accept_ra_path(name), "2") {
+            tracing::warn!(interface = %name, error = %e, "could not keep accepting router advertisements");
+        }
+    }
+    tracing::warn!(
+        interfaces = %raise.join(","),
+        "IPv6 forwarding makes the kernel ignore router advertisements on these \
+         interfaces; set accept_ra=2 so their RA-learned routes survive (restored \
+         when the exit node is turned off)"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn accept_ra_path(name: &str) -> String {
+    format!("net/ipv6/conf/{name}/accept_ra")
+}
+
+/// Which of `(interface, accept_ra)` need raising to 2: those at exactly 1,
+/// other than the `all`/`default` templates, loopback and our own TUN.
+#[cfg(target_os = "linux")]
+pub(super) fn ra_interfaces_to_raise(current: &[(String, String)], tun_name: &str) -> Vec<String> {
+    current
+        .iter()
+        .filter(|(name, value)| {
+            value == "1" && !matches!(name.as_str(), "all" | "default" | "lo") && name != tun_name
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// The nftables ruleset masquerading overlay traffic out of `tun_name`'s host.
@@ -84,6 +196,13 @@ pub(super) fn enable(tun_name: &str) -> Result<()> {
 /// (`iifname "<tun>"` scopes it to packets arriving on our own TUN, and an inbound
 /// IPv4 packet is dropped as spoofed long before it could get there), but a rule
 /// that cannot match is a rule that misleads whoever reads `nft list ruleset` next.
+///
+/// The `forward` chain clamps the MSS of TCP SYNs crossing the TUN to the route's
+/// MTU (Tailscale's `--clamp-mss-to-pmtu`). The TUN is 1500 and the overlay
+/// fragments below IP to fit smaller peer paths, but the gateway's own uplink can
+/// be narrower (PPPoE, a tunnel), and a remote that drops the ICMPv6 Packet Too Big
+/// would otherwise stall every full-sized segment. It only ever lowers the MSS
+/// and its policy is `accept`, so it filters nothing.
 #[cfg(target_os = "linux")]
 pub(super) fn server_nft_ruleset(tun_name: &str) -> String {
     format!(
@@ -92,6 +211,11 @@ pub(super) fn server_nft_ruleset(tun_name: &str) -> String {
          \tchain postrouting {{\n\
          \t\ttype nat hook postrouting priority srcnat; policy accept;\n\
          \t\tiifname \"{tun}\" ip6 saddr {v6} oifname != \"{tun}\" masquerade\n\
+         \t}}\n\
+         \tchain forward {{\n\
+         \t\ttype filter hook forward priority mangle; policy accept;\n\
+         \t\tiifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size set rt mtu\n\
+         \t\toifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size set rt mtu\n\
          \t}}\n\
          }}\n",
         reset = drop_table(SERVER_TABLE),
@@ -115,6 +239,7 @@ pub fn disable() {
     }
     let _ = nft_load(&drop_table(SERVER_TABLE));
     Snapshot::load(&path).restore_sysctls();
+    forward_fw::remove();
     let _ = fs::remove_file(&path);
     tracing::info!("exit node forwarding + NAT disabled");
 }
