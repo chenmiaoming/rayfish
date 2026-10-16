@@ -18,7 +18,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/etc/rayfish/blobs` to `/var/lib/rayfish/blobs`. An existing store is moved
   on first start.
 - Linux: mesh SSH commands, scp, rsync and root sessions start in their own
-  systemd scope, so they survive a daemon restart.
+  systemd scope, so background jobs started from them survive a daemon
+  restart. Open SSH sessions still disconnect.
 - The systemd, OpenRC and SysV services now restore DNS and exit-node settings
   when the daemon stops or crashes, and raise the open file limit.
 - On systemd-resolved, Rayfish is chosen only when `/etc/resolv.conf` points at
