@@ -307,7 +307,12 @@ pub(crate) enum Command {
     },
     /// Run the daemon in the foreground (invoked by the system service)
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        /// Undo DNS and exit-node changes a dead daemon left behind, then exit
+        /// (run by the service manager after the daemon stops)
+        #[arg(long)]
+        cleanup: bool,
+    },
     /// Serve macOS app SSH sessions (started only by launchd).
     #[cfg(all(target_os = "macos", feature = "macos-app"))]
     #[command(hide = true)]
@@ -321,6 +326,19 @@ pub(crate) enum Command {
         /// Enable and persist mesh SSH when bringing the node up
         #[arg(long)]
         enable_ssh: bool,
+        /// Persist a setting after startup (repeatable; a bare key means on)
+        #[arg(
+            long = "set",
+            visible_alias = "enable",
+            value_name = "KEY[=VALUE]",
+            long_help = key_long_help(
+                "Persist a setting after startup. Repeat for multiple settings; a bare key means on.\n\
+                 Uses the same values and restart requirements as `ray config set`.\n\
+                 Settings are applied in order; a failure leaves earlier settings applied."
+            ),
+            add = complete::node_settings_keys()
+        )]
+        settings: Vec<UpSetting>,
         /// Enroll this machine with a controller after bringing the daemon up.
         #[arg(long)]
         controller: Option<ipc::EnrollmentTicket>,
@@ -1614,23 +1632,31 @@ fn install_panic_hook() {
             eprintln!("failed to write panic log: {e}");
         }
 
-        // Hand DNS back to the OS before we abort: restore the backed-up
-        // resolv.conf and drop the NetworkManager `dns=none` snippet, so a crash
-        // can't leave the host pointing at our dead resolver (it would otherwise
-        // blackhole all DNS until the service restarts). Synchronous, best-effort.
-        rayfish::dns::config::emergency_restore_resolv_conf();
-
-        // Remove the exit-node kernel state: the forwarding/NAT (restoring the
-        // sysctls) so a crash can't leave the host an open router, and the client
-        // full-tunnel rules, which would otherwise outlive the TUN they point at.
-        rayfish::exit_node::disable();
-        rayfish::exit_node::teardown_client_routing();
+        // Hand DNS back to the OS and remove the exit-node kernel state before
+        // we abort, so a crash leaves neither a dead resolver nor an open router.
+        rayfish::daemon::restore_host_state();
 
         // Print the standard panic message to stderr (journal), then fail fast so
         // the service manager restarts the daemon cleanly.
         default_hook(info);
         std::process::abort();
     }));
+}
+
+/// `ray daemon --cleanup`: the service manager's post-stop hook.
+fn cmd_daemon_cleanup() -> Result<()> {
+    #[cfg(unix)]
+    {
+        match daemon::cleanup_after_exit()? {
+            daemon::CleanupOutcome::Cleaned => tracing::info!("post-stop cleanup done"),
+            daemon::CleanupOutcome::DaemonRunning => {
+                tracing::info!("a rayfish daemon is running; leaving its state alone")
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("ray daemon --cleanup is not used on this platform")
 }
 
 /// Append a panic record to `<log_dir>/panic.log`. Best-effort durability in case
@@ -1691,7 +1717,7 @@ async fn run() -> Result<()> {
         return rayfish::ssh::app_helper::run().await;
     }
     // Keep the appender guard alive for the whole process so file logs flush.
-    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon));
+    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon { .. }));
 
     match cli.command {
         Command::Leave { name, delegate } => match delegate {
@@ -1759,7 +1785,11 @@ async fn run() -> Result<()> {
         } => ipc_status(machines, with_ips).await,
         Command::Report => ipc_report().await,
         Command::Logs { since, follow } => ipc_logs(since, follow).await,
-        Command::Daemon => {
+        Command::Daemon { cleanup: true } => {
+            check_root();
+            cmd_daemon_cleanup()
+        }
+        Command::Daemon { cleanup: false } => {
             check_root();
             install_panic_hook();
             #[cfg(windows)]
@@ -1776,8 +1806,9 @@ async fn run() -> Result<()> {
         Command::Up {
             hostname,
             enable_ssh,
+            settings,
             controller,
-        } => cmd_up(hostname, controller, enable_ssh).await,
+        } => cmd_up(hostname, controller, enable_ssh, settings).await,
         Command::Down => ipc_down().await,
         Command::Stop => cmd_stop().await,
         Command::Start => cmd_start().await,
@@ -2012,9 +2043,7 @@ async fn cmd_config(action: Option<ConfigAction>) -> Result<()> {
     }
 }
 
-/// Resolve a user-typed key to the one the wire carries. `ray config` is the
-/// only command that takes a key as free text; every other caller names its key
-/// as a constant, so this is the single place a typo can enter.
+/// Resolve a `ray config` key to the one the wire carries.
 ///
 /// Reported here rather than by the daemon, with the registry's own wording:
 /// the key type makes an unknown key unrepresentable on the wire, so without
@@ -2242,6 +2271,75 @@ mod tests {
                 ..
             } if ticket == expected
         ));
+    }
+
+    #[test]
+    fn up_settings_combine_with_controller_and_hostname() {
+        let controller = iroh::EndpointAddr::from(iroh::SecretKey::generate().public());
+        let ticket = ipc::EnrollmentTicket::new(controller, [7; 32]);
+        let encoded = ticket.to_string();
+        let cli = Cli::try_parse_from([
+            "ray",
+            "up",
+            "--controller",
+            &encoded,
+            "--hostname",
+            "build-box",
+            "--enable",
+            "v4-bridge",
+            "--set",
+            "dns=partial",
+            "--enable",
+            "firewall.reject",
+            "--set",
+            "dns=off",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Up {
+                controller,
+                hostname,
+                settings,
+                ..
+            } => {
+                assert_eq!(controller, Some(ticket));
+                assert_eq!(hostname.as_deref(), Some("build-box"));
+                let expected: Vec<UpSetting> = [
+                    "v4-bridge=on",
+                    "dns=partial",
+                    "firewall.reject=on",
+                    "dns=off",
+                ]
+                .into_iter()
+                .map(|s| s.parse().unwrap())
+                .collect();
+                assert_eq!(settings, expected);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn up_rejects_invalid_settings_before_contacting_the_daemon() {
+        for flag in ["--set", "--enable"] {
+            for assignment in [
+                "unknown-key=on",
+                "net.auto-accept-files=on",
+                "dns=invalid",
+                "v4-bridge=maybe",
+                "ssh-port=0",
+                "download-dir=relative",
+                "firewall.default-in=invalid",
+                "quic-engine",
+                "=on",
+            ] {
+                assert!(
+                    Cli::try_parse_from(["ray", "up", flag, assignment]).is_err(),
+                    "{flag} {assignment}"
+                );
+            }
+            assert!(Cli::try_parse_from(["ray", "up", flag]).is_err());
+        }
     }
 
     #[test]
