@@ -205,13 +205,23 @@ pub(crate) struct NetworkRegistry {
     /// The cost of a missed nudge is one tick of staleness, which is what the
     /// poll was for anyway.
     pub(crate) poll_nudge: Arc<Notify>,
-    /// Wakes [`Self::run_unpair_retries`] when an unpair request is saved.
+    /// Wakes [`Self::run_unpair_requests`] when this device saves an unpair, or
+    /// finds the primary of one reachable.
     pub(crate) unpair_nudge: Arc<Notify>,
-    /// Held while this device pairs or unpairs itself, and across each retry of
-    /// a saved unpair request, so a retry never sees either half done: the cert
-    /// of an unpair still under way would pass for a new pairing and drop the
-    /// request, and a pairing completed under a retry would be revoked by it.
+    /// Held while this device pairs or unpairs itself, and across each attempt
+    /// at its saved unpairs, so none of them sees another half done: a request
+    /// sent while a pairing with its primary completes would revoke that
+    /// pairing, and a pairing must not start before an unpair's cleanup ends.
     pub(crate) unpair_lock: AsyncMutex<()>,
+    /// Wakes [`Self::run_unpair_notices`] when `ray unpair` saves a device to
+    /// tell.
+    pub(crate) notice_nudge: Arc<Notify>,
+    /// Held while a device is told it is unpaired, and while a pairing cancels
+    /// those notices, so none reaches the device after its new pairing.
+    pub(crate) notice_lock: AsyncMutex<()>,
+    /// Pairings this device completed since the daemon started. A primary's
+    /// `ControlMsg::Unpaired` that arrived before the latest is not about it.
+    pub(crate) pairing_count: AtomicU64,
 }
 
 /// One saved network the restore supervisor found missing from the live map,
@@ -259,7 +269,7 @@ pub(crate) fn missing_networks(
         .collect()
 }
 
-fn networks_joined_with_certificate(
+pub(crate) fn networks_joined_with_certificate(
     saved: &[config::NetworkConfig],
     primary: EndpointId,
 ) -> Vec<String> {
@@ -321,6 +331,9 @@ impl NetworkRegistry {
             poll_nudge: Arc::new(Notify::new()),
             unpair_nudge: Arc::new(Notify::new()),
             unpair_lock: AsyncMutex::new(()),
+            notice_nudge: Arc::new(Notify::new()),
+            notice_lock: AsyncMutex::new(()),
+            pairing_count: AtomicU64::new(0),
         }
     }
 
@@ -566,15 +579,14 @@ impl NetworkRegistry {
         Ok(())
     }
 
-    /// Unpair *this* device from its primary, locally: leave only networks whose
-    /// first join used this primary's certificate, then delete the stored cert.
-    /// Called by the phone's unpair control, the IPC path, and the device-side
-    /// `ControlMsg::Unpaired` / self-nullify handlers (was the `self_unpair_tx`
-    /// hand-off to the daemon loop). A device with no cert (a primary) is a no-op.
-    pub(crate) async fn unpair_self(self: &Arc<Self>) -> IpcMessage {
-        let Some(cert) = self.current_device_cert() else {
-            return ipc_err("this device is not paired to a primary".to_string());
-        };
+    /// The local cleanup of an unpair from `cert`'s primary: leave only networks
+    /// whose first join used that primary's certificate, then delete the stored
+    /// cert. Part of [`Self::unpair_self`], which saves the unpair first and
+    /// makes this cleanup durable before it asks the primary to record it.
+    pub(crate) async fn leave_certificate_networks(
+        self: &Arc<Self>,
+        cert: &control::DeviceCert,
+    ) -> IpcMessage {
         let cfg = match config::load() {
             Ok(cfg) => cfg,
             Err(error) => return ipc_err(format!("could not read saved networks: {error}")),

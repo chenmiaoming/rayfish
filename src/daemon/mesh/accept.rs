@@ -1985,6 +1985,7 @@ impl ProtocolRouter {
                 FilesProtocol(Arc::clone(&self.files)),
             )
             .accept(daemon::PAIR_ALPN, PairProtocol(Arc::clone(&self.files)))
+            .accept(daemon::PAIR_V2_ALPN, PairProtocol(Arc::clone(&self.files)))
             .accept(
                 transport::CONNECT_ALPN,
                 ConnectProtocol(Arc::clone(&self.connect)),

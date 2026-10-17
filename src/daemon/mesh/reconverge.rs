@@ -372,8 +372,8 @@ pub(crate) async fn reconverge_and_apply(
     // Self-unpair: if our own device cert is nullified in this (verified, signed)
     // blob and the blob is coordinated by our *own* primary, the primary has
     // revoked this device. Tear ourselves out (delete the cert + leave every
-    // network) even if we never received the best-effort `ControlMsg::Unpaired`
-    // (e.g. we were offline at unpair time). This rides the signed blob the group
+    // network) even if `ControlMsg::Unpaired` has not reached us yet (e.g. we
+    // were offline at unpair time). This rides the signed blob the group
     // poller already fetches, so it needs no live mesh link. The
     // own-primary-coordinator gate stops a foreign network's coordinator from
     // forcing a global deauth by listing our key.

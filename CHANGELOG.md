@@ -141,12 +141,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Leaving a network could close a peer connection that a concurrent reconnect
   had just reused for another network.
 
-- A device that unpairs itself, such as a phone in the Android app, now gets
-  its request to the primary when no connection between them is open, which
-  on-demand mode makes the usual case. While the primary is offline, the device
-  retries for as long as Rayfish runs on it. A missed request used to leave the
-  device's certificate unrevoked and, with the primary offline, the device still
-  listed in its networks until someone ran `ray unpair` there.
+- Unpairing no longer depends on the device and its primary being connected at
+  that moment, which on-demand mode makes rare. A device that unpairs itself,
+  such as a phone in the Android app, keeps asking its primary to revoke it,
+  across restarts, until the primary confirms that the revocation is saved.
+  `ray unpair <device>` keeps telling the device to delete its certificate until
+  the device confirms, so a device that was offline gets the message later. An
+  unpair interrupted by a restart is finished at the next start. A missed
+  message used to leave the device's certificate unrevoked, or still on the
+  device. A primary on an older release gets the earlier one-shot request.
 
 - Turning mDNS discovery off while a window was opening could leave the mDNS
   sockets open and still answering lookups.

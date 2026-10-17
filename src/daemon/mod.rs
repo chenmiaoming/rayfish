@@ -293,10 +293,27 @@ use mdns::MdnsDiscovery;
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// ALPN for the device-pairing protocol. The trailing `/1` is its protocol
+/// ALPN for the device-pairing protocol. The trailing number is its protocol
 /// version - **bump it on any breaking change to the `PairMsg` handshake**;
 /// peers on different versions can't negotiate a connection (transport-enforced).
-const PAIR_ALPN: &[u8] = b"rayfish/pair/2";
+/// Version 3 adds the unpair exchange (`PairMsg::UnpairRequest`).
+const PAIR_ALPN: &[u8] = b"rayfish/pair/3";
+
+/// The previous pairing protocol version, still served and offered so pairing
+/// and the network list keep working between builds. A connection that
+/// negotiates it is refused the version 3 messages, and it tells a device that
+/// its primary cannot record an unpair yet.
+const PAIR_V2_ALPN: &[u8] = b"rayfish/pair/2";
+
+/// Dial `addr` for the pairing protocol, offering version 2 as well so that a
+/// primary on an older build still answers. The caller checks the negotiated
+/// ALPN before sending a version 3 message.
+async fn connect_pair(endpoint: &Endpoint, addr: iroh::EndpointAddr) -> Result<Connection> {
+    let options =
+        iroh::endpoint::ConnectOptions::new().with_additional_alpns(vec![PAIR_V2_ALPN.to_vec()]);
+    let connecting = endpoint.connect_with_opts(addr, PAIR_ALPN, options).await?;
+    Ok(connecting.await?)
+}
 
 /// Node-wide shared handles, cloned into every per-network accept handler and
 /// background task. Every field is a cheap `Clone` (an `Arc`-backed handle, a

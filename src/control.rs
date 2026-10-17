@@ -18,17 +18,20 @@ use crate::membership::{ApprovedEntry, ExitFamilies, Member};
 /// The user's private key signs the device's public key. Any peer can verify
 /// the binding using only the user's public key.
 ///
-/// `generation` is the cert's issuance epoch (`ray unpair`). A user publishes a
-/// current "floor" generation to pkarr; verifiers reject any cert below it, so a
-/// bump revokes every device at once and the ones you keep are re-issued fresh
-/// certs at the new generation. The signature covers the generation, so it can't
-/// be edited to jump the floor.
+/// Revocation is per device. `ray unpair`, or the device's own request to its
+/// primary, adds the device key to the primary's `revoked_devices`, and from
+/// there to the nullifier set of every network the primary coordinates, which
+/// rides the network-key-signed blob. Verifiers reject a certificate whose
+/// device key a network nullifies; certificates of the devices kept are
+/// untouched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceCert {
     pub user_identity: EndpointId,
     pub device_key: EndpointId,
-    /// Issuance epoch. `0` for certs minted before the epoch scheme existed
-    /// (back-compat) and for the pre-rotation baseline.
+    /// Issuance epoch, covered by the signature. Left from an earlier scheme
+    /// that revoked every device at once by raising a published floor; nothing
+    /// raises it now, so certificates are issued at the stored legacy
+    /// `cert_generation`, normally `0`.
     #[serde(default)]
     pub generation: u64,
     pub signature: Signature,
@@ -76,8 +79,10 @@ pub struct PairNetwork {
     pub network_key: String,
 }
 
-/// Messages for device pairing and paired-device network discovery (ALPN
-/// `rayfish/pair/2`). The original variants keep their wire representation.
+/// Messages for device pairing, paired-device network discovery and unpairing
+/// (ALPN `rayfish/pair/3`). Version 3 adds the unpair exchange. The other
+/// variants keep their version 2 wire representation, and version 2 is still
+/// served and offered, so builds on either version pair with each other.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PairMsg {
     Request {
@@ -95,6 +100,19 @@ pub enum PairMsg {
     NetworkListResponse {
         networks: Vec<PairNetwork>,
     },
+    /// Device to primary, version 3 only: record that this device unpaired
+    /// itself, or that it finished the cleanup the primary's
+    /// `ControlMsg::Unpaired` asked for. `cert` is the certificate the primary
+    /// signed for it, the evidence of the pairing, which the primary checks in
+    /// place of its rosters: a device that left its networks is no longer on
+    /// them. Answered with `UnpairRecorded` once the revocation is saved.
+    UnpairRequest {
+        cert: DeviceCert,
+    },
+    /// Primary to device: the revocation an `UnpairRequest` asked for is saved.
+    /// Sent again for a revocation saved earlier, so a device whose answer was
+    /// lost can safely ask again.
+    UnpairRecorded,
 }
 
 /// Messages for the `ray connect` friend-request handshake (ALPN
@@ -290,18 +308,23 @@ pub enum ControlMsg {
         #[serde(default = "default_receive_mtu")]
         receive_mtu: u16,
     },
-    /// Primary to secondary: this device has been unpaired (`ray unpair`). Sent
-    /// best-effort over a shared network's mesh connection. The receiver acts on
-    /// it only when the sender's identity is the `user_identity` in its own device
-    /// cert (so a stranger cannot trigger a wipe): it deletes its stored device
-    /// cert and leaves the networks it holds only by that cert. The authoritative
-    /// revocation is the per-network blob nullifier set; this is just a courtesy
-    /// wipe for a cooperative device.
+    /// Primary to secondary: this device has been unpaired (`ray unpair`). The
+    /// primary saves the revocation, and that the device has yet to be told,
+    /// before sending it, then sends it again, over a live link or one dialed
+    /// for it, until the device confirms, also after a restart. The receiver
+    /// acts on it only when the sender's identity is the `user_identity` in its
+    /// own device cert (so a stranger cannot trigger a wipe): it deletes its
+    /// stored device cert and leaves the networks it holds only by that cert.
+    /// Once that cleanup is saved it confirms with the `PairMsg::UnpairRequest`
+    /// it sends when it unpairs itself. The authoritative revocation is the
+    /// per-network blob nullifier set; this wipe is for a cooperative device.
     Unpaired,
-    /// Primary to secondary: a freshly-signed cert at a new generation, pushed
-    /// after a rotation (`ray unpair`) so a kept device stays above the floor.
-    /// Accepted only when it is signed by the device's own user identity and
-    /// binds the device's own key at a generation no lower than the current one.
+    /// Primary to secondary, from an earlier scheme that revoked every device at
+    /// once by raising a published generation floor: a cert re-issued at the new
+    /// generation. Nothing sends it now that revocation is per device; it stays
+    /// so a frame from an older build still decodes. Accepted only when it is
+    /// signed by the device's own user identity and binds the device's own key
+    /// at a generation no lower than the current one.
     CertRefresh {
         cert: DeviceCert,
     },
@@ -314,17 +337,18 @@ pub enum ControlMsg {
     /// receiving coordinator prunes the member from the roster and republishes;
     /// plain members learn of it from that republish on their next reconverge.
     LeaveNetwork,
-    /// Secondary to primary: this device is unpairing itself and asks its primary
-    /// to write the authoritative nullifier (`ray unpair`-equivalent), since only
-    /// the primary holds the network key that signs the blob's nullifier set.
-    /// Payload-free: the requesting device is the connection's authenticated remote.
-    /// The primary acts only when the remote is one of its own paired secondaries
-    /// (a stranger is a no-op). Sent before the device tears itself down, dialing
-    /// the primary when no link is up; a request the primary cannot receive then
-    /// is saved and retried until it has (`NetworkRegistry::request_unpair`). The
-    /// device tears itself down either way. Added after `LeaveNetwork`, so an
-    /// older peer that cannot decode this variant simply skips the frame (the
-    /// pre-fix behavior).
+    /// Secondary to primary, the request that came before
+    /// `PairMsg::UnpairRequest`: this device is unpairing itself and asks its
+    /// primary to write the authoritative nullifier (`ray unpair`-equivalent),
+    /// since only the primary holds the network key that signs the blob's
+    /// nullifier set. Payload-free: the requesting device is the connection's
+    /// authenticated remote, and the primary acts only when its rosters list the
+    /// remote as one of its own paired secondaries (a stranger is a no-op).
+    /// Nothing confirms it, so a device now sends it only to a primary too old
+    /// for the pair protocol's version 3, as a fallback that leaves its own
+    /// request pending. A primary still acts on it for older devices. Added
+    /// after `LeaveNetwork`, so an older peer that cannot decode this variant
+    /// simply skips the frame.
     RequestUnpair,
     /// Coordinator to member: you have been removed from *this* network (`ray
     /// kick`), the network scoped by the frame's `net`. A trigger, not authority:

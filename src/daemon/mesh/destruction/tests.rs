@@ -29,11 +29,12 @@ impl Drop for ConfigDir {
 }
 
 /// A local discovery relay. Requests go through the real pkarr client and its
-/// signature verification; no production discovery service is used.
-struct Relay {
-    url: Url,
+/// signature verification; no production discovery service is used. Shared
+/// with the unpair tests.
+pub(in crate::daemon::mesh) struct Relay {
+    pub(in crate::daemon::mesh) url: Url,
     records: Arc<RwLock<HashMap<String, Vec<u8>>>>,
-    fail: Arc<AtomicBool>,
+    pub(in crate::daemon::mesh) fail: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
@@ -44,7 +45,7 @@ impl Drop for Relay {
 }
 
 impl Relay {
-    async fn start() -> Self {
+    pub(in crate::daemon::mesh) async fn start() -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let records = Arc::new(RwLock::new(HashMap::new()));
@@ -674,224 +675,5 @@ async fn leave_dials_a_coordinator_with_no_live_link() {
     assert!(!daemon.registry.networks.contains_key("home"));
     assert!(config::load_network("home").unwrap().is_none());
     coordinator.close().await;
-    daemon.shutdown_and_close().await;
-}
-
-/// A mesh endpoint for `key` on localhost, without a relay.
-async fn local_endpoint(key: SecretKey) -> Endpoint {
-    Endpoint::builder(presets::N0)
-        .secret_key(key)
-        .relay_mode(RelayMode::Disabled)
-        .clear_ip_transports()
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .alpns(vec![transport::mesh_alpn()])
-        .bind()
-        .await
-        .unwrap()
-}
-
-/// Make `daemon` a device paired with `primary` that joined `home`, as a member,
-/// with the primary's certificate. Returns the network's public key.
-async fn join_home_as_paired_device(daemon: &Daemon, primary: &SecretKey) -> EndpointId {
-    let cert = control::DeviceCert::create(primary, &daemon.transport.endpoint.id(), 0);
-    identity::store_device_cert(&cert).unwrap();
-    let net = create(daemon, "home").await;
-    config::update_network("home", |net| {
-        net.join_certificate_issuer = Some(primary.public());
-        Ok(())
-    })
-    .unwrap();
-    let mut handle = daemon.registry.networks.get_mut("home").unwrap();
-    handle.role = NetworkRole::Member;
-    handle.state.write().unwrap().network_secret_key = None;
-    net.network_secret_key.unwrap().public()
-}
-
-/// Accept every connection to `endpoint` and pass on each control frame read
-/// from it, with the network it names. A `MeshHello` is completed, so a dialer
-/// can register the link.
-fn record_frames(
-    endpoint: Endpoint,
-) -> tokio::sync::mpsc::UnboundedReceiver<(ControlMsg, Option<EndpointId>)> {
-    let (frames, received) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(incoming) = endpoint.accept().await {
-            let Ok(conn) = incoming.await else {
-                continue;
-            };
-            let frames = frames.clone();
-            tokio::spawn(async move {
-                while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                    let Ok(control::FrameRead::Frame(frame)) = control::recv_frame(&mut recv).await
-                    else {
-                        continue;
-                    };
-                    if matches!(frame.msg, ControlMsg::MeshHello { .. }) {
-                        send.finish().unwrap();
-                    }
-                    let _ = frames.send((frame.msg, frame.net));
-                }
-            });
-        }
-    });
-    received
-}
-
-/// A device unpairing itself gets its request to the primary even when no link
-/// to it is up, and before it leaves the network (#86). The request used to go
-/// out only over a live link, which an on-demand node has usually closed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::await_holding_lock)]
-async fn unpair_dials_a_primary_with_no_live_link() {
-    let _lock = config::CONFIG_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let _env = ConfigDir::set(dir.path());
-    let relay = Relay::start().await;
-    relay.configure();
-    let daemon = build_headless(false).await.unwrap();
-    let primary_key = SecretKey::generate();
-    let primary = local_endpoint(primary_key.clone()).await;
-    daemon
-        .transport
-        .warm_lookup
-        .add_endpoint_info(primary.addr());
-    let net_pubkey = join_home_as_paired_device(&daemon, &primary_key).await;
-    // The primary coordinates the network too, so the leave goes to it as well.
-    let roster = {
-        let handle = daemon.registry.networks.get("home").unwrap();
-        let mut state = handle.state.write().unwrap();
-        let template = state.members.all()[0].clone();
-        state.members.add(Member {
-            identity: primary.id(),
-            is_coordinator: true,
-            hostname: Some("laptop".to_string()),
-            ..template
-        });
-        state.roster()
-    };
-    daemon.registry.seed_route_map("home", &roster);
-    assert!(
-        daemon
-            .registry
-            .peers
-            .conn_for_ip(&derive_ipv6(&primary.id()))
-            .is_none()
-    );
-    let mut frames = record_frames(primary.clone());
-
-    let result = tokio::time::timeout(Duration::from_secs(15), daemon.unpair_self())
-        .await
-        .unwrap();
-    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
-    let mut received = Vec::new();
-    while received.len() < 2 {
-        let (msg, net) = tokio::time::timeout(Duration::from_secs(5), frames.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match msg {
-            ControlMsg::RequestUnpair => received.push(("unpair request", net)),
-            ControlMsg::LeaveNetwork => received.push(("leave", net)),
-            _ => {}
-        }
-    }
-    assert_eq!(
-        received,
-        [("unpair request", None), ("leave", Some(net_pubkey))]
-    );
-    assert_eq!(config::load().unwrap().pending_unpair_request, None);
-    assert!(identity::load_device_cert().unwrap().is_none());
-    assert!(config::load_network("home").unwrap().is_none());
-    primary.close().await;
-    daemon.shutdown_and_close().await;
-}
-
-/// A request the primary cannot receive while the device unpairs is saved and
-/// sent once the primary can be reached, although the device then shares no
-/// network with it (#86).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::await_holding_lock)]
-async fn unpair_request_is_retried_until_the_primary_receives_it() {
-    let _lock = config::CONFIG_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let _env = ConfigDir::set(dir.path());
-    let relay = Relay::start().await;
-    relay.configure();
-    let daemon = build_headless(false).await.unwrap();
-    let primary_key = SecretKey::generate();
-    let primary = local_endpoint(primary_key.clone()).await;
-    daemon
-        .transport
-        .warm_lookup
-        .add_endpoint_info(primary.addr());
-    join_home_as_paired_device(&daemon, &primary_key).await;
-    // At first the primary speaks no mesh protocol, so each dial fails its
-    // handshake at once rather than waiting out the timeout an offline primary
-    // costs.
-    primary.set_alpns(vec![b"not-the-mesh".to_vec()]);
-    let refuse = tokio::spawn({
-        let primary = primary.clone();
-        async move {
-            while let Some(incoming) = primary.accept().await {
-                let _ = incoming.await;
-            }
-        }
-    });
-
-    let result = tokio::time::timeout(Duration::from_secs(15), daemon.unpair_self())
-        .await
-        .unwrap();
-    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
-    assert!(config::load_network("home").unwrap().is_none());
-    assert_eq!(
-        config::load().unwrap().pending_unpair_request,
-        Some(primary.id())
-    );
-
-    refuse.abort();
-    primary.set_alpns(vec![transport::mesh_alpn()]);
-    let mut frames = record_frames(primary.clone());
-    assert!(!daemon.registry.retry_unpair_request().await);
-    let (msg, net) = tokio::time::timeout(Duration::from_secs(5), frames.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(msg, ControlMsg::RequestUnpair), "{msg:?}");
-    assert_eq!(net, None);
-    assert_eq!(config::load().unwrap().pending_unpair_request, None);
-    primary.close().await;
-    daemon.shutdown_and_close().await;
-}
-
-/// A device that has paired again drops its saved request unsent: the primary
-/// would read it as a request to revoke the new pairing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::await_holding_lock)]
-async fn pairing_again_drops_a_saved_unpair_request() {
-    let _lock = config::CONFIG_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let _env = ConfigDir::set(dir.path());
-    let relay = Relay::start().await;
-    relay.configure();
-    let daemon = build_headless(false).await.unwrap();
-    // Not reachable at all: a send would fail and keep the request.
-    let primary_key = SecretKey::generate();
-    config::update_settings(|cfg| {
-        cfg.pending_unpair_request = Some(primary_key.public());
-        Ok(())
-    })
-    .unwrap();
-    let cert = control::DeviceCert::create(&primary_key, &daemon.transport.endpoint.id(), 0);
-    identity::store_device_cert(&cert).unwrap();
-
-    assert!(!daemon.registry.retry_unpair_request().await);
-    assert_eq!(config::load().unwrap().pending_unpair_request, None);
     daemon.shutdown_and_close().await;
 }
