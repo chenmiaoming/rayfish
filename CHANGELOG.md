@@ -28,6 +28,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Android: receiving or sending a file no longer crashes the app when Android
+  15 or later has used up the daily background transfer time; the transfer is
+  marked failed instead.
+- Android: crash reports for killed processes are grouped by exit reason and
+  signal, and connection errors keep the underlying system error.
 - On systemd-resolved hosts, Rayfish no longer receives DNS queries for every
   name on the machine; only `.ray` is routed to it.
 - After a crash, Rayfish no longer restores an old resolv.conf over one that
