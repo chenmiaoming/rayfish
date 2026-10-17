@@ -397,12 +397,12 @@ final class TunnelController: ObservableObject {
         _ = await perform(ProviderRequest(action: .blockConnection, id: id))
     }
 
-    func acceptInvitation(_ invitation: ProviderInvitation) async {
-        _ = await perform(ProviderRequest(action: .acceptInvitation, id: invitation.id))
+    func acceptInvitation(id: String) async {
+        _ = await perform(ProviderRequest(action: .acceptInvitation, id: id))
     }
 
-    func declineInvitation(_ invitation: ProviderInvitation) async {
-        _ = await perform(ProviderRequest(action: .declineInvitation, id: invitation.id))
+    func declineInvitation(id: String) async {
+        _ = await perform(ProviderRequest(action: .declineInvitation, id: id))
     }
 
     func sendInvite(network: String, recipient: String) async -> String? {

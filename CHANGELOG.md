@@ -28,6 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   send an invite straight to someone's identity from a network you coordinate,
   block a connection request's sender, and set who can reach you and who is
   blocked. Android also shows your identity and can connect to a peer by it.
+  On macOS a new invitation posts a notification you can join or decline from.
 
 ### Changed
 

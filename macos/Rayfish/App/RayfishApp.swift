@@ -69,6 +69,15 @@ final class RayfishAppDelegate: NSObject, NSApplicationDelegate, @preconcurrency
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
         controller.notifications.onRestartUpdate = { [weak self] in self?.restartToUpdate() }
+        controller.notifications.onInvitation = { [weak self] id, response in
+            guard let controller = self?.controller else { return }
+            Task {
+                switch response {
+                case .join: await controller.acceptInvitation(id: id)
+                case .decline: await controller.declineInvitation(id: id)
+                }
+            }
+        }
         statusMenu = RayfishMenu(controller: controller,
                                  updateReady: { [weak self] in self?.updateVersion },
                                  restartUpdate: { [weak self] in self?.restartToUpdate() }) { [weak self] in
@@ -273,9 +282,9 @@ private struct NetworksView: View {
                                     .lineLimit(1).truncationMode(.middle)
                             }
                             Spacer()
-                            Button("Decline and block", role: .destructive) { Task { await controller.declineInvitation(invitation) } }
+                            Button("Decline and block", role: .destructive) { Task { await controller.declineInvitation(id: invitation.id) } }
                                 .help("Decline and block the sender. Unblock it in Settings.")
-                            Button("Join") { Task { await controller.acceptInvitation(invitation) } }
+                            Button("Join") { Task { await controller.acceptInvitation(id: invitation.id) } }
                                 .buttonStyle(RayfishButtonStyle(kind: .primary))
                         }
                         .padding(14)
