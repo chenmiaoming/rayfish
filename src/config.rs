@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs::Permissions;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+use std::fs::{self, File};
+#[cfg(any(target_os = "linux", all(test, unix)))]
+use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
@@ -394,22 +398,23 @@ pub fn discovery_urls(o: &ServerOverride) -> Result<Vec<String>> {
 /// captured ones. When present, Tailscale's Magic DNS resolver is preferred over
 /// every other upstream. Unset returns the captured set unchanged.
 ///
-/// Captured resolvers are IPv4 because that is what the desktop OS backends
-/// expose. Configured IPv6 addresses are retained so an overlay peer running a
-/// resolver can receive ordinary DNS queries over the mesh.
-pub fn resolve_upstreams(o: &ServerOverride, captured: Vec<Ipv4Addr>) -> Vec<IpAddr> {
+/// Both families: configured IPv6 addresses are retained so an overlay peer
+/// running a resolver can receive ordinary DNS queries over the mesh, and a
+/// host's own IPv6 servers are captured like its IPv4 ones. A captured server
+/// the operator also named is listed once.
+pub fn resolve_upstreams(o: &ServerOverride, captured: Vec<IpAddr>) -> Vec<IpAddr> {
     let upstreams = if o.servers.is_empty() {
-        captured.into_iter().map(IpAddr::V4).collect()
+        captured
     } else {
-        let custom: Vec<IpAddr> = o.servers.iter().filter_map(|s| s.parse().ok()).collect();
-        if o.replace {
-            custom
-        } else {
-            custom
-                .into_iter()
-                .chain(captured.into_iter().map(IpAddr::V4))
-                .collect()
+        let mut custom: Vec<IpAddr> = o.servers.iter().filter_map(|s| s.parse().ok()).collect();
+        if !o.replace {
+            for ip in captured {
+                if !custom.contains(&ip) {
+                    custom.push(ip);
+                }
+            }
         }
+        custom
     };
     prefer_tailscale_dns(upstreams)
 }
@@ -953,17 +958,23 @@ fn rayfish_gid() -> Option<u32> {
     }
 }
 
+/// The group a config path is owned by: `rayfish` for a non-secret path when the
+/// group exists, otherwise root.
+#[cfg(target_os = "linux")]
+fn owner_gid(secret: bool) -> u32 {
+    if secret {
+        0
+    } else {
+        rayfish_gid().unwrap_or(0)
+    }
+}
+
 /// Best-effort `chown` to root, with group `rayfish` for non-secret paths (or
 /// root for secret ones). No-op off Linux. Silent on failure so the daemon
 /// still starts if the group is missing.
 #[cfg(target_os = "linux")]
 fn set_owner(path: &Path, secret: bool) {
-    let gid = if secret {
-        Some(0)
-    } else {
-        rayfish_gid().or(Some(0))
-    };
-    if let Err(e) = std::os::unix::fs::chown(path, Some(0), gid) {
+    if let Err(e) = std::os::unix::fs::chown(path, Some(0), Some(owner_gid(secret))) {
         tracing::debug!(path = %path.display(), error = %e, "chown failed (non-fatal)");
     }
 }
@@ -1115,6 +1126,183 @@ pub fn config_dir() -> Result<PathBuf> {
     };
     ensure_dir(&dir)?;
     Ok(dir)
+}
+
+/// Where the daemon keeps its content-addressed blob store: membership
+/// snapshots and file transfers in flight. Created if missing.
+///
+/// On Linux it lives under `/var/lib/rayfish`, not the config tree: transfers
+/// can be large, `/etc` is often on a small or read-only root filesystem, and
+/// the store is state, not configuration. A store left in `/etc/rayfish/blobs`
+/// by an older release is moved on first start. Elsewhere, and whenever
+/// `RAYFISH_CONFIG_DIR` is set, it stays inside the config directory.
+pub fn blobs_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if effective_override().is_none() {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+
+        let old = config_dir()?.join("blobs");
+        let state = Path::new(LINUX_STATE_DIR);
+        let dir = match DirBuilder::new().recursive(true).mode(0o700).create(state) {
+            Ok(()) => migrate_blobs(&old, &state.join("blobs")),
+            Err(error) => {
+                tracing::warn!(dir = LINUX_STATE_DIR, %error, "cannot create the state directory; keeping blobs in the config directory");
+                old
+            }
+        };
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        return Ok(dir);
+    }
+    let dir = config_dir()?.join("blobs");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_STATE_DIR: &str = "/var/lib/rayfish";
+
+/// Move a blob store from `old` to `new` and return the one to use. Across
+/// filesystems (a separate `/var`) the store is copied next to `new`, checked,
+/// and only then renamed into place, so a half-finished copy is never used. On
+/// any failure the old location stays in use.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
+    if !old.is_dir() {
+        return new.to_path_buf();
+    }
+    if new.exists() {
+        tracing::warn!(
+            old = %old.display(),
+            new = %new.display(),
+            "both blob store locations exist; using the new one and leaving the old one alone"
+        );
+        return new.to_path_buf();
+    }
+    match std::fs::rename(old, new) {
+        Ok(()) => {
+            tracing::info!(old = %old.display(), new = %new.display(), "moved the blob store");
+            new.to_path_buf()
+        }
+        Err(error) if error.kind() == ErrorKind::CrossesDevices => {
+            match copy_blob_store(old, new) {
+                Ok(()) => {
+                    tracing::info!(old = %old.display(), new = %new.display(), "copied the blob store to the state directory");
+                    if let Err(error) = fs::remove_dir_all(old) {
+                        tracing::warn!(old = %old.display(), %error, "copied the blob store but could not remove the old one");
+                    }
+                    new.to_path_buf()
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        old = %old.display(),
+                        new = %new.display(),
+                        %error,
+                        "could not copy the blob store; it stays where it is"
+                    );
+                    old.to_path_buf()
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                old = %old.display(),
+                new = %new.display(),
+                %error,
+                "could not move the blob store; it stays where it is"
+            );
+            old.to_path_buf()
+        }
+    }
+}
+
+/// Copy the store at `old` to `new`, which must not exist, through a staging
+/// directory beside `new`. Every file and directory is synced and the copy's
+/// file list and sizes are compared with the original before the rename that
+/// makes it visible. `old` is left untouched.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
+    let parent = new
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "blob store path has no parent"))?;
+    let staging = parent.join(".blobs.migrating");
+    // A leftover from an attempt that was interrupted; never in use.
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    let result = (|| {
+        fs::create_dir(&staging)?;
+        copy_tree(old, &staging)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
+        }
+        File::open(&staging)?.sync_all()?;
+        let mut original = Vec::new();
+        list_tree(old, Path::new(""), &mut original)?;
+        let mut check = Vec::new();
+        list_tree(&staging, Path::new(""), &mut check)?;
+        original.sort();
+        check.sort();
+        if original != check {
+            return Err(io::Error::other(
+                "copied blob store does not match the original",
+            ));
+        }
+        fs::rename(&staging, new)?;
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// One regular file in a blob store, by path relative to the store and size.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+type StoreEntry = (PathBuf, u64);
+
+/// Copy the tree under `from` into the existing directory `to`, syncing each
+/// file and directory.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if kind.is_dir() {
+            fs::create_dir(&dst)?;
+            copy_tree(&src, &dst)?;
+            fs::set_permissions(&dst, fs::metadata(&src)?.permissions())?;
+        } else if kind.is_file() {
+            fs::copy(&src, &dst)?;
+            File::open(&dst)?.sync_all()?;
+        } else {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                format!("{} is not a file or directory", src.display()),
+            ));
+        }
+    }
+    File::open(to)?.sync_all()
+}
+
+/// Every regular file under `dir`, with its size.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn list_tree(dir: &Path, rel: &Path, out: &mut Vec<StoreEntry>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        let rel = rel.join(entry.file_name());
+        if metadata.is_dir() {
+            list_tree(&entry.path(), &rel, out)?;
+        } else {
+            out.push((rel, metadata.len()));
+        }
+    }
+    Ok(())
 }
 
 /// [`config_dir`] for a reader: same directory, never created.
@@ -1784,6 +1972,87 @@ pub(crate) static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 mod tests {
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_moves_to_the_state_directory_once() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        let new = root.path().join("var-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        std::fs::write(old.join("blobs.db"), b"db").expect("seed old store");
+
+        assert_eq!(migrate_blobs(&old, &new), new);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("moved"), b"db");
+        // Second start: nothing left to move.
+        assert_eq!(migrate_blobs(&old, &new), new);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_migration_never_overwrites_the_new_location() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        let new = root.path().join("var-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        std::fs::create_dir(&new).expect("create new store");
+        assert_eq!(migrate_blobs(&old, &new), new);
+        assert!(old.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_copy_matches_and_replaces_nothing_on_failure() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        std::fs::create_dir_all(old.join("data").join("ab")).expect("create old store");
+        std::fs::write(old.join("blobs.db"), b"db").expect("seed old store");
+        std::fs::write(old.join("data").join("ab").join("blob"), vec![7u8; 70_000])
+            .expect("seed old store");
+        let new = root.path().join("var-blobs");
+
+        copy_blob_store(&old, &new).expect("copy succeeds");
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("copied"), b"db");
+        assert_eq!(
+            std::fs::metadata(new.join("data").join("ab").join("blob"))
+                .expect("copied")
+                .len(),
+            70_000
+        );
+        assert!(
+            old.join("blobs.db").exists(),
+            "the original is left for the caller"
+        );
+        assert!(!root.path().join(".blobs.migrating").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&new)
+                .expect("copied")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+
+        // Copying onto an existing store fails at the rename and leaves it be.
+        std::fs::write(new.join("blobs.db"), b"newer").expect("touch new store");
+        std::fs::write(new.join("extra"), b"x").expect("touch new store");
+        assert!(copy_blob_store(&old, &new).is_err());
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("kept"), b"newer");
+        assert!(!root.path().join(".blobs.migrating").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_stays_put_when_it_cannot_move() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        let new = root.path().join("missing-parent").join("blobs");
+        assert_eq!(migrate_blobs(&old, &new), old);
+        assert!(old.exists());
+    }
     use std::net::Ipv6Addr;
 
     use iroh::EndpointId;
@@ -2700,13 +2969,13 @@ name = "test"
 
     #[test]
     fn resolve_upstreams_augment_and_replace() {
-        let captured = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let captured = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let one = Ipv4Addr::new(1, 1, 1, 1);
 
         // Unset: captured unchanged.
         assert_eq!(
             resolve_upstreams(&ServerOverride::default(), captured.clone()),
-            vec![IpAddr::V4(captured[0])]
+            captured
         );
 
         // Augment: custom first, then captured.
@@ -2716,7 +2985,7 @@ name = "test"
         };
         assert_eq!(
             resolve_upstreams(&aug, captured.clone()),
-            vec![IpAddr::V4(one), IpAddr::V4(captured[0])]
+            vec![IpAddr::V4(one), captured[0]]
         );
 
         // Replace: custom only.
@@ -2731,22 +3000,44 @@ name = "test"
 
         // Tailscale remains the preferred upstream even when the user added a
         // different resolver, while Rayfish itself still intercepts `.ray`.
-        let tailscale = Ipv4Addr::new(100, 100, 100, 100);
+        let tailscale = IpAddr::V4(Ipv4Addr::new(100, 100, 100, 100));
         assert_eq!(
-            resolve_upstreams(&aug, vec![captured[0], tailscale],),
-            vec![
-                IpAddr::V4(tailscale),
-                IpAddr::V4(one),
-                IpAddr::V4(captured[0])
-            ]
+            resolve_upstreams(&aug, vec![captured[0], tailscale]),
+            vec![tailscale, IpAddr::V4(one), captured[0]]
         );
+    }
+
+    /// A host whose resolv.conf names an IPv6 server keeps forwarding to it,
+    /// under the same override rules as its IPv4 ones.
+    #[test]
+    fn captured_v6_upstreams_follow_the_override_rules() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            resolve_upstreams(&ServerOverride::default(), vec![v4, v6]),
+            vec![v4, v6]
+        );
+        let replace = ServerOverride {
+            servers: vec!["9.9.9.9".into()],
+            replace: true,
+        };
+        assert_eq!(
+            resolve_upstreams(&replace, vec![v4, v6]),
+            vec![IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))]
+        );
+        // Already listed (the operator named it too): not twice.
+        let augment = ServerOverride {
+            servers: vec![v6.to_string()],
+            replace: false,
+        };
+        assert_eq!(resolve_upstreams(&augment, vec![v6]), vec![v6]);
     }
 
     /// An IPv6 upstream can be a resolver on a mesh peer. `--replace` must leave
     /// that address intact so it receives every non-`.ray` lookup.
     #[test]
     fn replace_with_only_ipv6_uses_the_configured_peer() {
-        let captured = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let captured = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let peer: Ipv6Addr = "200::1234".parse().unwrap();
         let v6_only = ServerOverride {
             servers: vec![peer.to_string()],
@@ -2778,7 +3069,7 @@ name = "test"
     /// than the refusal it bypassed, so the two must not disagree.
     #[test]
     fn only_a_usable_upstream_waives_the_takeover_guard() {
-        let captured: Vec<Ipv4Addr> = Vec::new();
+        let captured: Vec<IpAddr> = Vec::new();
         for (servers, usable) in [
             (vec!["2606:4700:4700::1111"], true),
             (vec!["2606:4700:4700::1111", "2001:4860:4860::8888"], true),

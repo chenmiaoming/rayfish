@@ -223,6 +223,27 @@ pub use mesh::run_daemon;
 pub use mesh::build_headless;
 #[cfg(unix)]
 pub use mesh::start_embedded_ipc;
+#[cfg(unix)]
+pub use mesh::{CleanupOutcome, cleanup_after_exit};
+
+/// Undo the host changes a daemon that dies without its own teardown leaves
+/// behind, for the panic hook and `ray daemon --cleanup`. Synchronous and
+/// best-effort, and each step is a no-op when its state is absent.
+///
+/// - Hand DNS back to the OS: restore the backed-up resolv.conf, drop the
+///   NetworkManager `dns=none` snippet and withdraw any resolvconf stanza, so
+///   the host does not keep pointing at a dead resolver (which would blackhole
+///   all DNS until a restart).
+/// - Remove the exit-node forwarding and NAT, restoring the sysctls, so the host
+///   is not left an open router.
+/// - Remove the client full-tunnel rules, which would otherwise outlive the TUN
+///   they point at.
+pub fn restore_host_state() {
+    crate::dns::config::emergency_restore_resolv_conf();
+    crate::dns::config::emergency_withdraw_resolvconf();
+    crate::exit_node::disable();
+    crate::exit_node::teardown_client_routing();
+}
 
 /// Legacy name for [`Daemon`], kept so embedders (`ray-mobile`) that were
 /// written against `DaemonState` compile unchanged after the daemon refactor.
@@ -750,6 +771,77 @@ impl TunTasks {
     }
 }
 
+/// A failure that should end the daemon process with an error, so the service
+/// manager restarts it (the unit uses `Restart=on-failure`). Armed only by
+/// [`run_daemon`]: an embedder owns its own lifecycle and gets a log line
+/// instead of a cancelled node.
+///
+/// The case it exists for is the TUN read loop stopping on a device error, for
+/// example after the interface was deleted out from under us. Nothing restarts
+/// that loop, so without this the daemon would keep its links up and report the
+/// VPN as up while carrying nothing in either direction.
+#[derive(Default)]
+pub(crate) struct FatalExit {
+    armed: AtomicBool,
+    reason: Mutex<Option<String>>,
+}
+
+impl FatalExit {
+    /// Only the desktop daemon arms it, after creating its own TUN; Android
+    /// gets its TUN from the embedding app.
+    #[cfg(any(not(target_os = "android"), test))]
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Record `reason` and cancel `token`, which ends [`run_daemon`]. Returns
+    /// false, doing nothing, when not armed. The first reason wins.
+    pub(crate) fn trigger(&self, token: &CancellationToken, reason: String) -> bool {
+        if !self.armed.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert(reason);
+        token.cancel();
+        true
+    }
+
+    pub(crate) fn take(&self) -> Option<String> {
+        self.reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+#[cfg(test)]
+mod fatal_exit_tests {
+    use super::*;
+
+    /// An embedder never armed it, so a failed TUN loop must not cancel its node.
+    #[test]
+    fn an_unarmed_fatal_exit_leaves_the_daemon_running() {
+        let fatal = FatalExit::default();
+        let token = CancellationToken::new();
+        assert!(!fatal.trigger(&token, "gone".into()));
+        assert!(!token.is_cancelled());
+        assert_eq!(fatal.take(), None);
+    }
+
+    #[test]
+    fn an_armed_fatal_exit_stops_the_daemon_with_the_first_reason() {
+        let fatal = FatalExit::default();
+        fatal.arm();
+        let token = CancellationToken::new();
+        assert!(fatal.trigger(&token, "first".into()));
+        assert!(fatal.trigger(&token, "second".into()));
+        assert!(token.is_cancelled());
+        assert_eq!(fatal.take().as_deref(), Some("first"));
+    }
+}
+
 pub struct Daemon {
     /// Recent RTT samples per peer, shared by successive status requests.
     connection_history: Mutex<mesh::diagnostics::ConnectionHistory>,
@@ -799,6 +891,8 @@ pub struct Daemon {
     /// Handles for the packet-forwarding tasks spawned by
     /// [`Daemon::attach_tun`], kept so a future `down()`/detach can stop them.
     tun_tasks: Mutex<Option<TunTasks>>,
+    /// Set when the data plane fails in a way only a restart repairs.
+    pub(crate) fatal: Arc<FatalExit>,
     /// Serializes exit-node reconciles. `apply_exit_node` runs from the IPC
     /// dispatcher, `activate()`, and the reconverge reapply listener, each on its
     /// own task, and the kernel enable underneath is check-then-write (the sysctl
@@ -844,9 +938,9 @@ pub struct Daemon {
     #[cfg(feature = "desktop")]
     ssh_authz: crate::ssh::SshAuthz,
     /// Cancellation token for the running SSH listeners (`None` when off / on
-    /// standby). Set by [`Daemon::start_ssh`], cleared by `stop_ssh`, which are
-    /// the only readers and are desktop-only, so the field does not exist on an
-    /// Android build at all.
+    /// standby). Set by [`Daemon::start_ssh`], cleared by `stop_ssh`, and read
+    /// by the periodic host-firewall check, all desktop-only, so the field does
+    /// not exist on an Android build at all.
     #[cfg(feature = "desktop")]
     ssh_token: Mutex<Option<CancellationToken>>,
     /// Only an OS-owned macOS tunnel delegates SSH to the app's launchd helper.
@@ -858,6 +952,10 @@ pub struct Daemon {
     /// [`crate::v4bridge`].
     #[cfg(feature = "desktop")]
     v4_bridge_token: Mutex<Option<CancellationToken>>,
+    /// Stops the watcher that restores the TUN's link, address and route while
+    /// the data plane is up (see `tun::spawn_repair_watcher`).
+    #[cfg(target_os = "linux")]
+    tun_watch_token: Mutex<Option<CancellationToken>>,
 }
 
 impl Drop for Daemon {
@@ -1037,6 +1135,8 @@ impl Daemon {
             // idle-closes.
             let dialer = Some(Arc::clone(&self.registry));
             let local_ipv6 = self.transport.identity.local_ipv6();
+            let fatal = Arc::clone(&self.fatal);
+            let shutdown = self.shutdown_token.clone();
             tokio::spawn(async move {
                 if let Err(e) = (forward::MeshForwarder {
                     tun: reader,
@@ -1052,7 +1152,12 @@ impl Daemon {
                 .run()
                 .await
                 {
-                    tracing::warn!(error = %e, "mesh forwarding loop exited with error");
+                    let reason = format!("TUN read loop stopped: {e:#}");
+                    if fatal.trigger(&shutdown, reason) {
+                        tracing::error!(error = %e, "TUN read loop stopped; exiting so the service manager restarts the daemon");
+                    } else {
+                        tracing::warn!(error = %e, "mesh forwarding loop exited with error");
+                    }
                 }
             })
         };
@@ -3833,7 +3938,7 @@ mod headless_tests {
         // (background tasks hold their own clones and wind down on their own
         // schedule), so releasing the store has to be something the call itself
         // guarantees before it returns.
-        let blobs_dir = config::config_dir().unwrap().join("blobs");
+        let blobs_dir = config::blobs_dir().unwrap();
         let reopened = tokio::time::timeout(
             Duration::from_secs(10),
             iroh_blobs::store::fs::FsStore::load(&blobs_dir),

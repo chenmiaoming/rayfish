@@ -160,7 +160,8 @@ fn control_plane_nameservers(o: &ServerOverride, system: Option<Vec<Ipv4Addr>>) 
     if system.is_none() && o.servers.is_empty() {
         return Vec::new();
     }
-    let mut out: Vec<Ipv4Addr> = crate::config::resolve_upstreams(o, system.unwrap_or_default())
+    let system = system.unwrap_or_default().into_iter().map(IpAddr::V4);
+    let mut out: Vec<Ipv4Addr> = crate::config::resolve_upstreams(o, system.collect())
         .into_iter()
         .filter_map(|ip| match ip {
             IpAddr::V4(ip) => Some(ip),

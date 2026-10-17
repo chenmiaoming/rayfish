@@ -172,6 +172,7 @@ impl SshServer {
     /// `token` is cancelled. The configured mesh SSH port is mapped to this port
     /// by the userspace NAT in `forward.rs`, with a separate listener for self-SSH.
     pub fn spawn(self, addrs: Vec<IpAddr>, token: CancellationToken) {
+        session_env::warm_scope_tools();
         tokio::spawn(async move {
             let key = match load_host_key() {
                 Ok(k) => k,

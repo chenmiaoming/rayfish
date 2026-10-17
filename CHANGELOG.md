@@ -12,6 +12,78 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enrollment. Repeat the flag for multiple settings; `--enable` is an alias and
   a bare key means `on`, for example `--enable v4-bridge --set dns=partial`.
 
+### Changed
+
+- Linux: the file-transfer and membership store moved from
+  `/etc/rayfish/blobs` to `/var/lib/rayfish/blobs`. An existing store is moved
+  on first start.
+- Linux: mesh SSH commands, scp, rsync and root sessions start in their own
+  systemd scope, so background jobs started from them survive a daemon
+  restart. Open SSH sessions still disconnect.
+- The systemd, OpenRC and SysV services now restore DNS and exit-node settings
+  when the daemon stops or crashes. The daemon raises its own open file limit
+  and never lowers one the host set higher.
+- On systemd-resolved, Rayfish is chosen only when `/etc/resolv.conf` points at
+  the resolved stub and resolved is running; otherwise it writes resolv.conf.
+
+### Fixed
+
+- On systemd-resolved hosts, Rayfish no longer receives DNS queries for every
+  name on the machine; only `.ray` is routed to it.
+- After a crash, Rayfish no longer restores an old resolv.conf over one that
+  NetworkManager or DHCP rewrote in the meantime. resolv.conf is written
+  atomically, a symlinked resolv.conf is restored as a symlink, IPv6 DNS
+  servers are kept, and an unwritable resolv.conf gives a clear warning.
+- Turning DNS on while Rayfish is already up no longer leaves an old watcher
+  fighting the new settings.
+- DNS-over-TCP queries to Rayfish now fail at once instead of hanging.
+- An IPv6 exit node no longer loses its router-advertised default route when
+  forwarding is turned on, and turning it off restores each interface's own
+  forwarding setting.
+- An exit node now forwards traffic on hosts whose firewall drops forwarding
+  (Docker, ufw, firewalld), or prints the command to allow it.
+- Using an exit node on Linux no longer overwrites packet marks set by
+  WireGuard, Mullvad or kube-proxy, and container traffic is no longer routed
+  around the tunnel.
+- Exit-node rules removed by a firewall reload or `nft flush ruleset` are
+  restored within 30 seconds, and so is the mesh SSH firewall accept. TCP MSS
+  is clamped on exit traffic.
+- The mesh SSH firewall check now sees a native nftables drop on hosts that use
+  iptables-nft.
+- Linux: if the TUN device fails, the daemon exits and the service manager
+  restarts it, instead of reporting the VPN as up while carrying no traffic
+  (systemd, OpenRC and launchd restart it; SysV does not).
+- Linux: taking the Rayfish link down from outside no longer leaves the mesh
+  dead until the next `ray up`.
+- Linux: `ray up` works on hosts that disable IPv6 for new interfaces, and the
+  error for a missing `/dev/net/tun`, missing CAP_NET_ADMIN or disabled IPv6
+  says which it is.
+- UDP packets larger than the MTU are no longer dropped: IPv6 fragments pass
+  the firewall when their first fragment does.
+- `ray up` warns when another interface, such as Yggdrasil, routes part of
+  `200::/7`.
+- Router solicitations and MLD reports no longer show as dropped packets.
+- Linux: the connection recovers right after the machine wakes from sleep.
+- Starting two daemons at once now fails cleanly instead of breaking the
+  running one.
+
+### Security
+
+- Self-update no longer stages the new binary under a fixed name in the shared
+  temp directory.
+- Config files holding secrets are private from the moment they are created.
+- Services reached through the IPv4 bridge see the host's own address instead
+  of `127.0.0.1`, so mesh peers no longer get trust meant for local clients.
+  Services that trust the host's own subnet now treat bridged peers as LAN
+  clients. On hosts with no IPv4 address besides loopback, the bridge now
+  serves nothing.
+- The local control socket limits concurrent and stalled clients.
+
+### Performance
+
+- Linux: the TUN MTU is now 1280, so full-sized packets fit one QUIC datagram
+  instead of being split in two.
+
 ## [0.5.9] - 2026-10-15
 
 ### Added
