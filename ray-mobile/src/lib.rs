@@ -140,8 +140,12 @@ pub enum RayError {
 }
 
 impl RayError {
+    /// `{:#}` so an `anyhow::Error` keeps its cause chain. Plain `to_string()`
+    /// printed only the outermost context, which is how a bind failure reached
+    /// crash reports as just "failed to bind iroh endpoint" with the OS error
+    /// that explains it cut off.
     fn network(e: impl std::fmt::Display) -> Self {
-        RayError::Network(e.to_string())
+        RayError::Network(format!("{e:#}"))
     }
 }
 
