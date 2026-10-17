@@ -145,6 +145,14 @@ impl ConnectService {
                     let _guard = invite_lock.lock().await;
                     InviteStore::load(network)?.mark_unsupported(&invite.id)?;
                 }
+                // The sweep finds this on its own, with nobody to read the
+                // reply, so it goes to the log too. Never the code itself.
+                tracing::warn!(
+                    %network,
+                    peer = %recipient.fmt_short(),
+                    invite = %invite.id,
+                    "recipient runs an older Rayfish and cannot receive invites; no longer retrying, send the invite again to get its code"
+                );
                 // The coordinator's own credential, shown only to its operator.
                 return Ok(DeliveryOutcome::Done(format!(
                     "{} runs an older Rayfish that cannot receive invites; send them this code instead: {}",

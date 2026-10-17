@@ -21,7 +21,7 @@ pub(crate) const MAX_PENDING_CONNECTS: usize = 256;
 
 /// How long a dialer past the gate has to send its one message. A stream held
 /// open and idle otherwise ties up a handler task indefinitely.
-const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A pending incoming `ray connect` request, awaiting `ray connect approve`.
 /// Keyed by the requester's authenticated transport endpoint id.
@@ -482,10 +482,13 @@ impl ConnectService {
             conn.close(0u32.into(), b"");
             return;
         }
-        match conn.accept_bi().await {
-            Ok((mut send, mut recv)) => {
-                let read = tokio::time::timeout(
-                    CONNECT_READ_TIMEOUT,
+        // One deadline covers opening the stream and reading it: a dialer
+        // that never writes would otherwise park `accept_bi` for good.
+        let deadline = tokio::time::Instant::now() + CONNECT_READ_TIMEOUT;
+        match tokio::time::timeout_at(deadline, conn.accept_bi()).await {
+            Ok(Ok((mut send, mut recv))) => {
+                let read = tokio::time::timeout_at(
+                    deadline,
                     control::recv_framed::<control::ConnectMsg>(&mut recv),
                 )
                 .await;
@@ -594,8 +597,12 @@ impl ConnectService {
                     tracing::warn!(peer = %remote_id.fmt_short(), "unexpected connect message type");
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, peer = %remote_id.fmt_short(), "failed to accept bi stream for connect");
+            }
+            Err(_) => {
+                tracing::debug!(peer = %remote_id.fmt_short(), "connect request timed out");
+                conn.close(0u32.into(), b"");
             }
         }
     }

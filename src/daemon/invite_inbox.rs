@@ -31,7 +31,7 @@ const MAX_PENDING_STRANGER: usize = 2;
 /// evicts the oldest pending stranger offer, never a known sender's.
 const MAX_PENDING_STRANGERS: usize = 16;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct ReceivedInvitation {
     id: String,
     network: NetworkName,
@@ -79,7 +79,7 @@ impl ReceivedInvitation {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
 struct Inbox {
     #[serde(default)]
     invitations: Vec<ReceivedInvitation>,
@@ -193,13 +193,18 @@ impl ConnectService {
         read(&mut inbox)
     }
 
-    /// Like [`Self::read_inbox`], then save. An error from `edit` saves nothing.
+    /// Like [`Self::read_inbox`], then save if anything changed. An error
+    /// from `edit` saves nothing. Skipping the unchanged save keeps a peer
+    /// repeating an offer from forcing a disk sync each time.
     async fn edit_inbox<T>(&self, edit: impl FnOnce(&mut Inbox) -> Result<T>) -> Result<T> {
         let _guard = self.inbox_lock.lock().await;
-        let mut inbox = Inbox::load()?;
+        let loaded = Inbox::load()?;
+        let mut inbox = loaded.clone();
         inbox.prune(now_secs());
         let out = edit(&mut inbox)?;
-        inbox.save()?;
+        if inbox != loaded {
+            inbox.save()?;
+        }
         Ok(out)
     }
 
@@ -314,7 +319,7 @@ impl ConnectService {
             }
         }
         match reply {
-            IpcMessage::Error { message } if message.contains(crate::invite::INVITE_REJECTED) => {
+            IpcMessage::Error { message } if crate::invite::is_dead_invite(&message) => {
                 self.drop_dead_invitation(invitation).await
             }
             reply => reply,

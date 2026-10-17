@@ -2763,6 +2763,37 @@ mod accept_handler_tests {
         dialer.close().await;
     }
 
+    #[tokio::test]
+    async fn a_dialer_that_never_opens_a_stream_is_dropped() {
+        use iroh::address_lookup::memory::MemoryLookup;
+        let env = TestConfigDir::new();
+        let lookup = MemoryLookup::new();
+        let receiver = loopback_endpoint(MemoryLookup::new()).await;
+        let dialer = loopback_endpoint(lookup.clone()).await;
+        lookup.add_endpoint_info(receiver.addr());
+        let registry = registry_on(&receiver, &env.dir.path().join("blobs")).await;
+        let connect = Arc::new(ConnectService::new(registry));
+        let server = tokio::spawn({
+            let receiver = receiver.clone();
+            async move {
+                let conn = receiver.accept().await.unwrap().await.unwrap();
+                connect.accept_connect_request(conn).await;
+            }
+        });
+        let _conn =
+            transport::connect_to_peer_with_alpn(&dialer, receiver.id(), transport::CONNECT_ALPN)
+                .await
+                .unwrap();
+        let done = tokio::time::timeout(
+            connect_service::CONNECT_READ_TIMEOUT + Duration::from_secs(5),
+            server,
+        )
+        .await;
+        assert!(done.is_ok(), "the handler still waits on an idle dialer");
+        receiver.close().await;
+        dialer.close().await;
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn deny_removes_the_request_and_blocks_the_sender() {
@@ -2979,6 +3010,32 @@ mod accept_handler_tests {
         endpoint.close().await;
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_repeated_offer_does_not_rewrite_the_inbox() {
+        let env = TestConfigDir::new();
+        let (endpoint, connect) = offline_connect_service(env.dir.path()).await;
+        let sender = SecretKey::from_bytes(&[46u8; 32]).public();
+        let code = invite_from(sender);
+        let offer = || {
+            connect.receive_offer(
+                sender,
+                inbound::Inbound::Stranger,
+                sample_net(),
+                code.clone(),
+            )
+        };
+        assert!(offer().await);
+        let path = config::config_dir().unwrap().join("invitations.toml");
+        let modified = || path.metadata().unwrap().modified().unwrap();
+        let written = modified();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(offer().await);
+        assert_eq!(modified(), written);
+        assert_eq!(invitations_of(&connect).await.len(), 1);
+        endpoint.close().await;
+    }
+
     /// A coordinator that refuses the code (revoked, used, expired) ends the
     /// invitation; any other failed join leaves it to retry.
     #[allow(clippy::await_holding_lock)]
@@ -2999,10 +3056,19 @@ mod accept_handler_tests {
         );
         let id = invitations_of(&connect).await[0].id.clone();
         let entry = connect.invitation_entry(&id).await;
-        let unreachable = ipc_err("failed to reach the coordinator".to_string());
-        let reply = connect.settle_accept(&entry, unreachable).await;
-        assert!(matches!(reply, IpcMessage::Error { .. }), "{reply:?}");
-        assert_eq!(invitations_of(&connect).await.len(), 1);
+        // Unreachable, or refused by a co-coordinator that never saw it: the
+        // invite may still be good.
+        for kept in [
+            "failed to reach the coordinator".to_string(),
+            format!(
+                "join denied: {}: invalid invite",
+                crate::invite::INVITE_REJECTED
+            ),
+        ] {
+            let reply = connect.settle_accept(&entry, ipc_err(kept)).await;
+            assert!(matches!(reply, IpcMessage::Error { .. }), "{reply:?}");
+            assert_eq!(invitations_of(&connect).await.len(), 1);
+        }
         let revoked = ipc_err(format!(
             "join denied: {}: invite revoked",
             crate::invite::INVITE_REJECTED

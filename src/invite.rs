@@ -107,6 +107,21 @@ pub struct Delivery {
 /// invitation, so the wording is shared, not repeated. 0.5.9 sends it too.
 pub const INVITE_REJECTED: &str = "invite rejected";
 
+/// Why [`InviteStore::redeem`] refused an invite it holds. 0.5.9 words them
+/// the same.
+const INVITE_USED: &str = "invite already used";
+const INVITE_REVOKED: &str = "invite revoked";
+const INVITE_EXPIRED: &str = "invite expired";
+
+/// Whether a join error is a coordinator refusing, for good, an invite it
+/// holds. An unknown invite does not count: a co-coordinator that never saw
+/// it says so too, as does a coordinator that could not read its ledger.
+pub fn is_dead_invite(message: &str) -> bool {
+    [INVITE_USED, INVITE_REVOKED, INVITE_EXPIRED]
+        .iter()
+        .any(|reason| message.contains(&format!("{INVITE_REJECTED}: {reason}")))
+}
+
 /// How long a privately delivered invite stays redeemable.
 pub const DELIVERY_TTL: Duration = Duration::from_secs(7 * 86400);
 
@@ -438,11 +453,11 @@ impl InviteStore {
             .context("invalid invite")?;
         match &invite.status {
             InviteStatus::Pending => {}
-            InviteStatus::Redeemed { .. } => bail!("invite already used"),
-            InviteStatus::Revoked => bail!("invite revoked"),
+            InviteStatus::Redeemed { .. } => bail!(INVITE_USED),
+            InviteStatus::Revoked => bail!(INVITE_REVOKED),
         }
         if now >= invite.expires {
-            bail!("invite expired");
+            bail!(INVITE_EXPIRED);
         }
         let hostname = invite.hostname.clone();
         invite.status = InviteStatus::Redeemed { by, at: now };
@@ -758,6 +773,27 @@ mod tests {
         let (secret, _id) = store.mint(Duration::from_secs(0), None).unwrap();
         let err = store.redeem(&secret, test_id(9)).unwrap_err();
         assert!(err.to_string().contains("expired"));
+    }
+
+    /// The denial a coordinator builds from `redeem`, as a joiner reads it.
+    fn denial(err: anyhow::Error) -> String {
+        format!("join denied: {INVITE_REJECTED}: {err}")
+    }
+
+    #[test]
+    fn only_a_definite_refusal_marks_an_invite_dead() {
+        let (mut store, _dir) = temp_store();
+        let (used, _) = store.mint(Duration::from_secs(3600), None).unwrap();
+        store.redeem(&used, test_id(9)).unwrap();
+        let (revoked, id) = store.mint(Duration::from_secs(3600), None).unwrap();
+        store.revoke(&id).unwrap();
+        let (expired, _) = store.mint(Duration::from_secs(0), None).unwrap();
+        for secret in [used, revoked, expired] {
+            let err = store.redeem(&secret, test_id(10)).unwrap_err();
+            assert!(is_dead_invite(&denial(err)));
+        }
+        let unknown = store.redeem(&generate_secret(), test_id(10)).unwrap_err();
+        assert!(!is_dead_invite(&denial(unknown)));
     }
 
     #[test]
