@@ -28,10 +28,13 @@ use crate::membership::{ApprovedEntry, ExitFamilies, Member};
 pub struct DeviceCert {
     pub user_identity: EndpointId,
     pub device_key: EndpointId,
-    /// Issuance epoch, covered by the signature. Left from an earlier scheme
-    /// that revoked every device at once by raising a published floor; nothing
-    /// raises it now, so certificates are issued at the stored legacy
-    /// `cert_generation`, normally `0`.
+    /// The pairing's generation, covered by the signature. A primary signs each
+    /// pairing of a device one generation above the last it gave that device
+    /// (`AppConfig::device_generations`), so a notice or request about an
+    /// earlier pairing is told apart from the current one. A device paired
+    /// before pairings were numbered, or by an older primary, holds the legacy
+    /// `cert_generation`, normally `0`, left from an earlier scheme that revoked
+    /// every device at once by raising a published floor.
     #[serde(default)]
     pub generation: u64,
     pub signature: Signature,
@@ -101,17 +104,21 @@ pub enum PairMsg {
         networks: Vec<PairNetwork>,
     },
     /// Device to primary, version 3 only: record that this device unpaired
-    /// itself, or that it finished the cleanup the primary's
-    /// `ControlMsg::Unpaired` asked for. `cert` is the certificate the primary
-    /// signed for it, the evidence of the pairing, which the primary checks in
-    /// place of its rosters: a device that left its networks is no longer on
-    /// them. Answered with `UnpairRecorded` once the revocation is saved.
+    /// itself, or that it finished the cleanup the primary's notice
+    /// (`ControlMsg::PairingRevoked`) asked for. `cert` is the certificate the
+    /// primary signed for it, the evidence of the pairing, which the primary
+    /// checks in place of its rosters: a device that left its networks is no
+    /// longer on them. Answered with `UnpairRecorded` once the revocation is
+    /// saved. A certificate older than the last one the primary signed for the
+    /// device is from a pairing the device has since replaced; the request may
+    /// only now be read, after the device paired again, and revokes nothing.
     UnpairRequest {
         cert: DeviceCert,
     },
     /// Primary to device: the revocation an `UnpairRequest` asked for is saved.
     /// Sent again for a revocation saved earlier, so a device whose answer was
-    /// lost can safely ask again.
+    /// lost can safely ask again, and for a pairing the device has since
+    /// replaced, which has nothing left to revoke.
     UnpairRecorded,
 }
 
@@ -308,17 +315,30 @@ pub enum ControlMsg {
         #[serde(default = "default_receive_mtu")]
         receive_mtu: u16,
     },
-    /// Primary to secondary: this device has been unpaired (`ray unpair`). The
-    /// primary saves the revocation, and that the device has yet to be told,
-    /// before sending it, then sends it again, over a live link or one dialed
-    /// for it, until the device confirms, also after a restart. The receiver
-    /// acts on it only when the sender's identity is the `user_identity` in its
-    /// own device cert (so a stranger cannot trigger a wipe): it deletes its
-    /// stored device cert and leaves the networks it holds only by that cert.
-    /// Once that cleanup is saved it confirms with the `PairMsg::UnpairRequest`
-    /// it sends when it unpairs itself. The authoritative revocation is the
-    /// per-network blob nullifier set; this wipe is for a cooperative device.
+    /// Primary to secondary over mesh version 6 or 5: this device has been
+    /// unpaired (`ray unpair`), as [`ControlMsg::PairingRevoked`] says on
+    /// version 7, but naming no pairing. A device acts on it only from a primary
+    /// on an older version, which signs every pairing of a device alike, and
+    /// only when the sender's identity is the `user_identity` in its own device
+    /// cert (so a stranger cannot trigger a wipe).
     Unpaired,
+    /// Primary to secondary over mesh version 7: this device's pairing is
+    /// revoked (`ray unpair`), up to the certificate `generation`. The primary
+    /// saves the revocation, and that the device has yet to be told, before
+    /// sending it, then sends it again, over a live link or one dialed for it,
+    /// until the device confirms, also after a restart. The receiver acts on it
+    /// only when the sender's identity is the `user_identity` in its own device
+    /// cert (so a stranger cannot trigger a wipe), and only while that cert's
+    /// generation is no newer: a pairing made since the revocation has a higher
+    /// one, and the notice can be read after it, having waited on the link
+    /// behind another stream. Acting, it deletes its stored device cert and
+    /// leaves the networks it holds only by that cert. Once that cleanup is
+    /// saved it confirms with the `PairMsg::UnpairRequest` it sends when it
+    /// unpairs itself. The authoritative revocation is the per-network blob
+    /// nullifier set; this wipe is for a cooperative device.
+    PairingRevoked {
+        generation: u64,
+    },
     /// Primary to secondary, from an earlier scheme that revoked every device at
     /// once by raising a published generation floor: a cert re-issued at the new
     /// generation. Nothing sends it now that revocation is per device; it stays

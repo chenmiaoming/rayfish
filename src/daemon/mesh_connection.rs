@@ -79,9 +79,10 @@ impl MeshConnection {
     /// Drive the connection for its whole life: spawn the single data reader, then
     /// loop accepting control streams and routing each `ControlFrame` to the right
     /// per-network handler by `net`, or handling connection-level messages
-    /// (`NetworkHandles`, `Ping`/`Pong`, `Unpaired`, `CertRefresh`) inline. On any
-    /// exit that isn't daemon shutdown, stop the reader and, if this connection was
-    /// ever a registered member, report the drop to the supervisor.
+    /// (`NetworkHandles`, `Ping`/`Pong`, the unpair notices, `CertRefresh`)
+    /// inline. On any exit that isn't daemon shutdown, stop the reader and, if
+    /// this connection was ever a registered member, report the drop to the
+    /// supervisor.
     pub(crate) async fn run(mut self) {
         // Feed the warm-start cache from the authenticated connection.  A later
         // restart can try its selected relay or direct path immediately instead
@@ -249,18 +250,28 @@ impl MeshConnection {
                     }
                     continue;
                 }
-                ControlMsg::Unpaired => {
+                ControlMsg::Unpaired | ControlMsg::PairingRevoked { .. } => {
                     // Our primary is unpairing this device, or repeating it until
                     // we confirm. Acted on only if the sender signed our cert (a
-                    // stranger is a no-op). The pairing count is read now: a
-                    // pairing that completes while this waits for the unpair lock
-                    // makes it stale. Leaving every network is heavy, so spawn it
-                    // off the demux loop rather than awaiting inline.
+                    // stranger is a no-op), and judged against the cert stored
+                    // when it is acted on, not now: a notice read now may have
+                    // waited behind another stream while this device paired
+                    // again. Leaving every network is heavy, so spawn it off the
+                    // demux loop rather than awaiting inline.
+                    let revoked = match frame.msg {
+                        ControlMsg::PairingRevoked { generation } => Some(generation),
+                        _ => None,
+                    };
+                    // A primary on version 7 names the pairing; only an older
+                    // one sends the bare notice.
+                    if revoked.is_none() && !predates_pairing_generations(self.conn.alpn()) {
+                        tracing::debug!(peer = %self.peer_id.fmt_short(), "ignoring an unpair notice that names no pairing");
+                        continue;
+                    }
                     let registry = Arc::clone(&self.ctx.registry);
                     let sender = self.peer_id;
-                    let pairings = registry.pairing_count.load(Ordering::Acquire);
                     tokio::spawn(async move {
-                        registry.on_unpaired_notice(sender, pairings).await;
+                        registry.on_unpaired_notice(sender, revoked).await;
                     });
                     continue;
                 }

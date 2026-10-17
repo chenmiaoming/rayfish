@@ -26,15 +26,28 @@
 //!   its rosters still list it. Nothing confirms that, so the entry stays.
 //! - Saving a new pairing with the same primary cancels the entry, which would
 //!   otherwise revoke it. A pairing with another primary leaves it be.
-//! - On the primary, `ray unpair <device>` saves the revocation and the device
-//!   in `pending_unpair_notices` before telling the device
-//!   (`ControlMsg::Unpaired`). The notice is repeated, after a restart too,
-//!   until the device confirms with the same request, which it sends only once
-//!   its cleanup is saved, or until the device pairs here again.
+//! - On the primary, `ray unpair <device>` saves the revocation, and the device
+//!   in `pending_unpair_notices`, before telling the device
+//!   (`ControlMsg::PairingRevoked`). The notice is repeated, after a restart
+//!   too, until the device confirms with the same request, which it sends only
+//!   once its cleanup is saved, or until the device pairs here again.
+//!
+//! A notice or a request can be acted on long after it was sent, and the
+//! device can pair again in between: a notice can wait on the link behind
+//! another stream, and a request can still be under way on the primary when
+//! the device gives up on it. So each pairing gets a generation, one above the
+//! last the primary gave that device, saved there before the device gets its
+//! certificate, which is signed at it. The notice names the generation it
+//! ends, and the request carries the certificate. Each is judged against the
+//! pairing current when it is acted on: a device ignores a notice older than
+//! its certificate, and a primary revokes nothing for a certificate older than
+//! the device's latest pairing. Over mesh version 6 or 5 the notice is the bare
+//! `ControlMsg::Unpaired`, which names no pairing: an older device knows no
+//! other, and an older primary signs every pairing of a device alike.
 
 use super::super::network_registry::networks_joined_with_certificate;
 use super::super::*;
-use crate::config::{PendingUnpair, UnpairPhase};
+use crate::config::{DeviceGeneration, PendingUnpair, PendingUnpairNotice, UnpairPhase};
 
 #[cfg(test)]
 mod tests;
@@ -145,6 +158,61 @@ fn remove_pending_unpair(cert: &control::DeviceCert) -> bool {
     }
 }
 
+/// The generation of the latest pairing this primary made with `device`: the
+/// one saved in `device_generations`, or, for a device paired before pairings
+/// were numbered, the legacy `cert_generation` its certificate carries.
+fn pairing_generation(cfg: &config::AppConfig, device: EndpointId) -> u64 {
+    cfg.device_generations
+        .iter()
+        .find(|known| known.device == device)
+        .map_or(cfg.cert_generation, |known| known.generation)
+}
+
+/// Save a new pairing of `device` before it gets its certificate: one
+/// generation above its last, and, in the same write, the end of its notices,
+/// which are about earlier pairings. Returns the generation to sign.
+pub(crate) fn save_new_pairing(device: EndpointId) -> Result<u64> {
+    let mut generation = 0;
+    config::update_settings(|cfg| {
+        generation = pairing_generation(cfg, device) + 1;
+        cfg.device_generations
+            .retain(|known| known.device != device);
+        cfg.device_generations
+            .push(DeviceGeneration { device, generation });
+        cfg.pending_unpair_notices
+            .retain(|notice| notice.device != device);
+        Ok(())
+    })?;
+    Ok(generation)
+}
+
+/// Save in `cfg` that `device` has yet to be told it is unpaired, naming its
+/// latest pairing.
+pub(crate) fn save_unpair_notice(cfg: &mut config::AppConfig, device: EndpointId) {
+    let generation = pairing_generation(cfg, device);
+    cfg.pending_unpair_notices
+        .retain(|notice| notice.device != device);
+    cfg.pending_unpair_notices
+        .push(PendingUnpairNotice { device, generation });
+}
+
+/// Whether a mesh link speaks version 6 or 5, which predate
+/// `ControlMsg::PairingRevoked`: a device is told over it with the bare
+/// `ControlMsg::Unpaired`.
+pub(crate) fn predates_pairing_generations(alpn: &[u8]) -> bool {
+    alpn == transport::MESH_V6_ALPN || alpn == transport::MESH_V5_ALPN
+}
+
+/// The notice that a device's pairing up to `generation` is revoked, in the
+/// form `link` speaks.
+fn unpair_notice(link: &Connection, generation: u64) -> ControlMsg {
+    if predates_pairing_generations(link.alpn()) {
+        ControlMsg::Unpaired
+    } else {
+        ControlMsg::PairingRevoked { generation }
+    }
+}
+
 /// Run `attempt` at once, whenever `nudge` fires, and, while it reports work
 /// left, again after a pause that starts at [`UNPAIR_RETRY_MIN`] and doubles up
 /// to [`UNPAIR_RETRY_MAX`]. A nudge also resets the pause. With nothing left it
@@ -176,9 +244,10 @@ impl NetworkRegistry {
     /// Unpair this device from its primary: save the unpair, leave the networks
     /// first joined with the primary's certificate and delete it, then, once
     /// that is durable, ask the primary to record the revocation (see the
-    /// module docs). Used by the phone's unpair control, the primary's
-    /// `ControlMsg::Unpaired`, and a signed blob that nullifies this device. A
-    /// device with no cert (a primary) has nothing to unpair.
+    /// module docs). Used by the phone's unpair control, and, through
+    /// [`Self::on_unpaired_notice`] and [`Self::unpair_nullified`], by the
+    /// primary's notice and a signed blob that nullifies this device. A device
+    /// with no cert (a primary) has nothing to unpair.
     pub(crate) async fn unpair_self(self: &Arc<Self>) -> IpcMessage {
         let _guard = self.unpair_lock.lock().await;
         self.unpair_self_locked().await
@@ -222,26 +291,30 @@ impl NetworkRegistry {
         left
     }
 
-    /// The primary's `ControlMsg::Unpaired`, from `sender`. Unpairs this device
-    /// when `sender` signed its certificate, unless a pairing completed since
-    /// the notice arrived (`pairings_seen` was read then): a notice the primary
-    /// sent before that pairing is not about it. A device that already unpaired
-    /// from `sender` and still waits for it to confirm asks again at once, since
-    /// the primary is reachable now.
+    /// The primary's notice that this device is unpaired, from `sender`:
+    /// `ControlMsg::PairingRevoked`, whose generation is `revoked`, or, over
+    /// mesh version 6 or 5, the bare `Unpaired`, which names none. Judged here,
+    /// under the unpair lock, against the certificate stored now rather than
+    /// when the notice was read: it may have waited on the link behind another
+    /// stream while this device paired again, which signs the new certificate
+    /// at a higher generation. Unpairs this device when `sender` signed its
+    /// certificate and the certificate is no newer than the notice. A device
+    /// that already unpaired from `sender` and still waits for it to confirm
+    /// asks again at once, since the primary is reachable now.
     pub(crate) async fn on_unpaired_notice(
         self: &Arc<Self>,
         sender: EndpointId,
-        pairings_seen: u64,
+        revoked: Option<u64>,
     ) {
         let _guard = self.unpair_lock.lock().await;
-        if self.pairing_count.load(Ordering::Acquire) != pairings_seen {
-            tracing::info!(primary = %sender.fmt_short(), "ignoring an unpair notice from before this device paired again");
-            return;
-        }
-        if self
+        if let Some(cert) = self
             .current_device_cert()
-            .is_some_and(|cert| cert.user_identity == sender)
+            .filter(|cert| cert.user_identity == sender)
         {
+            if revoked.is_some_and(|generation| cert.generation > generation) {
+                tracing::info!(primary = %sender.fmt_short(), "ignoring an unpair notice about an earlier pairing");
+                return;
+            }
             tracing::warn!(primary = %sender.fmt_short(), "primary unpaired this device");
             let _ = self.unpair_self_locked().await;
             return;
@@ -256,11 +329,27 @@ impl NetworkRegistry {
         }
     }
 
+    /// Unpair this device because its own primary nullified `cert` in a
+    /// network's verified blob. The blob was checked before this took the
+    /// unpair lock, which a pairing holds until it completes, so a certificate
+    /// stored since is a new pairing, signed at a higher generation, and stays.
+    pub(crate) async fn unpair_nullified(self: &Arc<Self>, cert: control::DeviceCert) {
+        let _guard = self.unpair_lock.lock().await;
+        match self.current_device_cert() {
+            Some(stored) if stored == cert => {
+                let _ = self.unpair_self_locked().await;
+            }
+            Some(_) => {
+                tracing::info!(primary = %cert.user_identity.fmt_short(), "paired again since the primary nullified this device; keeping the new pairing");
+            }
+            None => {}
+        }
+    }
+
     /// A new pairing with `primary` is saved: cancel this device's request to be
-    /// unpaired from it, which would otherwise revoke the new pairing, and make
-    /// earlier notices stale (see [`Self::on_unpaired_notice`]). Caller holds
-    /// the unpair lock. If the cancel cannot be saved, the next attempt at the
-    /// request finds the new certificate and cancels it then.
+    /// unpaired from it, which would otherwise revoke the new pairing. Caller
+    /// holds the unpair lock. If the cancel cannot be saved, the next attempt at
+    /// the request finds the new certificate and cancels it then.
     pub(crate) fn paired_again(&self, primary: EndpointId) {
         if let Err(error) = config::update_settings(|cfg| {
             cfg.pending_unpairs
@@ -269,7 +358,6 @@ impl NetworkRegistry {
         }) {
             tracing::warn!(error = %format!("{error:#}"), "could not cancel the unpair request to this primary");
         }
-        self.pairing_count.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Finish the cleanup of any saved unpair still in that phase, which only a
@@ -378,7 +466,7 @@ impl NetworkRegistry {
         let conn = connect_pair(&self.transport.endpoint, primary.into()).await?;
         if conn.alpn() != PAIR_ALPN {
             conn.close(VarInt::from_u32(0), b"older pairing protocol");
-            self.deliver_control(primary, &ControlMsg::RequestUnpair)
+            self.deliver_control(primary, |_| ControlMsg::RequestUnpair)
                 .await?;
             return Ok(RequestOutcome::Legacy);
         }
@@ -395,11 +483,16 @@ impl NetworkRegistry {
         }
     }
 
-    /// Send `msg`, a connection-level control message, to `peer` and wait until
-    /// it has taken it. Uses the live link when there is one. Otherwise a link
-    /// is dialed for the message alone, since an unpaired device and its primary
-    /// may share no network any more.
-    async fn deliver_control(&self, peer: EndpointId, msg: &ControlMsg) -> Result<()> {
+    /// Send `peer` the connection-level control message `msg` builds for the
+    /// link, and wait until the peer's transport acknowledges it, which does not
+    /// mean the peer has read it. Uses the live link when there is one.
+    /// Otherwise a link is dialed for the message alone, since an unpaired
+    /// device and its primary may share no network any more.
+    async fn deliver_control(
+        &self,
+        peer: EndpointId,
+        msg: impl FnOnce(&Connection) -> ControlMsg,
+    ) -> Result<()> {
         #[cfg(target_os = "android")]
         self.wake_transport().await;
         let live = self
@@ -418,19 +511,19 @@ impl NetworkRegistry {
                 .await?
             }
         };
-        send_confirmed(&conn, None, msg).await?;
+        send_confirmed(&conn, None, &msg(&conn)).await?;
         if dialed {
-            // Taken off the stream, but closing at once can still reset it
-            // before the peer's reader is done with it. Leave it a moment, as
-            // `nuke` does for its one-off deliveries.
+            // Acknowledged, but closing at once can still reset it before the
+            // peer's reader is done with it. Leave it a moment, as `nuke` does
+            // for its one-off deliveries.
             let _ = tokio::time::timeout(Duration::from_secs(1), conn.closed()).await;
         }
         Ok(())
     }
 
-    /// Tell each device in `pending_unpair_notices` that it is unpaired: at once
-    /// when the daemon starts or [`Self::notice_nudge`] fires, and while any is
-    /// left, again after the same growing pause as the requests.
+    /// Tell each device in `pending_unpair_notices` that its pairing is revoked:
+    /// at once when the daemon starts or [`Self::notice_nudge`] fires, and while
+    /// any is left, again after the same growing pause as the requests.
     pub(crate) async fn run_unpair_notices(self: Arc<Self>) {
         let nudge = Arc::clone(&self.notice_nudge);
         retry_until_done(&self.shutdown_token, &nudge, || {
@@ -439,26 +532,23 @@ impl NetworkRegistry {
         .await;
     }
 
-    /// One `ControlMsg::Unpaired` to each device still to be told. Returns
-    /// whether any is left: told or not, a device stays until it confirms
-    /// ([`Self::record_unpair`]) or pairs here again
-    /// ([`Self::cancel_unpair_notice`]).
+    /// One notice to each device still to be told. Returns whether any is
+    /// left: told or not, a device stays until it confirms
+    /// ([`Self::record_unpair`]) or pairs here again ([`save_new_pairing`]). A
+    /// notice that reaches the device after it paired again names the earlier
+    /// pairing, which the device ignores.
     pub(crate) async fn attempt_unpair_notices(&self) -> bool {
-        let devices = match config::load() {
+        let notices = match config::load() {
             Ok(cfg) => cfg.pending_unpair_notices,
             Err(error) => {
                 tracing::debug!(error = %format!("{error:#}"), "could not read devices to tell they are unpaired");
                 return true;
             }
         };
-        for device in &devices {
-            let _guard = self.notice_lock.lock().await;
-            if !config::load().is_ok_and(|cfg| cfg.pending_unpair_notices.contains(device)) {
-                continue;
-            }
+        for &PendingUnpairNotice { device, generation } in &notices {
             match tokio::time::timeout(
                 UNPAIR_NOTICE_TIMEOUT,
-                self.deliver_control(*device, &ControlMsg::Unpaired),
+                self.deliver_control(device, |link| unpair_notice(link, generation)),
             )
             .await
             {
@@ -473,31 +563,34 @@ impl NetworkRegistry {
                 }
             }
         }
-        !devices.is_empty()
+        !notices.is_empty()
     }
 
     /// Record the unpair a paired device asked for with the certificate this
-    /// node signed for it, which the caller checked: revoke the device
-    /// ([`Self::revoke_device`]) and, in the same write, stop telling it to
-    /// unpair, since a device asks only once its cleanup is saved.
-    pub(crate) async fn record_unpair(self: &Arc<Self>, device: EndpointId) -> Result<(), String> {
-        self.revoke_device(device, |cfg| {
+    /// node signed for it at `generation`, which the caller checked: revoke the
+    /// device ([`Self::revoke_device_locked`]) and, in the same write, stop
+    /// telling it to unpair, since a device asks only once its cleanup is saved.
+    /// A certificate older than the device's latest pairing here is from a
+    /// pairing the device has since replaced, and revokes nothing: the request
+    /// can be read late, or still be under way, when the device pairs again.
+    /// Returns whether the pairing was current.
+    pub(crate) async fn record_unpair(
+        self: &Arc<Self>,
+        device: EndpointId,
+        generation: u64,
+    ) -> Result<bool, String> {
+        // A pairing saved after this check re-authorizes the device once this
+        // revocation is done: its `reauth_device` waits for the lock.
+        let _revoking = self.revocation_lock.lock().await;
+        let cfg = config::load().map_err(|error| format!("could not read settings: {error:#}"))?;
+        if pairing_generation(&cfg, device) > generation {
+            return Ok(false);
+        }
+        self.revoke_device_locked(device, |cfg| {
             cfg.pending_unpair_notices
-                .retain(|pending| *pending != device);
+                .retain(|notice| notice.device != device);
         })
-        .await
-    }
-
-    /// Stop telling `device` that it is unpaired: it is pairing here again. A
-    /// notice being sent finishes first, so none reaches the device after its
-    /// new pairing.
-    pub(crate) async fn cancel_unpair_notice(&self, device: EndpointId) -> Result<()> {
-        let _guard = self.notice_lock.lock().await;
-        config::update_settings(|cfg| {
-            cfg.pending_unpair_notices
-                .retain(|pending| *pending != device);
-            Ok(())
-        })?;
-        Ok(())
+        .await?;
+        Ok(true)
     }
 }

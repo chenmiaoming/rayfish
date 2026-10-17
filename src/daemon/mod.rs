@@ -351,7 +351,7 @@ pub(crate) struct MeshCtx {
     /// keeps disconnect handling serial (one check-then-act at a time).
     disconnect_tx: mpsc::Sender<forward::DisconnectEvent>,
     /// The network-owning service. Control readers reach it through the ctx to
-    /// run network ops directly (e.g. `unpair_self` on a `ControlMsg::Unpaired` or
+    /// run network ops directly (e.g. the unpair a primary's notice asks for, or
     /// a self-nullify during reconverge) instead of signalling the daemon loop.
     registry: Arc<NetworkRegistry>,
 }

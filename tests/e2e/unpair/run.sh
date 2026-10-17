@@ -149,7 +149,7 @@ done
 # ---------------------------------------------------------------------------
 step "7. srv-b's device cert deleted"
 # The primary saved that srv-b has yet to be told, and sends it
-# ControlMsg::Unpaired, dialing it, until srv-b confirms its cleanup; srv-b
+# ControlMsg::PairingRevoked, dialing it, until srv-b confirms its cleanup; srv-b
 # deletes its own cert when told. Checked once here, so a notice still in flight
 # is a note, not a hard failure.
 if on "$B" 'test -f /etc/rayfish/device_cert'; then

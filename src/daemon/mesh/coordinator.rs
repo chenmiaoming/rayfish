@@ -281,13 +281,13 @@ impl NetworkRegistry {
         tracing::info!(peer = %member_id.fmt_short(), network, "pruned member after in-band leave");
     }
 
-    /// Nullify a paired secondary device (see [`Self::revoke_device`]) once the
-    /// rosters confirm it is one: for `ray unpair <device>`, and for the legacy
-    /// `ControlMsg::RequestUnpair` of a device too old to send
+    /// Nullify a paired secondary device (see [`Self::revoke_device_locked`])
+    /// once the rosters confirm it is one: for `ray unpair <device>`, and for the
+    /// legacy `ControlMsg::RequestUnpair` of a device too old to send
     /// `PairMsg::UnpairRequest`. Returns the device's display name, or an error
     /// string if `target` is not one of our paired devices, so a stranger's
     /// request is rejected. `notify` saves, with the revocation, that the device
-    /// has yet to be told (`pending_unpair_notices`).
+    /// has yet to be told, naming its latest pairing (`pending_unpair_notices`).
     pub(crate) async fn nullify_device(
         self: &Arc<Self>,
         target: EndpointId,
@@ -313,9 +313,10 @@ impl NetworkRegistry {
                 target.fmt_short()
             ));
         }
-        self.revoke_device(target, |cfg| {
-            if notify && !cfg.pending_unpair_notices.contains(&target) {
-                cfg.pending_unpair_notices.push(target);
+        let _revoking = self.revocation_lock.lock().await;
+        self.revoke_device_locked(target, |cfg| {
+            if notify {
+                super::unpair::save_unpair_notice(cfg, target);
             }
         })
         .await?;
@@ -333,8 +334,10 @@ impl NetworkRegistry {
     /// The caller has established that `target` is our paired device: from the
     /// rosters, or from the certificate in a `PairMsg::UnpairRequest`, which can
     /// arrive after the device has left them. Safe to repeat: a network that
-    /// already nullifies the device is not republished.
-    pub(crate) async fn revoke_device(
+    /// already nullifies the device is not republished. The caller holds
+    /// [`Self::revocation_lock`], which keeps a re-authorization of the device
+    /// from running in the middle.
+    pub(crate) async fn revoke_device_locked(
         self: &Arc<Self>,
         target: EndpointId,
         also: impl FnOnce(&mut config::AppConfig),

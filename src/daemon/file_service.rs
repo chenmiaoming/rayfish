@@ -1222,16 +1222,19 @@ impl FileService {
                                     tracing::warn!(%error, "could not record existing memberships before pairing");
                                     return;
                                 }
-                                // A device `ray unpair` revoked is told so until it
-                                // confirms. Pairing it again ends that before it
-                                // gets the new cert, which a later notice would
-                                // otherwise wipe.
-                                if let Err(error) =
-                                    self.registry.cancel_unpair_notice(device_pubkey).await
-                                {
-                                    tracing::warn!(error = %format!("{error:#}"), "could not stop unpair notices before pairing");
-                                    return;
-                                }
+                                // The pairing's generation, one above the device's
+                                // last, saved before it gets the cert signed at it,
+                                // in the same write that ends the notices `ray
+                                // unpair` left it. A notice or request about an
+                                // earlier pairing names a lower generation, so
+                                // neither undoes this one if it is acted on late.
+                                let generation = match save_new_pairing(device_pubkey) {
+                                    Ok(generation) => generation,
+                                    Err(error) => {
+                                        tracing::warn!(error = %format!("{error:#}"), "could not save the pairing");
+                                        return;
+                                    }
+                                };
                                 // Sign the device's public key
                                 // Share our saved networks so the new device can auto-join them. Only
                                 // networks with a known public key (skips freshly created, unsynced ones).
@@ -1246,8 +1249,6 @@ impl FileService {
                                 tokio::spawn(async move {
                                     registry.reauth_device(device_pubkey).await;
                                 });
-                                let generation =
-                                    config::load().map(|c| c.cert_generation).unwrap_or(0);
                                 let cert = control::DeviceCert::create(
                                     &self.secret_key,
                                     &device_pubkey,
@@ -1318,11 +1319,24 @@ impl FileService {
                         }
                         // Answered only once the revocation is saved, and again
                         // when it already was, so a lost answer is safe to ask for.
-                        if let Err(error) = self.registry.record_unpair(remote_id).await {
-                            tracing::warn!(device = %remote_id.fmt_short(), %error, "could not record unpair request");
-                            return;
+                        // A pairing the device has replaced since is answered
+                        // without a revocation, which would end the new one.
+                        match self
+                            .registry
+                            .record_unpair(remote_id, cert.generation)
+                            .await
+                        {
+                            Ok(true) => {
+                                tracing::info!(device = %remote_id.fmt_short(), "recorded unpair requested by the device");
+                            }
+                            Ok(false) => {
+                                tracing::info!(device = %remote_id.fmt_short(), "unpair request for a pairing the device has since replaced; nothing to revoke");
+                            }
+                            Err(error) => {
+                                tracing::warn!(device = %remote_id.fmt_short(), %error, "could not record unpair request");
+                                return;
+                            }
                         }
-                        tracing::info!(device = %remote_id.fmt_short(), "recorded unpair requested by the device");
                         if control::send_framed(&mut send, &control::PairMsg::UnpairRecorded)
                             .await
                             .is_ok()

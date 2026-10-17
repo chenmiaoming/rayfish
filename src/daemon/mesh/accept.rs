@@ -164,6 +164,7 @@ pub(crate) fn stranger_may_send(msg: &ControlMsg) -> bool {
         | ControlMsg::Ping { .. }
         | ControlMsg::Pong { .. }
         | ControlMsg::Unpaired
+        | ControlMsg::PairingRevoked { .. }
         | ControlMsg::CertRefresh { .. }
         | ControlMsg::RequestUnpair
         | ControlMsg::NotSupported { .. }
