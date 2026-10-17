@@ -414,10 +414,22 @@ async fn a_lost_confirmation_is_answered_again() {
     primary.start().await;
     device.start().await;
     let cert = paired(&primary, &device).await;
-    relay.fail.store(true, Ordering::Relaxed);
-    let result = device.unpair_self().await;
-    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
-    assert_eq!(device.settings().await.pending_unpairs, waiting(&cert));
+    // The device is offline until it asks again, holding what its unpair
+    // leaves: the request, with the certificate and its network gone. Its own
+    // attempts would race the test, and the link below speaks with its key.
+    device.stop().await;
+    let saved = waiting(&cert);
+    device
+        .run(async move {
+            identity::delete_device_cert().unwrap();
+            config::delete_network("home").unwrap();
+            config::update_settings(|cfg| {
+                cfg.pending_unpairs = saved;
+                Ok(())
+            })
+            .unwrap();
+        })
+        .await;
 
     // The device's request reaches the primary, which records it, but the
     // answer is lost: the link drops before the device reads it.
@@ -442,7 +454,7 @@ async fn a_lost_confirmation_is_answered_again() {
     link.close().await;
     assert_eq!(device.settings().await.pending_unpairs, waiting(&cert));
 
-    relay.fail.store(false, Ordering::Relaxed);
+    device.start().await;
     introduce(&device, &primary);
     assert!(!device.attempt_requests().await);
     assert_eq!(device.settings().await.pending_unpairs, []);
