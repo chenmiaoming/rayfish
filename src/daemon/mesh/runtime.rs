@@ -7,7 +7,12 @@ use super::super::*;
 // desktop feature (the ray-mobile host build) still needs the import.
 #[cfg(any(feature = "desktop", target_os = "macos"))]
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
+use std::sync::PoisonError;
 use std::sync::RwLock;
+use tokio::sync::MutexGuard as AsyncMutexGuard;
+#[cfg(target_os = "linux")]
+use tokio::time::MissedTickBehavior;
 
 use super::create_join::{RestoredGroupBlob, mesh_version_is_speakable};
 
@@ -17,6 +22,10 @@ use super::create_join::{RestoredGroupBlob, mesh_version_is_speakable};
 /// enough that a broken exit node does not hang the command.
 #[cfg(target_os = "macos")]
 const EXIT_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often the exit node's kernel state is checked for removal by another tool.
+#[cfg(target_os = "linux")]
+const EXIT_KERNEL_CHECK: Duration = Duration::from_secs(30);
 
 /// Per-attempt wait for a control pong. Also paces the readiness loop.
 #[cfg(target_os = "macos")]
@@ -1287,6 +1296,43 @@ impl Daemon {
                 warnings.push(format!("failed to route IPv6 peer range into TUN: {err}"));
             }
 
+            // Another interface routing part of `200::/7` wins over ours for
+            // that part, and the mesh just looks dead. Say which one. The
+            // metric is left alone: lowering it would break the other overlay
+            // instead, and which one should win is the operator's call.
+            #[cfg(target_os = "linux")]
+            match tun::overlay_route_warnings(&tun_name).await {
+                Ok(found) => {
+                    for w in found {
+                        tracing::warn!("{w}");
+                        warnings.push(w);
+                    }
+                }
+                Err(e) => tracing::debug!(error = %format!("{e:#}"), "cannot list IPv6 routes"),
+            }
+
+            // Something else on the host can take the link down or delete the
+            // address or route later; put them back while we are up.
+            #[cfg(target_os = "linux")]
+            {
+                let token = CancellationToken::new();
+                if let Some(old) = self
+                    .tun_watch_token
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .replace(token.clone())
+                {
+                    old.cancel();
+                }
+                tun::spawn_repair_watcher(
+                    tun_name.clone(),
+                    my_v6,
+                    Arc::clone(&self.active),
+                    Arc::clone(&self.registry.exit_reapply),
+                    token,
+                );
+            }
+
             // Another VPN's kill switch ends in a catch-all block, and its
             // allow-list names the private ranges, which `200::/7` is not one
             // of: without a pass rule of ours ahead of it the mesh dies the
@@ -1391,7 +1437,17 @@ impl Daemon {
         // One reconcile at a time (see `Daemon::exit_reconcile`): the kernel
         // enable's snapshot-then-write is not safe to interleave.
         let started = tokio::time::Instant::now();
-        let _guard = self.exit_reconcile.lock().await;
+        let guard = self.exit_reconcile.lock().await;
+        self.apply_exit_node_locked(&guard, started).await
+    }
+
+    /// [`apply_exit_node`](Self::apply_exit_node) for a caller already holding
+    /// `exit_reconcile`, which `_guard` proves. `started` is when it asked.
+    async fn apply_exit_node_locked(
+        &self,
+        _guard: &AsyncMutexGuard<'_, ()>,
+        started: tokio::time::Instant,
+    ) -> Option<String> {
         let locked = started.elapsed();
         let tun_name = self.tun_name.load().as_str().to_owned();
         let reload = self.registry.reload_exit_state();
@@ -1452,6 +1508,137 @@ impl Daemon {
                 }
             }
         });
+    }
+
+    /// Spawn the daemon-lifetime check that the exit node's kernel state is still
+    /// there. Our nft tables and `ip rule`s live outside the process, and a
+    /// firewall reload, `nft flush ruleset` or a network manager restart removes
+    /// them without telling us: a gateway then forwards without masquerading, and
+    /// a client's tunnel quietly stops. Every [`EXIT_KERNEL_CHECK`] this re-applies
+    /// whatever went missing, re-reads the gateway's own addresses, and re-adds
+    /// the host-firewall forwarding exceptions and mesh SSH accept a reload
+    /// dropped. Linux only, the
+    /// one platform whose exit state another tool commonly flushes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {
+        let daemon = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(EXIT_KERNEL_CHECK);
+            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            // The first tick is immediate, and `activate` has just applied.
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = daemon.shutdown_token.cancelled() => break,
+                    _ = tick.tick() => {}
+                }
+                if daemon.active.load(Ordering::SeqCst) {
+                    daemon.check_exit_kernel_state().await;
+                    #[cfg(feature = "desktop")]
+                    daemon.reassert_ssh_host_firewall().await;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {}
+
+    /// The same tick puts back the mesh SSH host-firewall accept `ray up` added,
+    /// which the same reload drops. Quiet: `ray up` already warned with the fix.
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    async fn reassert_ssh_host_firewall(&self) {
+        if self
+            .ssh_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+        {
+            return;
+        }
+        let tun_name = self.tun_name.load().as_str().to_owned();
+        let port = crate::forward::SSH_LISTEN_PORT;
+        if let Ok(Some(warning)) = tokio::task::spawn_blocking(move || {
+            crate::hostfw::ensure_inbound_tcp(&tun_name, port).warning(port)
+        })
+        .await
+        {
+            tracing::debug!(warning, "host firewall still blocks mesh SSH");
+        }
+    }
+
+    /// One pass of [`spawn_exit_kernel_watch`](Self::spawn_exit_kernel_watch).
+    /// The read-only probe runs without the reconcile lock, so a clean pass
+    /// never waits on (or holds up) a reconcile. Anything found is read again
+    /// under the lock before acting, since the first read may have caught a
+    /// reconcile half-done.
+    #[cfg(target_os = "linux")]
+    async fn check_exit_kernel_state(&self) {
+        if self
+            .probe_exit_kernel()
+            .await
+            .is_none_or(|check| check.is_clean())
+        {
+            return;
+        }
+        let started = tokio::time::Instant::now();
+        let guard = self.exit_reconcile.lock().await;
+        // `ray down` may have run while this waited for the lock. It tears the
+        // exit state down under the same lock, so re-applying now would put
+        // back the forwarding and NAT it just removed.
+        if !self.active.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(check) = self.probe_exit_kernel().await else {
+            return;
+        };
+        if check.forward_firewall {
+            let tun_name = self.tun_name.load().as_str().to_owned();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::exit_node::reassert_forward_firewall(&tun_name)
+            })
+            .await;
+        }
+        let missing = check.missing();
+        if missing.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            missing = %missing.join(", "),
+            "exit-node kernel state was removed from outside rayfish (a firewall \
+             reload or `nft flush ruleset`?); re-applying"
+        );
+        if let Some(warning) = self.apply_exit_node_locked(&guard, started).await {
+            tracing::warn!(
+                warning,
+                "exit-node re-apply after kernel state went missing"
+            );
+        }
+    }
+
+    /// Read what the exit roles in effect need from the kernel, and re-read the
+    /// gateway's own addresses. `None` when neither role is in effect.
+    #[cfg(target_os = "linux")]
+    async fn probe_exit_kernel(&self) -> Option<crate::exit_node::KernelCheck> {
+        let server = self.registry.exit_server.clone();
+        let serving = server.is_active();
+        // A failed install was already reported and rolled back; retrying it on
+        // a timer is not this check's job.
+        let using = (self.registry.exit_client.is_active()
+            && self.registry.exit_install_error.load().is_none())
+        .then(|| self.tunnel_carries());
+        if !serving && using.is_none() {
+            return None;
+        }
+        let tun_name = self.tun_name.load().as_str().to_owned();
+        tokio::task::spawn_blocking(move || {
+            if serving {
+                server.refresh_host_interfaces();
+            }
+            crate::exit_node::check_kernel_state(serving, using, &tun_name)
+        })
+        .await
+        .ok()
     }
 
     /// After a `ray exit-node` mutation: if the data plane is up, reconcile the
@@ -1814,6 +2001,17 @@ impl Daemon {
             return IpcMessage::Ok {
                 message: "already on standby".into(),
             };
+        }
+
+        // First, so the watcher does not undo the link-down below.
+        #[cfg(target_os = "linux")]
+        if let Some(token) = self
+            .tun_watch_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            token.cancel();
         }
 
         // The SSH listeners and the IPv4 bridge bind the mesh IPs, which go down
