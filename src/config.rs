@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs::Permissions;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 use std::fs::{self, File};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
@@ -1166,7 +1166,7 @@ const LINUX_STATE_DIR: &str = "/var/lib/rayfish";
 /// filesystems (a separate `/var`) the store is copied next to `new`, checked,
 /// and only then renamed into place, so a half-finished copy is never used. On
 /// any failure the old location stays in use.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
     if !old.is_dir() {
         return new.to_path_buf();
@@ -1220,7 +1220,7 @@ fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
 /// directory beside `new`. Every file and directory is synced and the copy's
 /// file list and sizes are compared with the original before the rename that
 /// makes it visible. `old` is left untouched.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
     let parent = new
         .parent()
@@ -1260,12 +1260,12 @@ fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
 }
 
 /// One regular file in a blob store, by path relative to the store and size.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 type StoreEntry = (PathBuf, u64);
 
 /// Copy the tree under `from` into the existing directory `to`, syncing each
 /// file and directory.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     for entry in fs::read_dir(from)? {
         let entry = entry?;
@@ -1290,7 +1290,7 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Every regular file under `dir`, with its size.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn list_tree(dir: &Path, rel: &Path, out: &mut Vec<StoreEntry>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -1973,6 +1973,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn blob_store_moves_to_the_state_directory_once() {
         let root = tempfile::tempdir().expect("tempdir is creatable in tests");
@@ -1988,6 +1989,7 @@ mod tests {
         assert_eq!(migrate_blobs(&old, &new), new);
     }
 
+    #[cfg(unix)]
     #[test]
     fn blob_store_migration_never_overwrites_the_new_location() {
         let root = tempfile::tempdir().expect("tempdir is creatable in tests");
@@ -1999,6 +2001,7 @@ mod tests {
         assert!(old.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn blob_store_copy_matches_and_replaces_nothing_on_failure() {
         let root = tempfile::tempdir().expect("tempdir is creatable in tests");
@@ -2040,6 +2043,7 @@ mod tests {
         assert!(!root.path().join(".blobs.migrating").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn blob_store_stays_put_when_it_cannot_move() {
         let root = tempfile::tempdir().expect("tempdir is creatable in tests");
