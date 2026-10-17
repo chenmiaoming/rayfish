@@ -16,6 +16,11 @@
 #   - declining an invitation blocks its sender
 #   - a recipient on the previous release fails the invite ALPN handshake, and
 #     the coordinator is told to send the code by hand
+#   - accepting a revoked invite reports it and removes it
+#   - the recipient's inbox and the coordinator's queued deliveries survive a
+#     daemon restart
+#   - an accept no coordinator can redeem while the minter is offline stays
+#     pending and succeeds once the minter is back
 #   - blocking a paired user's identity also refuses that user's other device
 #
 # Reads tests/e2e/invites/.servers (written by provision). Re-runnable (resets
@@ -170,7 +175,69 @@ is_blocked "$B" "$A_ID" && pass "decline blocked srv-a" || fail "decline did not
 expect_refused "$A" "$B" "$B_ID" "${A_ID:0:8}" "declined sender"
 
 # ---------------------------------------------------------------------------
-step "7. an older recipient gets the code by hand instead"
+step "7. accepting a revoked invite removes it"
+OUT="$(apply_invite carol "$C_ID" lab4)"
+echo "$OUT" | sed 's/^/   a| /'
+INV_ID="$(echo "$OUT" | sed -n 's/.*invite \([0-9a-f]\{6,\}\) delivered.*/\1/p' | head -1)"
+[[ -n "$INV_ID" ]] && pass "invite $INV_ID delivered to srv-c" || { fail "invite to srv-c not delivered"; summary; }
+on "$A" "ray invite lab4 revoke $INV_ID" 2>&1 | strip | sed 's/^/   a| /'
+INV="$(pending_invitation "$C" lab4)"
+[[ -n "$INV" ]] && pass "srv-c still holds the revoked invitation" || fail "srv-c has no invitation"
+OUT="$(on "$C" "ray invitations accept $INV" 2>&1 | strip)"
+echo "$OUT" | sed 's/^/   c| /'
+echo "$OUT" | grep -qi 'revoked' && pass "accept reports the invite was revoked" || fail "accept did not report the revoke"
+[[ -z "$(pending_invitation "$C" lab4)" ]] && pass "revoked invitation left the inbox" || fail "revoked invitation still pending"
+net_absent "$C" lab4 && pass "srv-c did not join lab4" || fail "srv-c joined lab4 with a revoked invite"
+
+# ---------------------------------------------------------------------------
+step "8. invitations and queued deliveries survive a restart"
+OUT="$(apply_invite carol "$C_ID" lab5)"
+echo "$OUT" | grep -q 'delivered; awaiting the recipient' && pass "invite to lab5 delivered" || fail "invite to lab5 not delivered"
+restart_daemon "$C"
+[[ -n "$(pending_invitation "$C" lab5)" ]] && pass "srv-c's inbox survived its restart" || fail "srv-c lost the invitation on restart"
+on "$C" 'systemctl stop rayfish' >/dev/null 2>&1 || true
+OUT="$(apply_invite carol "$C_ID" lab6)"
+echo "$OUT" | grep -q 'unreachable; invite .* queued' && pass "invite to lab6 queued" || fail "invite to lab6 not queued"
+restart_daemon "$A"
+activate_daemons "$A" || summary
+on "$C" 'systemctl start rayfish' >/dev/null 2>&1
+retry_until 60 "daemon_ready '$C'" || fail "srv-c daemon did not come back"
+if retry_until 180 "[[ -n \"\$(pending_invitation '$C' lab6)\" ]]"; then
+  pass "the restarted coordinator's sweep delivered the queued invite"
+else
+  fail "queued invite lost across the coordinator restart"
+fi
+
+# ---------------------------------------------------------------------------
+step "9. an accept the minter cannot answer stays pending"
+# Each coordinator keeps its own invite ledger, so while the minter is offline a
+# co-coordinator cannot redeem its code. The invitation must survive that and
+# work once the minter is back.
+on "$B" "ray unblock $A_ID" >/dev/null 2>&1
+OUT="$(apply_invite bob "$B_ID" lab7)"
+echo "$OUT" | grep -q 'delivered; awaiting the recipient' && pass "invite to lab7 delivered to srv-b" || fail "invite to lab7 not delivered"
+CODE="$(mint_invite "$A" lab7 srv-c)"
+on "$C" "ray join $CODE" 2>&1 | strip | sed 's/^/   c| /'
+retry_until 120 "[[ \"\$(peer_online '$A' srv-c lab7)\" == 1 ]]" && pass "srv-c joined lab7" || { fail "srv-c did not join lab7"; summary; }
+on "$A" "ray admin lab7 add $C_ID" 2>&1 | strip | sed 's/^/   a| /'
+retry_until 60 "holds_key '$C' lab7" && pass "srv-c is a co-coordinator of lab7" || fail "srv-c never became a co-coordinator"
+on "$A" 'systemctl stop rayfish' >/dev/null 2>&1 || true
+INV="$(pending_invitation "$B" lab7)"
+OUT="$(on "$B" "timeout 120 ray invitations accept $INV --hostname srv-b" 2>&1 | strip)"
+echo "$OUT" | sed 's/^/   b| /'
+net_absent "$B" lab7 && pass "srv-b could not join with the minter offline" || fail "srv-b joined without the minter"
+[[ -n "$(pending_invitation "$B" lab7)" ]] && pass "the invitation stayed pending" || fail "the invitation was dropped"
+on "$A" 'systemctl start rayfish' >/dev/null 2>&1
+activate_daemons "$A" || summary
+on "$B" "ray invitations accept $INV --hostname srv-b" 2>&1 | strip | sed 's/^/   b| /'
+if retry_until 120 "[[ \"\$(peer_online '$A' srv-b lab7)\" == 1 ]]"; then
+  pass "srv-b joined lab7 once the minter was back"
+else
+  fail "srv-b did not join lab7 after the minter returned"
+fi
+
+# ---------------------------------------------------------------------------
+step "10. an older recipient gets the code by hand instead"
 on "$B" "systemctl stop rayfish; rm -rf /etc/rayfish /root/.config/rayfish; \
   curl -fsSL -o /tmp/ray-old '$OLD_URL' && install -m 755 /tmp/ray-old /usr/local/bin/ray \
   && systemctl start rayfish" >/dev/null 2>&1
@@ -198,7 +265,7 @@ retry_until 60 "daemon_ready '$B'" || fail "srv-b daemon not responding"
 on "$B" 'ray up --hostname srv-b' >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
-step "8. blocking a paired user also refuses their other device"
+step "11. blocking a paired user also refuses their other device"
 TICKET="$(on "$C" 'ray pair' | strip | awk -F': ' '/Pairing ticket/{print $2}' | tr -d ' ')"
 PAIRED=""
 for _ in 1 2 3 4 5; do
