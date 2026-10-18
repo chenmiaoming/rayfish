@@ -501,7 +501,10 @@ async fn pairing_again_cancels_the_unpair_request() {
     let mut device = Node::new(&relay).await;
     primary.start().await;
     device.start().await;
-    let cert = paired(&primary, &device).await;
+    // The primary coordinates no network the device is on, so nothing links the
+    // two before the device pairs again: the request cannot reach the primary
+    // while lookups fail, and the pairing shares no network to join.
+    let cert = hold_certificate(&device, &primary.key).await;
     relay.fail.store(true, Ordering::Relaxed);
     let result = device.unpair_self().await;
     assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
@@ -524,6 +527,10 @@ async fn pairing_again_cancels_the_unpair_request() {
     assert!(!revoked(&primary.settings().await, device.id()));
 
     // As a restart between saving the certificate and cancelling leaves it.
+    // That restart also loses the confirmation, after which the primary would
+    // revoke on the request, so the device cancels it without asking: the
+    // primary is away here, and an attempt that asked would keep it.
+    primary.stop().await;
     let saved = waiting(&cert);
     device
         .run(async move {
