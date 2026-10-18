@@ -126,7 +126,7 @@ pub enum RayError {
     /// A backup code would not decode, or the password was wrong. The two are
     /// one case: the AEAD cannot tell them apart, so neither can the message.
     #[error("wrong password, or the backup is damaged")]
-    BadBackup(String),
+    BadBackup,
     /// [`Node::restore_identity`] found an identity already on the device and
     /// was not told to replace it. Carries the existing public key so the UI can
     /// name what it is about to overwrite. Not a failure on its own: the caller
@@ -145,7 +145,13 @@ pub enum RayError {
 /// Swift), which is not something to show a person.
 #[uniffi::export]
 pub fn error_message(error: RayError) -> String {
-    error.to_string()
+    // Sentence case for the screen; the core's own errors start lowercase.
+    let text = error.to_string();
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
 }
 
 impl RayError {
@@ -902,11 +908,16 @@ impl Node {
     /// hostname, or `phone` when nothing usable is left. No-op once a name is
     /// set.
     pub fn seed_default_hostname(&self, model: String) -> Result<(), RayError> {
-        if !self.default_hostname().is_empty() {
-            return Ok(());
-        }
         let name = hostname::mesh_form(&model).unwrap_or_else(|| "phone".to_string());
-        self.set_default_hostname(name)
+        // One read-modify-write, so a rename landing at the same time wins.
+        config::update_settings(|cfg| {
+            if cfg.default_hostname.as_deref().is_none_or(str::is_empty) {
+                cfg.default_hostname = Some(name);
+            }
+            Ok(())
+        })
+        .map_err(RayError::network)?;
+        Ok(())
     }
 
     /// Saved engine selection. Available before the node starts.
@@ -1425,8 +1436,8 @@ impl Node {
             return Err(RayError::NodeRunning);
         }
 
-        let backup = keybackup::decrypt_backup(&code, &password)
-            .map_err(|e| RayError::BadBackup(e.to_string()))?;
+        let backup =
+            keybackup::decrypt_backup(&code, &password).map_err(|_| RayError::BadBackup)?;
         let restored = backup.secret_key.public().to_string();
 
         // Deliberately not `load_or_create`: on a device with no identity yet
@@ -1765,6 +1776,15 @@ static CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod device_name_tests {
     use super::*;
+
+    #[test]
+    fn error_message_is_sentence_case() {
+        assert_eq!(
+            error_message(RayError::BadBackup),
+            "Wrong password, or the backup is damaged"
+        );
+        assert_eq!(error_message(RayError::Network(String::new())), "");
+    }
 
     #[test]
     fn set_default_hostname_persists_and_rejects_invalid() {

@@ -33,6 +33,10 @@ enum Telemetry {
             options.enableAutoPerformanceTracing = false
             options.enableAppHangTracking = false
             options.enableSwizzling = false
+            options.initialScope = { scope in
+                scope.setTag(value: Preferences.installId, key: "install_id")
+                return scope
+            }
         }
     }
 
@@ -48,35 +52,32 @@ enum Telemetry {
         guard SentrySDK.isEnabled, failureThrottle.allow() else { return }
         let logs = node.logSnapshot()
         SentrySDK.capture(error: error) { scope in
-            scope.setTag(value: Preferences.installId, key: "install_id")
             // The Swift error says the start failed; the core's log says why.
-            if !logs.isEmpty {
-                scope.addAttachment(Attachment(data: Data(logs.utf8), filename: "rayfish-logs.txt",
-                                               contentType: "text/plain"))
-            }
+            attach(logs, to: scope)
         }
     }
 
-    /// The core's log and health as one report. Returns the event id, or nil
-    /// when reporting is off.
-    static func sendDiagnostics(node: Node) -> String? {
-        guard SentrySDK.isEnabled else { return nil }
+    /// The core's log and health as one report. False when reporting is off.
+    static func sendDiagnostics(node: Node) -> Bool {
+        guard SentrySDK.isEnabled else { return false }
         let logs = node.logSnapshot()
         let health = node.healthSnapshot()
-        let id = SentrySDK.capture(message: "rayfish diagnostics") { scope in
+        SentrySDK.capture(message: "rayfish diagnostics") { scope in
             scope.setLevel(.info)
-            scope.setTag(value: Preferences.installId, key: "install_id")
             scope.setContext(value: [
                 "running": health.running,
                 "networks": health.networkCount,
                 "peers_online": health.peersOnline,
             ], key: "rayfish")
-            if !logs.isEmpty {
-                scope.addAttachment(Attachment(data: Data(logs.utf8), filename: "rayfish-logs.txt",
-                                               contentType: "text/plain"))
-            }
+            attach(logs, to: scope)
         }
-        return id.sentryIdString
+        return true
+    }
+
+    private static func attach(_ logs: String, to scope: Scope) {
+        guard !logs.isEmpty else { return }
+        scope.addAttachment(Attachment(data: Data(logs.utf8), filename: "rayfish-logs.txt",
+                                       contentType: "text/plain"))
     }
 
     private static let failureThrottle = Throttle(interval: 30 * 60)

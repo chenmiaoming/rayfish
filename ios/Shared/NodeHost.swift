@@ -101,7 +101,7 @@ final class NodeHost: @unchecked Sendable {
             Preferences.crashReporting = on
             Telemetry.apply()
         case .sendDiagnostics:
-            guard Telemetry.sendDiagnostics(node: node) != nil else { throw DiagnosticsError.unavailable }
+            guard Telemetry.sendDiagnostics(node: node) else { throw DiagnosticsError.unavailable }
             return Reply(message: "Diagnostics sent")
         }
         return Reply(snapshot: snapshot())

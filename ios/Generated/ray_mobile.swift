@@ -3962,8 +3962,7 @@ public enum RayError: Swift.Error {
      * A backup code would not decode, or the password was wrong. The two are
      * one case: the AEAD cannot tell them apart, so neither can the message.
      */
-    case BadBackup(String
-    )
+    case BadBackup
     /**
      * [`Node::restore_identity`] found an identity already on the device and
      * was not told to replace it. Carries the existing public key so the UI can
@@ -4007,9 +4006,7 @@ public struct FfiConverterTypeRayError: FfiConverterRustBuffer {
         case 5: return .Network(
             try FfiConverterString.read(from: &buf)
             )
-        case 6: return .BadBackup(
-            try FfiConverterString.read(from: &buf)
-            )
+        case 6: return .BadBackup
         case 7: return .IdentityExists(
             try FfiConverterString.read(from: &buf)
             )
@@ -4050,9 +4047,8 @@ public struct FfiConverterTypeRayError: FfiConverterRustBuffer {
             FfiConverterString.write(v1, into: &buf)
 
 
-        case let .BadBackup(v1):
+        case .BadBackup:
             writeInt(&buf, Int32(6))
-            FfiConverterString.write(v1, into: &buf)
 
 
         case let .IdentityExists(v1):

@@ -85,16 +85,6 @@ extension PeerInfo: Identifiable {
     var displayName: String { hostname.isEmpty ? String(nodeId.prefix(8)) : hostname }
 }
 
-extension PeerConnState {
-    var label: String {
-        switch self {
-        case .active: "active"
-        case .idle: "idle"
-        case .offline: "offline"
-        }
-    }
-}
-
 extension FileOffer: Identifiable {}
 extension QueuedSend: Identifiable {}
 

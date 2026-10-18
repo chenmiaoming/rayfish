@@ -4941,11 +4941,9 @@ sealed class RayException : kotlin.Exception() {
      * A backup code would not decode, or the password was wrong. The two are
      * one case: the AEAD cannot tell them apart, so neither can the message.
      */
-    class BadBackup(
-        val v1: kotlin.String,
-    ) : RayException() {
+    class BadBackup : RayException() {
         override val message
-            get() = "v1=${ v1 }"
+            get() = ""
     }
 
     /**
@@ -5011,9 +5009,7 @@ public object FfiConverterTypeRayError : FfiConverterRustBuffer<RayException> {
             }
 
             6 -> {
-                RayException.BadBackup(
-                    FfiConverterString.read(buf),
-                )
+                RayException.BadBackup()
             }
 
             7 -> {
@@ -5064,8 +5060,7 @@ public object FfiConverterTypeRayError : FfiConverterRustBuffer<RayException> {
 
             is RayException.BadBackup -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL +
-                    FfiConverterString.allocationSize(value.v1)
+                4UL
             )
 
             is RayException.IdentityExists -> (
@@ -5116,7 +5111,6 @@ public object FfiConverterTypeRayError : FfiConverterRustBuffer<RayException> {
 
             is RayException.BadBackup -> {
                 buf.putInt(6)
-                FfiConverterString.write(value.v1, buf)
                 Unit
             }
 

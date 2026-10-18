@@ -77,8 +77,7 @@ enum AppGroupError: LocalizedError {
 /// The core's error message, capitalized to stand alone in a toast.
 func userMessage(_ error: Error) -> String {
     guard let error = error as? RayError else { return error.localizedDescription }
-    let text = errorMessage(error: error)
-    return text.prefix(1).uppercased() + text.dropFirst()
+    return errorMessage(error: error)
 }
 
 func formatSize(_ bytes: UInt64) -> String {

@@ -28,7 +28,7 @@ struct SendFilesSheet: View {
                             Dot(color: peer.state.color)
                             VStack(alignment: .leading, spacing: 2) {
                                 RowTitle(peer.displayName)
-                                RowSubtitle("\(peer.nodeId.prefix(8)) · \(peer.state.label)")
+                                RowSubtitle("\(peer.nodeId.prefix(8)) · \(peer.state)")
                             }
                         }
                     }
