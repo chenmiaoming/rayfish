@@ -13,6 +13,7 @@ use std::future::Future;
 use std::hash::Hash;
 
 use iroh::endpoint::{ConnectionError, SendStream};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::*;
@@ -66,10 +67,35 @@ impl NackGate {
 /// [`Self::LANE_DEPTH`] items; a push to a full lane waits, which holds the
 /// caller back the way handling each item inline did.
 struct SerialLanes<K, T, R> {
-    lanes: HashMap<K, mpsc::Sender<T>>,
+    lanes: HashMap<K, mpsc::Sender<Queued<T>>>,
     workers: JoinSet<()>,
     /// Handles one item; each lane's worker keeps its own clone.
     run: R,
+    /// Items queued or running across every lane.
+    pending: Arc<watch::Sender<usize>>,
+}
+
+/// An item waiting in, or running from, a lane.
+struct Queued<T> {
+    item: T,
+    _pending: Pending,
+}
+
+/// Counts one item in [`SerialLanes::pending`] until dropped, whether the item
+/// ran or its lane went away with it still queued.
+struct Pending(Arc<watch::Sender<usize>>);
+
+impl Pending {
+    fn new(count: &Arc<watch::Sender<usize>>) -> Self {
+        count.send_modify(|n| *n += 1);
+        Self(Arc::clone(count))
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n -= 1);
+    }
 }
 
 impl<K, T, R> SerialLanes<K, T, R> {
@@ -80,7 +106,13 @@ impl<K, T, R> SerialLanes<K, T, R> {
             lanes: HashMap::new(),
             workers: JoinSet::new(),
             run,
+            pending: Arc::new(watch::channel(0).0),
         }
+    }
+
+    /// The number of items queued or running, for waiting until it is zero.
+    fn pending(&self) -> watch::Receiver<usize> {
+        self.pending.subscribe()
     }
 
     /// Stop taking items and wait until every queued one has run.
@@ -105,6 +137,10 @@ where
 {
     /// Queue `item` behind the earlier items under `key`.
     async fn push(&mut self, key: K, item: T) {
+        let item = Queued {
+            item,
+            _pending: Pending::new(&self.pending),
+        };
         let item = match self.lanes.get(&key) {
             Some(lane) => match lane.send(item).await {
                 Ok(()) => return,
@@ -119,7 +155,7 @@ where
         let _ = lane.try_send(item);
         let run = self.run.clone();
         self.workers.spawn(async move {
-            while let Some(item) = queue.recv().await {
+            while let Some(Queued { item, _pending }) = queue.recv().await {
                 run(item).await;
             }
         });
@@ -139,7 +175,7 @@ async fn drain_lanes<R>(
 
 /// One network-scoped control frame, queued on its network's lane.
 struct LaneFrame {
-    handler: AcceptHandler,
+    net: EndpointId,
     send: SendStream,
     msg: ControlMsg,
 }
@@ -224,12 +260,26 @@ impl MeshConnection {
         let mut lanes = SerialLanes::new({
             let conn = self.conn.clone();
             let peers = self.ctx.peers.clone();
+            let manager = Arc::clone(&self.manager);
             let peer_id = self.peer_id;
             move |frame: LaneFrame| {
                 let conn = conn.clone();
                 let peers = peers.clone();
+                let manager = Arc::clone(&manager);
                 let registered_tx = registered_tx.clone();
                 async move {
+                    // Look the handler up now, not when the frame arrived: while
+                    // it waited, the network may have been left, or a finished
+                    // join may have replaced the member handler with a
+                    // coordinator's.
+                    let Some(handler) = manager.handler_for(&frame.net) else {
+                        tracing::debug!(
+                            peer = %peer_id.fmt_short(),
+                            net = %frame.net.fmt_short(),
+                            "network gone before its queued control frame ran; dropping"
+                        );
+                        return;
+                    };
                     // The reachability wall for the control plane, mirroring
                     // what `resolve_inbound_by_id` does for datagrams: a frame
                     // is dispatched to a network's handler on the strength of
@@ -242,10 +292,10 @@ impl MeshConnection {
                     // left it, as it did when frames ran inline. Lanes belong
                     // to this connection, so a stranger's queued frames only
                     // ever wait behind its own.
-                    if !stranger_may_send(&frame.msg) && !frame.handler.knows_sender(peer_id) {
+                    if !stranger_may_send(&frame.msg) && !handler.knows_sender(peer_id) {
                         tracing::debug!(
                             peer = %peer_id.fmt_short(),
-                            network = %frame.handler.network_name(),
+                            network = %handler.network_name(),
                             "control frame from a peer this network's roster does not list; ignoring"
                         );
                         return;
@@ -253,8 +303,7 @@ impl MeshConnection {
                     // `handle_frame` registers the peer (route) as a side effect
                     // and returns its mesh address once it is a member on this
                     // network.
-                    let Some(peer_ip) = frame
-                        .handler
+                    let Some(peer_ip) = handler
                         .handle_frame(&conn, frame.send, peer_id, frame.msg)
                         .await
                     else {
@@ -272,6 +321,7 @@ impl MeshConnection {
                 }
             }
         });
+        let mut lanes_pending = lanes.pending();
 
         loop {
             // On-demand idle teardown. Armed only when we run on-demand *and* the
@@ -322,7 +372,13 @@ impl MeshConnection {
                 // bumped activity while we slept, in which case we re-arm.
                 _ = async {
                     match sleep_for {
-                        Some(d) => tokio::time::sleep(d).await,
+                        Some(d) => {
+                            tokio::time::sleep(d).await;
+                            // A frame still queued or running (an admission
+                            // mid-roster-write) holds the close off until it is
+                            // done, as it did when frames ran inline.
+                            let _ = lanes_pending.wait_for(|pending| *pending == 0).await;
+                        }
                         None => std::future::pending::<()>().await,
                     }
                 } => {
@@ -479,7 +535,7 @@ impl MeshConnection {
             let Some(net_pubkey) = frame.net else {
                 continue;
             };
-            let Some(handler) = self.manager.handler_for(&net_pubkey) else {
+            if self.manager.handler_for(&net_pubkey).is_none() {
                 tracing::debug!(peer = %self.peer_id.fmt_short(), net = %net_pubkey.fmt_short(), "control frame for unknown network; ignoring");
                 // A peer talking to us about a network we have saved but never
                 // registered means our restore of it is still owed: the network
@@ -489,13 +545,13 @@ impl MeshConnection {
                 // the peer's own reconnect loop will be back.
                 self.ctx.registry.nudge_restore();
                 continue;
-            };
+            }
             drop(recv); // one message per stream; the reply rides `send`
             lanes
                 .push(
                     net_pubkey,
                     LaneFrame {
-                        handler,
+                        net: net_pubkey,
                         send,
                         msg: frame.msg,
                     },
@@ -655,6 +711,41 @@ mod tests {
         gate.notify_one();
         assert_eq!(next(&mut log).await, "a1");
         assert_eq!(next(&mut log).await, "a2");
+        lanes.finish().await;
+    }
+
+    /// The pending count covers queued and running items, so the idle close
+    /// can wait for a frame that is still being handled.
+    #[tokio::test]
+    async fn serial_lanes_count_pending_items_until_they_finish() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let run = {
+            let gate = Arc::clone(&gate);
+            move |wait: bool| {
+                let gate = Arc::clone(&gate);
+                async move {
+                    if wait {
+                        gate.notified().await;
+                    }
+                }
+            }
+        };
+        let mut lanes = SerialLanes::new(run);
+        let mut pending = lanes.pending();
+        lanes.push("a", true).await;
+        lanes.push("a", false).await;
+        assert_eq!(*pending.borrow(), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), pending.wait_for(|n| *n == 0))
+                .await
+                .is_err(),
+            "a running item keeps the lanes busy"
+        );
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), pending.wait_for(|n| *n == 0))
+            .await
+            .expect("the lanes go idle")
+            .expect("lanes alive");
         lanes.finish().await;
     }
 

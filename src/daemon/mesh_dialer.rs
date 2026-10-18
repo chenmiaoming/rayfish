@@ -81,13 +81,10 @@ impl MeshDialer {
         peers: &PeerTable,
         peer: EndpointId,
     ) -> Result<DialedPeer> {
-        if let Some(conn) = peers
-            .conn_for_ip(&derive_ipv6(&peer))
-            .filter(|conn| conn.close_reason().is_none())
-        {
-            return Ok(DialedPeer { conn, claim: None });
-        }
-        let dial = self.inflight_dial(peer);
+        let dial = match self.inflight_dial(peers, peer) {
+            Joined::Registered(conn) => return Ok(DialedPeer { conn, claim: None }),
+            Joined::Dial(dial) => dial,
+        };
         // If the caller running the dial is cancelled, the next waiter runs its
         // own copy of this future, so a dropped join cannot strand the others.
         let outcome = dial
@@ -119,21 +116,43 @@ impl MeshDialer {
         }
     }
 
-    /// The dial to join for `peer`: the one in flight or still claimed, unless
-    /// it failed or its connection closed, in which case a fresh one replaces
-    /// it. The map guard is released before anything awaits.
-    fn inflight_dial(&self, peer: EndpointId) -> Arc<InflightDial> {
+    /// What to use for `peer`: its registered connection, else the dial in
+    /// flight or still claimed, unless it failed or its connection closed, in
+    /// which case a fresh one replaces it. The map guard is released before
+    /// anything awaits.
+    fn inflight_dial(&self, peers: &PeerTable, peer: EndpointId) -> Joined {
+        let registered = || {
+            peers
+                .conn_for_ip(&derive_ipv6(&peer))
+                .filter(|conn| conn.close_reason().is_none())
+        };
+        if let Some(conn) = registered() {
+            return Joined::Registered(conn);
+        }
         // Drop the entries nobody holds any more, so the map tracks dials in
         // use rather than every peer this daemon has ever dialed.
         self.inflight.retain(|_, dial| dial.strong_count() > 0);
         let mut slot = self.inflight.entry(peer).or_default();
         if let Some(dial) = slot.upgrade().filter(|dial| !dial.is_spent()) {
-            return dial;
+            return Joined::Dial(dial);
+        }
+        // Another caller may have registered the shared connection and
+        // dropped its claim since the check above. Its claim kept the
+        // connection findable until then, so look in the table once more
+        // before dialing again.
+        if let Some(conn) = registered() {
+            return Joined::Registered(conn);
         }
         let dial = Arc::new(InflightDial::default());
         *slot = Arc::downgrade(&dial);
-        dial
+        Joined::Dial(dial)
     }
+}
+
+/// Where [`MeshDialer::inflight_dial`] sends a caller.
+enum Joined {
+    Registered(Connection),
+    Dial(Arc<InflightDial>),
 }
 
 #[cfg(test)]
@@ -217,9 +236,43 @@ mod tests {
     fn released_dials_are_pruned() {
         let id = |seed| SecretKey::from_bytes(&[seed; 32]).public();
         let dialer = MeshDialer::default();
-        drop(dialer.inflight_dial(id(1)));
-        let _held = dialer.inflight_dial(id(2));
+        let peers = PeerTable::new();
+        drop(dialer.inflight_dial(&peers, id(1)));
+        let _held = dialer.inflight_dial(&peers, id(2));
         assert_eq!(dialer.inflight.len(), 1);
+    }
+
+    /// Once a caller has registered the dialed connection and dropped its
+    /// claim, the next lookup finds it in the table instead of starting a
+    /// second dial.
+    #[tokio::test]
+    async fn registered_after_claim_dropped_is_not_redialed() {
+        let (client, server) = client_and_server().await;
+        let accept = tokio::spawn({
+            let server = server.clone();
+            async move { server.accept().await.expect("incoming").await }
+        });
+        let dialer = MeshDialer::default();
+        let peers = PeerTable::new();
+        let dialed = dialer
+            .connect(&client, &peers, server.id())
+            .await
+            .expect("the dial reaches the loopback peer");
+        let _accepted = accept.await.expect("accept task").expect("accept");
+        peers.add(
+            derive_ipv6(&server.id()),
+            dialed.conn.clone(),
+            server.id(),
+            "net",
+        );
+        drop(dialed.claim);
+
+        match dialer.inflight_dial(&peers, server.id()) {
+            Joined::Registered(conn) => assert_eq!(conn.stable_id(), dialed.conn.stable_id()),
+            Joined::Dial(_) => panic!("a registered peer must not be dialed again"),
+        }
+        client.close().await;
+        server.close().await;
     }
 
     /// A registered connection wins over dialing, and carries no claim.
