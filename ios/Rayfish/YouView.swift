@@ -190,7 +190,6 @@ struct YouView: View {
         savingKeychain = true
         defer { savingKeychain = false }
         do {
-            try await IdentityKeychain.authenticate("Save your Rayfish identity to iCloud Keychain")
             let node = model.tunnel.local.node
             let name = snapshot.deviceName.isEmpty ? UIDevice.current.model : snapshot.deviceName
             try await Task.detached { try IdentityKeychain.save(node: node, deviceName: name) }.value
@@ -407,7 +406,7 @@ enum IdentityRestore {
     }
 }
 
-/// Backups found in iCloud Keychain, restored after Face ID.
+/// Backups found in iCloud Keychain.
 struct KeychainRestoreCard: View {
     @EnvironmentObject private var model: AppModel
     var backups: [KeychainBackup]
@@ -442,12 +441,6 @@ struct KeychainRestoreCard: View {
     }
 
     private func restore(_ backup: KeychainBackup, replace: Bool) async {
-        do {
-            try await IdentityKeychain.authenticate("Restore your Rayfish identity from iCloud Keychain")
-        } catch {
-            model.toast = userMessage(error)
-            return
-        }
         switch await IdentityRestore.run(model: model, code: backup.code, password: backup.password, replace: replace) {
         case .restored: onRestored()
         case .exists: replacing = backup

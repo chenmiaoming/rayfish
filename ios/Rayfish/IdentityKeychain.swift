@@ -1,14 +1,9 @@
 import Foundation
-import LocalAuthentication
 import Security
 
 /// An identity backup kept in iCloud Keychain, which syncs it end to end
 /// encrypted to the user's other Apple devices. The identity is sealed with a
 /// random password stored next to it, so the item alone restores it.
-///
-/// Face ID guards saving and restoring in the app. It cannot be bound to the
-/// item itself: iOS only enforces biometric access control on items that never
-/// leave the device, which would defeat moving to a new phone.
 struct KeychainBackup: Codable, Identifiable {
     var code: String
     var password: String
@@ -71,14 +66,6 @@ enum IdentityKeychain {
         ]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status) }
-    }
-
-    /// Face ID, Touch ID or the passcode. The simulator usually has none set
-    /// up, so it skips the check there.
-    static func authenticate(_ reason: String) async throws {
-        #if !targetEnvironment(simulator)
-        try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
-        #endif
     }
 
     private static func randomPassword() throws -> String {
