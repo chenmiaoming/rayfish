@@ -4,16 +4,20 @@ import Sentry
 /// Sentry crash reporting, gated by the user's opt-out toggle in the You tab.
 ///
 /// The app and the tunnel each run their own client. Both read the toggle from
-/// the app group: the tunnel at start, and again when the app forwards a
-/// change with `Command.reloadTelemetry`.
+/// the app group: the tunnel at start, when it is ready, before each report,
+/// and when the app forwards a change with `Command.reloadTelemetry`.
 enum Telemetry {
-    /// Start or stop the client to match the toggle.
+    /// Start or stop the client to match the toggle. Runs on the main thread:
+    /// a start from any other thread installs the client later, so
+    /// `isEnabled` would read false in between and two quick toggles could
+    /// start it twice or skip the close.
     static func apply() {
+        guard Thread.isMainThread else { return DispatchQueue.main.sync { apply() } }
         if Preferences.crashReporting { enable() } else { disable() }
     }
 
     /// No-op when the build carries no DSN.
-    static func enable() {
+    private static func enable() {
         guard !SentrySDK.isEnabled, let dsn = info("RayfishSentryDSN"), !dsn.isEmpty else { return }
         SentrySDK.start { options in
             options.dsn = dsn
@@ -40,7 +44,7 @@ enum Telemetry {
         }
     }
 
-    static func disable() {
+    private static func disable() {
         guard SentrySDK.isEnabled else { return }
         SentrySDK.close()
     }
@@ -51,6 +55,8 @@ enum Telemetry {
     /// each retry is a new tunnel process, so the last report time is kept in
     /// the app group.
     static func captureStartFailure(_ error: Error, node: Node) {
+        // Re-read the toggle: it may have changed while the tunnel was starting.
+        apply()
         guard SentrySDK.isEnabled else { return }
         let now = Date().timeIntervalSince1970
         let key = "lastStartFailureReport"
@@ -65,6 +71,7 @@ enum Telemetry {
 
     /// The core's log and health as one report. False when reporting is off.
     static func sendDiagnostics(node: Node) -> Bool {
+        apply()
         guard SentrySDK.isEnabled else { return false }
         let logs = node.logSnapshot()
         let health = node.healthSnapshot()

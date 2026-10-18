@@ -56,6 +56,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     host.onReceived = { [notifier] name in notifier.received(name) }
                     watchFiles(host)
                     watchPath()
+                    // A toggle changed while starting went to the app's own node.
+                    Telemetry.apply()
                     RayfishLog.tunnel.info("Tunnel is ready")
                     completionHandler(nil)
                 }
