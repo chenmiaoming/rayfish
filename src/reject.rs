@@ -56,10 +56,6 @@ pub fn build_reject(packet: &[u8], info: &PacketInfo) -> Option<Bytes> {
         return None;
     }
     if info.protocol == PROTO_TCP {
-        // A RST needs no RST in return; that would ping-pong forever.
-        if info.tcp_flags & TCP_RST != 0 {
-            return None;
-        }
         build_tcp_rst(packet, info)
     } else {
         build_icmp_unreachable(packet, info)
@@ -130,8 +126,15 @@ fn is_icmp_error(info: &PacketInfo) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Build an IP + TCP RST segment per RFC 793's reset generation rules. The reply
-/// addresses/ports are the original's, swapped.
-fn build_tcp_rst(packet: &[u8], info: &PacketInfo) -> Option<Bytes> {
+/// addresses/ports are the original's, swapped. An incoming RST gets `None`: a
+/// RST needs no RST in return, that would ping-pong forever.
+///
+/// The Magic DNS resolver uses this too, to refuse DNS over TCP at once instead
+/// of leaving the client to wait out its connect timeout.
+pub(crate) fn build_tcp_rst(packet: &[u8], info: &PacketInfo) -> Option<Bytes> {
+    if info.tcp_flags & TCP_RST != 0 {
+        return None;
+    }
     // IPv6 extension headers sit between the fixed header and TCP; the parser
     // recorded where TCP really starts.
     let ihl = info.transport_offset;

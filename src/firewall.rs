@@ -83,9 +83,12 @@ use tokio_util::sync::CancellationToken;
 
 mod packet;
 
+pub use packet::{
+    FragmentKey, IPV6_EXTENSION_HEADERS, Ipv6Fragment, PacketInfo, is_link_scoped_v6,
+    parse_ipv6_fragment, parse_packet_info,
+};
 #[cfg(test)]
 pub(crate) use packet::{IPV6_AH, IPV6_FRAGMENT};
-pub use packet::{IPV6_EXTENSION_HEADERS, PacketInfo, parse_packet_info};
 
 // Direction / Protocol / Action live in `ray-proto` so the IPC layer carries them
 // typed (not stringified); re-exported here so the daemon keeps its original
@@ -1228,15 +1231,15 @@ mod tests {
         );
     }
 
-    /// Every fragment is refused, whichever end of the datagram it is.
+    /// Every fragment is refused as a whole packet, whichever end of the
+    /// datagram it is.
     ///
     /// The later ones have to be: they carry no L4 header, so keying them meant
     /// inventing `(44, 0, 0)`, which is the wildcard this whole walk exists to
-    /// stop. The first one is refused for a different reason. It *can* be
-    /// classified, but the only thing that buys is permission to forward one
-    /// fragment of a datagram whose remaining fragments are dropped: the peer
-    /// holds an incomplete reassembly until it times out, and outbound we would
-    /// have opened a conntrack entry for a datagram that can never complete.
+    /// stop. The first one could be classified, but on its own it only buys
+    /// permission to forward one fragment of a datagram whose siblings are
+    /// dropped. Fragments take their own path instead (`parse_ipv6_fragment`,
+    /// then `forward::frag_verdicts`), where the first decides for the rest.
     #[test]
     fn every_fragment_of_a_datagram_is_refused() {
         // Fragment header (8 octets), then TCP at 48. Offset 0, more-fragments

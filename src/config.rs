@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs::Permissions;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+use std::fs::{self, File};
+#[cfg(any(target_os = "linux", all(test, unix)))]
+use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
@@ -45,6 +49,31 @@ impl DnsMode {
     pub fn short_names(self) -> bool {
         self == Self::On
     }
+}
+
+/// Who may reach this node on the connect channel (`ray connect` requests and
+/// invitations). "Known" means sharing a network with this node.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::AsRefStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum InboundPolicy {
+    #[default]
+    Anyone,
+    Known,
+    #[serde(rename = "none")]
+    #[strum(serialize = "none")]
+    Nobody,
 }
 
 /// Packet forwarding engine, selected when the endpoint binds. Both engines
@@ -394,22 +423,23 @@ pub fn discovery_urls(o: &ServerOverride) -> Result<Vec<String>> {
 /// captured ones. When present, Tailscale's Magic DNS resolver is preferred over
 /// every other upstream. Unset returns the captured set unchanged.
 ///
-/// Captured resolvers are IPv4 because that is what the desktop OS backends
-/// expose. Configured IPv6 addresses are retained so an overlay peer running a
-/// resolver can receive ordinary DNS queries over the mesh.
-pub fn resolve_upstreams(o: &ServerOverride, captured: Vec<Ipv4Addr>) -> Vec<IpAddr> {
+/// Both families: configured IPv6 addresses are retained so an overlay peer
+/// running a resolver can receive ordinary DNS queries over the mesh, and a
+/// host's own IPv6 servers are captured like its IPv4 ones. A captured server
+/// the operator also named is listed once.
+pub fn resolve_upstreams(o: &ServerOverride, captured: Vec<IpAddr>) -> Vec<IpAddr> {
     let upstreams = if o.servers.is_empty() {
-        captured.into_iter().map(IpAddr::V4).collect()
+        captured
     } else {
-        let custom: Vec<IpAddr> = o.servers.iter().filter_map(|s| s.parse().ok()).collect();
-        if o.replace {
-            custom
-        } else {
-            custom
-                .into_iter()
-                .chain(captured.into_iter().map(IpAddr::V4))
-                .collect()
+        let mut custom: Vec<IpAddr> = o.servers.iter().filter_map(|s| s.parse().ok()).collect();
+        if !o.replace {
+            for ip in captured {
+                if !custom.contains(&ip) {
+                    custom.push(ip);
+                }
+            }
         }
+        custom
     };
     prefer_tailscale_dns(upstreams)
 }
@@ -577,12 +607,6 @@ pub struct AppConfig {
     /// back to a random generated name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_hostname: Option<String>,
-    /// Per-user "contact key" used by `ray connect`: a standing, rotatable
-    /// identity (distinct from the transport key and per-network keys) published
-    /// to pkarr so others can request a direct connection without a room id or
-    /// invite code. Lazily generated on first use via [`contact_secret`].
-    #[serde(default, with = "option_secret_key_hex")]
-    pub contact_secret_key: Option<SecretKey>,
     /// Custom iroh transport relay servers (NAT-traversal fallback).
     #[serde(default)]
     pub relay: ServerOverride,
@@ -666,6 +690,12 @@ pub struct AppConfig {
     /// Exact device identities allowed to send files without approval.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_auto_accept_peers: Vec<EndpointId>,
+    /// Who may send connect requests and invitations.
+    #[serde(default)]
+    pub inbound: InboundPolicy,
+    /// Refused on the connect channel. Shared networks are unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<EndpointId>,
     /// Absolute directory where auto-accepted files are written.
     /// `None` falls back to `download_user`, then the operator's ~/Downloads.
     /// Set via `ray files download-dir <path>`.
@@ -712,7 +742,6 @@ impl Default for AppConfig {
             mdns_enabled: true,
             operator_uid: None,
             default_hostname: None,
-            contact_secret_key: None,
             relay: ServerOverride::default(),
             discovery_dns: ServerOverride::default(),
             dns_upstreams: ServerOverride::default(),
@@ -729,6 +758,8 @@ impl Default for AppConfig {
             auto_update_last_target: None,
             auto_update_last_attempt: None,
             file_auto_accept_peers: Vec::new(),
+            inbound: InboundPolicy::default(),
+            blocked: Vec::new(),
             download_dir: None,
             download_user: None,
             networks: Vec::new(),
@@ -751,18 +782,6 @@ impl AppConfig {
     }
 }
 
-/// Return this node's contact key, generating and persisting it on first use.
-/// The caller is responsible for `save`-ing the config afterwards (the returned
-/// secret is also written into `config.contact_secret_key`).
-pub fn contact_secret(config: &mut AppConfig) -> SecretKey {
-    if let Some(k) = &config.contact_secret_key {
-        return k.clone();
-    }
-    let secret = SecretKey::generate();
-    config.contact_secret_key = Some(secret.clone());
-    secret
-}
-
 /// Parse the persisted revoked device keys (`revoked_devices`) into
 /// `EndpointId`s, skipping any malformed entry.
 pub fn revoked_device_ids(config: &AppConfig) -> Vec<EndpointId> {
@@ -773,21 +792,12 @@ pub fn revoked_device_ids(config: &AppConfig) -> Vec<EndpointId> {
         .collect()
 }
 
-/// Rotate this node's contact key, replacing it with a fresh one. The old
-/// contact id stops resolving once its pkarr record TTLs out. The caller must
-/// `save` the config afterwards.
-pub fn rotate_contact_secret(config: &mut AppConfig) -> SecretKey {
-    let secret = SecretKey::generate();
-    config.contact_secret_key = Some(secret.clone());
-    secret
-}
-
 // ---- Storage layout -------------------------------------------------------
 //
 // Config is sharded so a write to one network can never clobber another:
 //
 //   <config_dir>/settings.toml          globals (mdns, operator, default
-//                                        hostname, contact key), secret-bearing
+//                                        hostname), owner-only
 //   <config_dir>/networks/<name>.toml   one NetworkConfig each, secret-bearing
 //
 // All writes go through `write_atomic` (temp file in the same dir + rename), so
@@ -855,8 +865,6 @@ struct Settings {
     operator_uid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_hostname: Option<String>,
-    #[serde(default, with = "option_secret_key_hex")]
-    contact_secret_key: Option<SecretKey>,
     #[serde(default)]
     relay: ServerOverride,
     #[serde(default)]
@@ -899,6 +907,10 @@ struct Settings {
     download_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     file_auto_accept_peers: Vec<EndpointId>,
+    #[serde(default)]
+    inbound: InboundPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    blocked: Vec<EndpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_user: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -953,17 +965,23 @@ fn rayfish_gid() -> Option<u32> {
     }
 }
 
+/// The group a config path is owned by: `rayfish` for a non-secret path when the
+/// group exists, otherwise root.
+#[cfg(target_os = "linux")]
+fn owner_gid(secret: bool) -> u32 {
+    if secret {
+        0
+    } else {
+        rayfish_gid().unwrap_or(0)
+    }
+}
+
 /// Best-effort `chown` to root, with group `rayfish` for non-secret paths (or
 /// root for secret ones). No-op off Linux. Silent on failure so the daemon
 /// still starts if the group is missing.
 #[cfg(target_os = "linux")]
 fn set_owner(path: &Path, secret: bool) {
-    let gid = if secret {
-        Some(0)
-    } else {
-        rayfish_gid().or(Some(0))
-    };
-    if let Err(e) = std::os::unix::fs::chown(path, Some(0), gid) {
+    if let Err(e) = std::os::unix::fs::chown(path, Some(0), Some(owner_gid(secret))) {
         tracing::debug!(path = %path.display(), error = %e, "chown failed (non-fatal)");
     }
 }
@@ -1115,6 +1133,183 @@ pub fn config_dir() -> Result<PathBuf> {
     };
     ensure_dir(&dir)?;
     Ok(dir)
+}
+
+/// Where the daemon keeps its content-addressed blob store: membership
+/// snapshots and file transfers in flight. Created if missing.
+///
+/// On Linux it lives under `/var/lib/rayfish`, not the config tree: transfers
+/// can be large, `/etc` is often on a small or read-only root filesystem, and
+/// the store is state, not configuration. A store left in `/etc/rayfish/blobs`
+/// by an older release is moved on first start. Elsewhere, and whenever
+/// `RAYFISH_CONFIG_DIR` is set, it stays inside the config directory.
+pub fn blobs_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if effective_override().is_none() {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+
+        let old = config_dir()?.join("blobs");
+        let state = Path::new(LINUX_STATE_DIR);
+        let dir = match DirBuilder::new().recursive(true).mode(0o700).create(state) {
+            Ok(()) => migrate_blobs(&old, &state.join("blobs")),
+            Err(error) => {
+                tracing::warn!(dir = LINUX_STATE_DIR, %error, "cannot create the state directory; keeping blobs in the config directory");
+                old
+            }
+        };
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        return Ok(dir);
+    }
+    let dir = config_dir()?.join("blobs");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_STATE_DIR: &str = "/var/lib/rayfish";
+
+/// Move a blob store from `old` to `new` and return the one to use. Across
+/// filesystems (a separate `/var`) the store is copied next to `new`, checked,
+/// and only then renamed into place, so a half-finished copy is never used. On
+/// any failure the old location stays in use.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn migrate_blobs(old: &Path, new: &Path) -> PathBuf {
+    if !old.is_dir() {
+        return new.to_path_buf();
+    }
+    if new.exists() {
+        tracing::warn!(
+            old = %old.display(),
+            new = %new.display(),
+            "both blob store locations exist; using the new one and leaving the old one alone"
+        );
+        return new.to_path_buf();
+    }
+    match std::fs::rename(old, new) {
+        Ok(()) => {
+            tracing::info!(old = %old.display(), new = %new.display(), "moved the blob store");
+            new.to_path_buf()
+        }
+        Err(error) if error.kind() == ErrorKind::CrossesDevices => {
+            match copy_blob_store(old, new) {
+                Ok(()) => {
+                    tracing::info!(old = %old.display(), new = %new.display(), "copied the blob store to the state directory");
+                    if let Err(error) = fs::remove_dir_all(old) {
+                        tracing::warn!(old = %old.display(), %error, "copied the blob store but could not remove the old one");
+                    }
+                    new.to_path_buf()
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        old = %old.display(),
+                        new = %new.display(),
+                        %error,
+                        "could not copy the blob store; it stays where it is"
+                    );
+                    old.to_path_buf()
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                old = %old.display(),
+                new = %new.display(),
+                %error,
+                "could not move the blob store; it stays where it is"
+            );
+            old.to_path_buf()
+        }
+    }
+}
+
+/// Copy the store at `old` to `new`, which must not exist, through a staging
+/// directory beside `new`. Every file and directory is synced and the copy's
+/// file list and sizes are compared with the original before the rename that
+/// makes it visible. `old` is left untouched.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn copy_blob_store(old: &Path, new: &Path) -> io::Result<()> {
+    let parent = new
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "blob store path has no parent"))?;
+    let staging = parent.join(".blobs.migrating");
+    // A leftover from an attempt that was interrupted; never in use.
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    let result = (|| {
+        fs::create_dir(&staging)?;
+        copy_tree(old, &staging)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
+        }
+        File::open(&staging)?.sync_all()?;
+        let mut original = Vec::new();
+        list_tree(old, Path::new(""), &mut original)?;
+        let mut check = Vec::new();
+        list_tree(&staging, Path::new(""), &mut check)?;
+        original.sort();
+        check.sort();
+        if original != check {
+            return Err(io::Error::other(
+                "copied blob store does not match the original",
+            ));
+        }
+        fs::rename(&staging, new)?;
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// One regular file in a blob store, by path relative to the store and size.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+type StoreEntry = (PathBuf, u64);
+
+/// Copy the tree under `from` into the existing directory `to`, syncing each
+/// file and directory.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if kind.is_dir() {
+            fs::create_dir(&dst)?;
+            copy_tree(&src, &dst)?;
+            fs::set_permissions(&dst, fs::metadata(&src)?.permissions())?;
+        } else if kind.is_file() {
+            fs::copy(&src, &dst)?;
+            File::open(&dst)?.sync_all()?;
+        } else {
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                format!("{} is not a file or directory", src.display()),
+            ));
+        }
+    }
+    File::open(to)?.sync_all()
+}
+
+/// Every regular file under `dir`, with its size.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn list_tree(dir: &Path, rel: &Path, out: &mut Vec<StoreEntry>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        let rel = rel.join(entry.file_name());
+        if metadata.is_dir() {
+            list_tree(&entry.path(), &rel, out)?;
+        } else {
+            out.push((rel, metadata.len()));
+        }
+    }
+    Ok(())
 }
 
 /// [`config_dir`] for a reader: same directory, never created.
@@ -1388,6 +1583,33 @@ pub fn load() -> Result<AppConfig> {
     load_in(&dir)
 }
 
+/// The two settings the connect channel checks on every inbound dial.
+#[derive(Debug, Clone, Default)]
+pub struct InboundSettings {
+    pub inbound: InboundPolicy,
+    pub blocked: Vec<EndpointId>,
+}
+
+/// [`InboundSettings`] from `settings.toml` alone. It runs on every inbound
+/// connect dial, strangers included, so it skips the network files and the
+/// legacy migration [`load`] performs.
+pub fn load_inbound() -> Result<InboundSettings> {
+    ensure_not_in_network_update()?;
+    let path = config_dir()?.join(SETTINGS_FILE);
+    let _guard = NETWORK_CONFIG_LOCK
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !path.exists() {
+        return Ok(InboundSettings::default());
+    }
+    let contents = std::fs::read_to_string(&path).context("reading settings.toml")?;
+    let settings: Settings = toml::from_str(&contents).context("parsing settings.toml")?;
+    Ok(InboundSettings {
+        inbound: settings.inbound,
+        blocked: settings.blocked,
+    })
+}
+
 /// [`load`] for a process that only reads the daemon's config (the CLI when the
 /// daemon is down). Creates nothing and runs no migration; a config tree that
 /// isn't there, or isn't readable by this user, reads as an empty config.
@@ -1446,7 +1668,6 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         mdns_enabled: settings.mdns_enabled,
         operator_uid: settings.operator_uid,
         default_hostname: settings.default_hostname,
-        contact_secret_key: settings.contact_secret_key,
         relay: settings.relay,
         discovery_dns: settings.discovery_dns,
         dns_upstreams: settings.dns_upstreams,
@@ -1463,6 +1684,8 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         auto_update_last_target: settings.auto_update_last_target,
         auto_update_last_attempt: settings.auto_update_last_attempt,
         file_auto_accept_peers: settings.file_auto_accept_peers,
+        inbound: settings.inbound,
+        blocked: settings.blocked,
         download_dir: settings.download_dir,
         download_user: settings.download_user,
         networks,
@@ -1512,7 +1735,7 @@ fn update_settings_in(
 fn save_settings_in(dir: &Path, config: &AppConfig) -> Result<()> {
     let path = dir.join(SETTINGS_FILE);
     let contents = settings_toml(config)?;
-    // Secret-bearing: holds the contact key.
+    // Owner-only: it names the operator and trusted peers.
     write_atomic(&path, &contents, true)
 }
 
@@ -1523,7 +1746,6 @@ fn settings_toml(config: &AppConfig) -> Result<String> {
         mdns_enabled: config.mdns_enabled,
         operator_uid: config.operator_uid,
         default_hostname: config.default_hostname.clone(),
-        contact_secret_key: config.contact_secret_key.clone(),
         relay: config.relay.clone(),
         discovery_dns: config.discovery_dns.clone(),
         dns_upstreams: config.dns_upstreams.clone(),
@@ -1540,6 +1762,8 @@ fn settings_toml(config: &AppConfig) -> Result<String> {
         auto_update_last_target: config.auto_update_last_target.clone(),
         auto_update_last_attempt: config.auto_update_last_attempt,
         file_auto_accept_peers: config.file_auto_accept_peers.clone(),
+        inbound: config.inbound,
+        blocked: config.blocked.clone(),
         download_dir: config.download_dir.clone(),
         download_user: config.download_user,
         pending_joins: config.pending_joins.clone(),
@@ -1935,6 +2159,87 @@ pub(crate) static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
 mod tests {
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_moves_to_the_state_directory_once() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        let new = root.path().join("var-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        std::fs::write(old.join("blobs.db"), b"db").expect("seed old store");
+
+        assert_eq!(migrate_blobs(&old, &new), new);
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("moved"), b"db");
+        // Second start: nothing left to move.
+        assert_eq!(migrate_blobs(&old, &new), new);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_migration_never_overwrites_the_new_location() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        let new = root.path().join("var-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        std::fs::create_dir(&new).expect("create new store");
+        assert_eq!(migrate_blobs(&old, &new), new);
+        assert!(old.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_copy_matches_and_replaces_nothing_on_failure() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        std::fs::create_dir_all(old.join("data").join("ab")).expect("create old store");
+        std::fs::write(old.join("blobs.db"), b"db").expect("seed old store");
+        std::fs::write(old.join("data").join("ab").join("blob"), vec![7u8; 70_000])
+            .expect("seed old store");
+        let new = root.path().join("var-blobs");
+
+        copy_blob_store(&old, &new).expect("copy succeeds");
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("copied"), b"db");
+        assert_eq!(
+            std::fs::metadata(new.join("data").join("ab").join("blob"))
+                .expect("copied")
+                .len(),
+            70_000
+        );
+        assert!(
+            old.join("blobs.db").exists(),
+            "the original is left for the caller"
+        );
+        assert!(!root.path().join(".blobs.migrating").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&new)
+                .expect("copied")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+
+        // Copying onto an existing store fails at the rename and leaves it be.
+        std::fs::write(new.join("blobs.db"), b"newer").expect("touch new store");
+        std::fs::write(new.join("extra"), b"x").expect("touch new store");
+        assert!(copy_blob_store(&old, &new).is_err());
+        assert_eq!(std::fs::read(new.join("blobs.db")).expect("kept"), b"newer");
+        assert!(!root.path().join(".blobs.migrating").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_store_stays_put_when_it_cannot_move() {
+        let root = tempfile::tempdir().expect("tempdir is creatable in tests");
+        let old = root.path().join("etc-blobs");
+        std::fs::create_dir(&old).expect("create old store");
+        let new = root.path().join("missing-parent").join("blobs");
+        assert_eq!(migrate_blobs(&old, &new), old);
+        assert!(old.exists());
+    }
     use std::net::Ipv6Addr;
 
     use iroh::EndpointId;
@@ -2363,26 +2668,6 @@ mod tests {
     }
 
     #[test]
-    fn test_contact_secret_generate_and_persist() {
-        let mut config = AppConfig::default();
-        assert!(config.contact_secret_key.is_none());
-        let first = contact_secret(&mut config);
-        // Stable across calls once generated.
-        let second = contact_secret(&mut config);
-        assert_eq!(first.public(), second.public());
-        // Survives a serialize roundtrip.
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(
-            parsed.contact_secret_key.map(|k| k.public()),
-            Some(first.public())
-        );
-        // Rotation yields a different key.
-        let rotated = rotate_contact_secret(&mut config);
-        assert_ne!(rotated.public(), first.public());
-    }
-
-    #[test]
     fn test_direct_flag_default_false() {
         let toml_str = r#"
 [[networks]]
@@ -2684,6 +2969,20 @@ name = "test"
     }
 
     #[test]
+    fn settings_inbound_and_blocked_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            inbound: InboundPolicy::Known,
+            blocked: vec![SecretKey::from([45; 32]).public()],
+            ..Default::default()
+        };
+        save_settings_in(tmp.path(), &cfg).unwrap();
+        let loaded = load_in(tmp.path()).unwrap();
+        assert_eq!(loaded.inbound, InboundPolicy::Known);
+        assert_eq!(loaded.blocked, cfg.blocked);
+    }
+
+    #[test]
     fn ssh_port_defaults_to_22_and_persists() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(load_in(tmp.path()).unwrap().ssh_port, 22);
@@ -2798,6 +3097,28 @@ name = "test"
         .unwrap();
         let loaded = load_in(tmp.path()).expect("a settings.toml from an older build still loads");
         assert!(!loaded.mdns_enabled, "the keys we do know are still read");
+    }
+
+    /// Contact keys are gone; a settings.toml that still has one loads, and the
+    /// key is not written back.
+    #[test]
+    fn a_stale_contact_key_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(SETTINGS_FILE),
+            format!(
+                "mdns_enabled = false\ncontact_secret_key = \"{}\"\n",
+                "ab".repeat(32)
+            ),
+        )
+        .unwrap();
+        let loaded = load_in(tmp.path()).expect("a settings.toml with a contact key still loads");
+        assert!(!loaded.mdns_enabled);
+        assert!(
+            !settings_toml(&loaded)
+                .unwrap()
+                .contains("contact_secret_key")
+        );
     }
 
     #[test]
@@ -3019,13 +3340,13 @@ name = "test"
 
     #[test]
     fn resolve_upstreams_augment_and_replace() {
-        let captured = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let captured = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let one = Ipv4Addr::new(1, 1, 1, 1);
 
         // Unset: captured unchanged.
         assert_eq!(
             resolve_upstreams(&ServerOverride::default(), captured.clone()),
-            vec![IpAddr::V4(captured[0])]
+            captured
         );
 
         // Augment: custom first, then captured.
@@ -3035,7 +3356,7 @@ name = "test"
         };
         assert_eq!(
             resolve_upstreams(&aug, captured.clone()),
-            vec![IpAddr::V4(one), IpAddr::V4(captured[0])]
+            vec![IpAddr::V4(one), captured[0]]
         );
 
         // Replace: custom only.
@@ -3050,22 +3371,44 @@ name = "test"
 
         // Tailscale remains the preferred upstream even when the user added a
         // different resolver, while Rayfish itself still intercepts `.ray`.
-        let tailscale = Ipv4Addr::new(100, 100, 100, 100);
+        let tailscale = IpAddr::V4(Ipv4Addr::new(100, 100, 100, 100));
         assert_eq!(
-            resolve_upstreams(&aug, vec![captured[0], tailscale],),
-            vec![
-                IpAddr::V4(tailscale),
-                IpAddr::V4(one),
-                IpAddr::V4(captured[0])
-            ]
+            resolve_upstreams(&aug, vec![captured[0], tailscale]),
+            vec![tailscale, IpAddr::V4(one), captured[0]]
         );
+    }
+
+    /// A host whose resolv.conf names an IPv6 server keeps forwarding to it,
+    /// under the same override rules as its IPv4 ones.
+    #[test]
+    fn captured_v6_upstreams_follow_the_override_rules() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            resolve_upstreams(&ServerOverride::default(), vec![v4, v6]),
+            vec![v4, v6]
+        );
+        let replace = ServerOverride {
+            servers: vec!["9.9.9.9".into()],
+            replace: true,
+        };
+        assert_eq!(
+            resolve_upstreams(&replace, vec![v4, v6]),
+            vec![IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))]
+        );
+        // Already listed (the operator named it too): not twice.
+        let augment = ServerOverride {
+            servers: vec![v6.to_string()],
+            replace: false,
+        };
+        assert_eq!(resolve_upstreams(&augment, vec![v6]), vec![v6]);
     }
 
     /// An IPv6 upstream can be a resolver on a mesh peer. `--replace` must leave
     /// that address intact so it receives every non-`.ray` lookup.
     #[test]
     fn replace_with_only_ipv6_uses_the_configured_peer() {
-        let captured = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let captured = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))];
         let peer: Ipv6Addr = "200::1234".parse().unwrap();
         let v6_only = ServerOverride {
             servers: vec![peer.to_string()],
@@ -3097,7 +3440,7 @@ name = "test"
     /// than the refusal it bypassed, so the two must not disagree.
     #[test]
     fn only_a_usable_upstream_waives_the_takeover_guard() {
-        let captured: Vec<Ipv4Addr> = Vec::new();
+        let captured: Vec<IpAddr> = Vec::new();
         for (servers, usable) in [
             (vec!["2606:4700:4700::1111"], true),
             (vec!["2606:4700:4700::1111", "2001:4860:4860::8888"], true),

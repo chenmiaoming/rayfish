@@ -123,10 +123,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash tests/e2e.sh connect run
 
+      - name: "E2E: invites"
+        if: ${{ !cancelled() }}
+        run: bash tests/e2e.sh invites run
+
       - name: Teardown remaining E2E containers
         if: always()
         run: |
-          for s in closed-net firewall connect; do
+          for s in closed-net firewall connect invites; do
             bash tests/e2e.sh "$s" teardown || true
           done
           docker network rm rayfish-e2e 2>/dev/null || true
@@ -134,7 +138,8 @@ jobs:
           if all_containers="$(docker ps -a --format '{{.Names}}')"; then
             for c in rayfish-closednet-a rayfish-closednet-b rayfish-closednet-c \
                      rayfish-fw-a rayfish-fw-b rayfish-fw-c \
-                     rayfish-connect-a rayfish-connect-b; do
+                     rayfish-connect-a rayfish-connect-b \
+                     rayfish-invites-a rayfish-invites-b rayfish-invites-c; do
               if echo "$all_containers" | grep -qxF "$c"; then
                 echo "::error::Container $c remains after fallback teardown" >&2
                 leaked=1
@@ -207,6 +212,15 @@ jobs:
           sed -i '' 's/[[:space:]]*$//' macos/Generated/ray_apple.swift macos/Generated/ray_appleFFI.h macos/Generated/ray_appleFFI.modulemap
           perl -0pi -e 's/\n*\z/\n/' macos/Generated/ray_apple.swift macos/Generated/ray_appleFFI.h macos/Generated/ray_appleFFI.modulemap
           git diff --exit-code macos/Generated
+
+      # The iOS half of ray-mobile is `#[cfg(target_os = "ios")]` code that no
+      # host build compiles.
+      - name: Check iOS core and bindings
+        run: |
+          rustup target add aarch64-apple-ios
+          cargo clippy -p ray-mobile --lib --target aarch64-apple-ios --locked -- -D warnings
+          just ios-bindings
+          git diff --exit-code ios/Generated
 
   # The APK is built on release, which is too late: the Android half of the tree
   # is `#[cfg(target_os = "android")]` Rust plus generated Kotlin bindings, and
