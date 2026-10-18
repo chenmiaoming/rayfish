@@ -8,6 +8,10 @@ use super::super::*;
 /// unreachable primary hangs the pairing call forever.
 const PAIR_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long a device spends telling its primary the new certificate is saved,
+/// and then waiting for the primary to close the pairing connection.
+const PAIR_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl Daemon {
     pub(crate) async fn resolve_peer_name(&self, name: &str) -> Option<EndpointId> {
         self.registry.resolve_peer_name(name).await
@@ -145,6 +149,12 @@ impl Daemon {
                     return ipc_err(format!("failed to store device certificate: {e}"));
                 }
                 self.registry.paired_again(cert.user_identity);
+                // Until the primary hears the cert is saved, an unpair request
+                // about the earlier pairing still revokes. A primary on version
+                // 2 does not ask.
+                if conn.alpn() == PAIR_ALPN {
+                    confirm_certificate_saved(&conn, cert.generation).await;
+                }
                 // Auto-join every network the primary shared. Each join attaches the
                 // freshly stored cert (see current_device_cert) so the coordinator,
                 // which owns this device, admits it without manual approval. Dial
@@ -330,6 +340,28 @@ impl Daemon {
     /// device with no cert (a primary) has nothing to unpair.
     pub async fn unpair_self(&self) -> IpcMessage {
         self.registry.unpair_self().await
+    }
+}
+
+/// Tell the primary, over the pairing connection, that the certificate it just
+/// sent, at `generation`, is saved (`PairMsg::CertificateSaved`), then wait for
+/// the primary to close the connection, so closing first does not reset the
+/// message. The pairing is complete either way: a primary that does not hear
+/// it only keeps revoking on an unpair request about the earlier pairing.
+async fn confirm_certificate_saved(conn: &Connection, generation: u64) {
+    let sent = async {
+        let (mut send, _recv) = conn.open_bi().await?;
+        let saved = control::PairMsg::CertificateSaved { generation };
+        control::send_framed(&mut send, &saved).await
+    };
+    match tokio::time::timeout(PAIR_CONFIRM_TIMEOUT, sent).await {
+        Ok(Ok(())) => {
+            let _ = tokio::time::timeout(PAIR_CONFIRM_TIMEOUT, conn.closed()).await;
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(error = %format!("{error:#}"), "could not tell the primary the certificate is saved");
+        }
+        Err(_) => tracing::debug!("timed out telling the primary the certificate is saved"),
     }
 }
 

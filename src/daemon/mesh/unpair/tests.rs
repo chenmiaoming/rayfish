@@ -256,18 +256,43 @@ async fn pair(primary: &Node, device: &Node) -> control::DeviceCert {
 }
 
 /// Pair the device `key` with `primary` as the device would, over the pairing
-/// protocol. Returns the certificate the primary signed.
-async fn pair_as(primary: &Node, key: &SecretKey) -> control::DeviceCert {
+/// protocol, confirming that it saved the certificate when `saved`, as a device
+/// does once it has. Returns the certificate the primary signed.
+async fn pair_as(primary: &Node, key: &SecretKey, saved: bool) -> control::DeviceCert {
     let (_, secret) = ticket(primary).await;
     let request = control::PairMsg::Request {
         secret,
         device_pubkey: key.public(),
     };
     let addr = primary.daemon().transport.endpoint.addr();
-    match exchange(key, &addr, PAIR_ALPN, &request).await {
-        Some(control::PairMsg::Response { cert, .. }) => cert,
-        other => panic!("{other:?}"),
-    }
+    let endpoint = dialer(key.clone()).await;
+    let cert = tokio::time::timeout(Duration::from_secs(15), async {
+        let conn = endpoint.connect(addr, PAIR_ALPN).await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        control::send_framed(&mut send, &request).await.unwrap();
+        let cert = match control::recv_framed(&mut recv).await.unwrap() {
+            control::PairMsg::Response { cert, .. } => cert,
+            other => panic!("{other:?}"),
+        };
+        if saved {
+            let (mut send, _recv) = conn.open_bi().await.unwrap();
+            let confirmation = control::PairMsg::CertificateSaved {
+                generation: cert.generation,
+            };
+            control::send_framed(&mut send, &confirmation)
+                .await
+                .unwrap();
+            // The primary closes once it has saved that.
+            conn.closed().await;
+        } else {
+            conn.close(VarInt::from_u32(0), b"not saved");
+        }
+        cert
+    })
+    .await
+    .unwrap();
+    endpoint.close().await;
+    cert
 }
 
 fn waiting(cert: &control::DeviceCert) -> Vec<PendingUnpair> {
@@ -490,7 +515,8 @@ async fn pairing_again_cancels_the_unpair_request() {
         primary.settings().await.device_generations,
         [DeviceGeneration {
             device: device.id(),
-            generation: renewed.generation,
+            issued: renewed.generation,
+            confirmed: Some(renewed.generation),
         }]
     );
     assert_eq!(device.settings().await.pending_unpairs, []);
@@ -637,7 +663,7 @@ async fn a_notice_stays_until_the_device_confirms_or_pairs_again() {
     primary.start().await;
     let device_key = SecretKey::generate();
     let device_id = device_key.public();
-    let cert = pair_as(&primary, &device_key).await;
+    let cert = pair_as(&primary, &device_key, true).await;
     let (device, mut told, accept) =
         notice_taker(device_key.clone(), &transport::mesh_alpn()).await;
     listed(&primary, device_id, cert.clone()).await;
@@ -690,7 +716,7 @@ async fn a_notice_stays_until_the_device_confirms_or_pairs_again() {
             .unwrap();
         })
         .await;
-    let renewed = pair_as(&primary, &device_key).await;
+    let renewed = pair_as(&primary, &device_key, true).await;
     assert!(renewed.generation > cert.generation);
     assert_eq!(primary.settings().await.pending_unpair_notices, []);
     accept.abort();
@@ -706,7 +732,7 @@ async fn an_older_device_is_told_with_the_bare_notice() {
     let mut primary = Node::new(&relay).await;
     primary.start().await;
     let device_key = SecretKey::generate();
-    let cert = pair_as(&primary, &device_key).await;
+    let cert = pair_as(&primary, &device_key, false).await;
     let (device, mut told, accept) =
         notice_taker(device_key.clone(), transport::MESH_V6_ALPN).await;
     listed(&primary, device_key.public(), cert).await;
@@ -770,9 +796,10 @@ async fn a_bare_notice_counts_only_from_an_older_primary() {
     device.stop().await;
 }
 
-/// A request about a pairing the device has since replaced revokes nothing:
-/// it can reach the primary, or still be under way there, after the device
-/// paired again. A request about the current pairing still revokes it.
+/// A request about a pairing the device has since replaced, and confirmed the
+/// replacement of, revokes nothing: it can reach the primary, or still be
+/// under way there, after the device paired again. A request about the
+/// current pairing still revokes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_about_a_replaced_pairing_revokes_nothing() {
     let relay = Relay::start().await;
@@ -783,9 +810,17 @@ async fn a_request_about_a_replaced_pairing_revokes_nothing() {
         .run(async move { create(&daemon, "home").await })
         .await;
     let device = SecretKey::generate();
-    let first = pair_as(&primary, &device).await;
-    let second = pair_as(&primary, &device).await;
+    let first = pair_as(&primary, &device, true).await;
+    let second = pair_as(&primary, &device, true).await;
     assert_eq!((first.generation, second.generation), (1, 2));
+    assert_eq!(
+        primary.settings().await.device_generations,
+        [DeviceGeneration {
+            device: device.public(),
+            issued: 2,
+            confirmed: Some(2),
+        }]
+    );
     let addr = primary.daemon().transport.endpoint.addr();
 
     let request = control::PairMsg::UnpairRequest { cert: first };
@@ -798,6 +833,33 @@ async fn a_request_about_a_replaced_pairing_revokes_nothing() {
     assert!(!primary.nullifies("home", device.public()));
 
     let request = control::PairMsg::UnpairRequest { cert: second };
+    let reply = exchange(&device, &addr, PAIR_ALPN, &request).await;
+    assert!(
+        matches!(reply, Some(control::PairMsg::UnpairRecorded)),
+        "{reply:?}"
+    );
+    assert!(revoked(&primary.settings().await, device.public()));
+    assert!(primary.nullifies("home", device.public()));
+    primary.stop().await;
+}
+
+/// A replacement the device never confirmed saving leaves the request about its
+/// earlier pairing a revocation: the reply carrying the replacement can be lost,
+/// or fail to save, and leave the device on the earlier certificate, which must
+/// not stay valid (#239 review).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_after_an_unsaved_replacement_still_revokes() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    primary.start().await;
+    let device = SecretKey::generate();
+    let first = pair_as(&primary, &device, true).await;
+    listed(&primary, device.public(), first.clone()).await;
+    let second = pair_as(&primary, &device, false).await;
+    assert!(second.generation > first.generation);
+    let addr = primary.daemon().transport.endpoint.addr();
+
+    let request = control::PairMsg::UnpairRequest { cert: first };
     let reply = exchange(&device, &addr, PAIR_ALPN, &request).await;
     assert!(
         matches!(reply, Some(control::PairMsg::UnpairRecorded)),

@@ -37,13 +37,17 @@
 //! another stream, and a request can still be under way on the primary when
 //! the device gives up on it. So each pairing gets a generation, one above the
 //! last the primary gave that device, saved there before the device gets its
-//! certificate, which is signed at it. The notice names the generation it
-//! ends, and the request carries the certificate. Each is judged against the
-//! pairing current when it is acted on: a device ignores a notice older than
-//! its certificate, and a primary revokes nothing for a certificate older than
-//! the device's latest pairing. Over mesh version 6 or 5 the notice is the bare
-//! `ControlMsg::Unpaired`, which names no pairing: an older device knows no
-//! other, and an older primary signs every pairing of a device alike.
+//! certificate, which is signed at it. The device confirms on the pairing
+//! connection once it has saved the certificate (`PairMsg::CertificateSaved`).
+//! The notice names the latest generation issued, and the request carries the
+//! certificate. Each is judged against the pairing current when it is acted
+//! on: a device ignores a notice older than its certificate, and a primary
+//! revokes nothing for a certificate older than the latest one the device
+//! confirmed. An unconfirmed replacement does not count, since the reply
+//! carrying it can be lost and leave the device on its earlier certificate,
+//! whose unpair must still revoke it. Over mesh version 6 or 5 the notice is
+//! the bare `ControlMsg::Unpaired`, which names no pairing: an older device
+//! knows no other, and an older primary signs every pairing of a device alike.
 
 use super::super::network_registry::networks_joined_with_certificate;
 use super::super::*;
@@ -158,27 +162,38 @@ fn remove_pending_unpair(cert: &control::DeviceCert) -> bool {
     }
 }
 
-/// The generation of the latest pairing this primary made with `device`: the
-/// one saved in `device_generations`, or, for a device paired before pairings
-/// were numbered, the legacy `cert_generation` its certificate carries.
-fn pairing_generation(cfg: &config::AppConfig, device: EndpointId) -> u64 {
+/// What this primary saved about its pairings with `device`, if it numbered any.
+fn device_generation(cfg: &config::AppConfig, device: EndpointId) -> Option<&DeviceGeneration> {
     cfg.device_generations
         .iter()
         .find(|known| known.device == device)
-        .map_or(cfg.cert_generation, |known| known.generation)
+}
+
+/// The generation of the latest certificate this primary signed for
+/// `device`: the one saved in `device_generations`, or, for a device paired
+/// before pairings were numbered, the legacy `cert_generation` its
+/// certificate carries.
+fn issued_generation(cfg: &config::AppConfig, device: EndpointId) -> u64 {
+    device_generation(cfg, device).map_or(cfg.cert_generation, |known| known.issued)
 }
 
 /// Save a new pairing of `device` before it gets its certificate: one
-/// generation above its last, and, in the same write, the end of its notices,
-/// which are about earlier pairings. Returns the generation to sign.
+/// generation above the last issued, and, in the same write, the end of its
+/// notices, which are about earlier pairings. What it confirmed saving so far
+/// stays: this pairing counts only once the device confirms it too. Returns
+/// the generation to sign.
 pub(crate) fn save_new_pairing(device: EndpointId) -> Result<u64> {
     let mut generation = 0;
     config::update_settings(|cfg| {
-        generation = pairing_generation(cfg, device) + 1;
+        generation = issued_generation(cfg, device) + 1;
+        let confirmed = device_generation(cfg, device).and_then(|known| known.confirmed);
         cfg.device_generations
             .retain(|known| known.device != device);
-        cfg.device_generations
-            .push(DeviceGeneration { device, generation });
+        cfg.device_generations.push(DeviceGeneration {
+            device,
+            issued: generation,
+            confirmed,
+        });
         cfg.pending_unpair_notices
             .retain(|notice| notice.device != device);
         Ok(())
@@ -186,10 +201,27 @@ pub(crate) fn save_new_pairing(device: EndpointId) -> Result<u64> {
     Ok(generation)
 }
 
+/// Save that `device` confirmed it saved the certificate this primary signed
+/// for it at `generation`, which a request about an earlier pairing then
+/// cannot revoke.
+pub(crate) fn save_certificate_saved(device: EndpointId, generation: u64) -> Result<()> {
+    config::update_settings(|cfg| {
+        if let Some(known) = cfg
+            .device_generations
+            .iter_mut()
+            .find(|known| known.device == device)
+        {
+            known.confirmed = known.confirmed.max(Some(generation));
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// Save in `cfg` that `device` has yet to be told it is unpaired, naming its
 /// latest pairing.
 pub(crate) fn save_unpair_notice(cfg: &mut config::AppConfig, device: EndpointId) {
-    let generation = pairing_generation(cfg, device);
+    let generation = issued_generation(cfg, device);
     cfg.pending_unpair_notices
         .retain(|notice| notice.device != device);
     cfg.pending_unpair_notices
@@ -570,10 +602,11 @@ impl NetworkRegistry {
     /// node signed for it at `generation`, which the caller checked: revoke the
     /// device ([`Self::revoke_device_locked`]) and, in the same write, stop
     /// telling it to unpair, since a device asks only once its cleanup is saved.
-    /// A certificate older than the device's latest pairing here is from a
-    /// pairing the device has since replaced, and revokes nothing: the request
-    /// can be read late, or still be under way, when the device pairs again.
-    /// Returns whether the pairing was current.
+    /// A certificate older than the latest one the device confirmed it saved is
+    /// from a pairing the device has since replaced, and revokes nothing: the
+    /// request can be read late, or still be under way, when the device pairs
+    /// again. A replacement it never confirmed does not count. Returns whether
+    /// the pairing was current.
     pub(crate) async fn record_unpair(
         self: &Arc<Self>,
         device: EndpointId,
@@ -583,7 +616,10 @@ impl NetworkRegistry {
         // revocation is done: its `reauth_device` waits for the lock.
         let _revoking = self.revocation_lock.lock().await;
         let cfg = config::load().map_err(|error| format!("could not read settings: {error:#}"))?;
-        if pairing_generation(&cfg, device) > generation {
+        if device_generation(&cfg, device)
+            .and_then(|known| known.confirmed)
+            .is_some_and(|confirmed| confirmed > generation)
+        {
             return Ok(false);
         }
         self.revoke_device_locked(device, |cfg| {

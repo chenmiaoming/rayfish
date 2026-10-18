@@ -589,13 +589,17 @@ pub struct PendingUnpairNotice {
     pub generation: u64,
 }
 
-/// The latest pairing a primary made with a device. See
+/// A primary's pairings with one device. See
 /// [`AppConfig::device_generations`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceGeneration {
     pub device: EndpointId,
-    /// The generation its certificate is signed at.
-    pub generation: u64,
+    /// The generation of the latest certificate signed for it.
+    pub issued: u64,
+    /// The generation of the latest certificate it confirmed it saved
+    /// (`PairMsg::CertificateSaved`), if it confirmed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed: Option<u64>,
 }
 
 /// A controller this machine has explicitly authorized to issue management
@@ -758,12 +762,15 @@ pub struct AppConfig {
     /// until the device pairs again. Nothing raises it now.
     #[serde(default)]
     pub cert_generation: u64,
-    /// The generation of the latest pairing this primary made with each device,
-    /// which its certificate is signed at. A pairing is saved here one above
-    /// the device's last (or above `cert_generation`) before the device gets
-    /// the certificate, so a notice or request about an earlier pairing of it
-    /// is told apart from the current one. Kept after an unpair, so a later
-    /// pairing still numbers above it. See `daemon::mesh::unpair`.
+    /// This primary's pairings with each device: the generation of the latest
+    /// certificate signed for it, and of the latest one it confirmed it saved.
+    /// A pairing is issued one above the device's last (or above
+    /// `cert_generation`) and saved here before the device gets the
+    /// certificate, so a notice or request about an earlier pairing of it is
+    /// told apart from the current one. Only a confirmed pairing makes a
+    /// request about an earlier one obsolete: the reply carrying a certificate
+    /// can be lost. Kept after an unpair, so a later pairing still numbers
+    /// above it. See `daemon::mesh::unpair`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_generations: Vec<DeviceGeneration>,
     /// Device keys this user has nullified (hex `EndpointId`), by `ray unpair` or

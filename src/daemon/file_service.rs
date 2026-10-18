@@ -259,6 +259,38 @@ fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     black_box(diff) == 0
 }
 
+/// How long a primary waits, after sending a device its certificate, for the
+/// device to confirm it saved it.
+const CERTIFICATE_SAVED_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait for the device that was just sent its certificate at `generation` to
+/// confirm it saved it (`PairMsg::CertificateSaved`), save that, then close the
+/// connection, which the device waits for. Until a device confirms, an unpair
+/// request about its earlier pairing still revokes it.
+async fn await_certificate_saved(conn: &Connection, device: EndpointId, generation: u64) {
+    let confirmation = async {
+        let (_send, mut recv) = conn.accept_bi().await?;
+        control::recv_framed::<control::PairMsg>(&mut recv).await
+    };
+    match tokio::time::timeout(CERTIFICATE_SAVED_TIMEOUT, confirmation).await {
+        Ok(Ok(control::PairMsg::CertificateSaved { generation: saved })) if saved == generation => {
+            if let Err(error) = save_certificate_saved(device, generation) {
+                tracing::warn!(device = %device.fmt_short(), error = %format!("{error:#}"), "could not save that the device saved its certificate");
+            }
+            conn.close(VarInt::from_u32(0), b"saved");
+        }
+        Ok(Ok(_)) => {
+            tracing::warn!(device = %device.fmt_short(), "unexpected message after pairing");
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(device = %device.fmt_short(), error = %format!("{error:#}"), "device did not confirm it saved its certificate");
+        }
+        Err(_) => {
+            tracing::debug!(device = %device.fmt_short(), "timed out waiting for the device to confirm it saved its certificate");
+        }
+    }
+}
+
 /// Outcome of checking a presented pairing secret. Separate from the stored value
 /// so the lock is dropped before the (slow) success path runs.
 enum PairCheck {
@@ -1257,6 +1289,12 @@ impl FileService {
                                 // "connection lost" and never receives the cert even though we
                                 // logged success below.
                                 let _ = send.finish();
+                                // A device on version 3 confirms once the cert is
+                                // saved, which is what makes a request about its
+                                // earlier pairing obsolete.
+                                if conn.alpn() == PAIR_ALPN {
+                                    await_certificate_saved(&conn, device_pubkey, generation).await;
+                                }
                                 let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed())
                                     .await;
                                 tracing::info!(device = %device_pubkey.fmt_short(), "device paired successfully");
@@ -1311,8 +1349,9 @@ impl FileService {
                         }
                         // Answered only once the revocation is saved, and again
                         // when it already was, so a lost answer is safe to ask for.
-                        // A pairing the device has replaced since is answered
-                        // without a revocation, which would end the new one.
+                        // A pairing the device has replaced since, and confirmed
+                        // the replacement of, is answered without a revocation,
+                        // which would end the new one.
                         match self
                             .registry
                             .record_unpair(remote_id, cert.generation)

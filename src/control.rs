@@ -85,9 +85,10 @@ pub struct PairNetwork {
 }
 
 /// Messages for device pairing, paired-device network discovery and unpairing
-/// (ALPN `rayfish/pair/3`). Version 3 adds the unpair exchange. The other
-/// variants keep their version 2 wire representation, and version 2 is still
-/// served and offered, so builds on either version pair with each other.
+/// (ALPN `rayfish/pair/3`). Version 3 adds the unpair exchange and the device's
+/// confirmation that it saved its certificate. The other variants keep their
+/// version 2 wire representation, and version 2 is still served and offered,
+/// so builds on either version pair with each other.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PairMsg {
     Request {
@@ -111,9 +112,10 @@ pub enum PairMsg {
     /// primary signed for it, the evidence of the pairing, which the primary
     /// checks in place of its rosters: a device that left its networks is no
     /// longer on them. Answered with `UnpairRecorded` once the revocation is
-    /// saved. A certificate older than the last one the primary signed for the
-    /// device is from a pairing the device has since replaced; the request may
-    /// only now be read, after the device paired again, and revokes nothing.
+    /// saved. A certificate older than the latest one the device confirmed it
+    /// saved (`CertificateSaved`) is from a pairing the device has since
+    /// replaced; the request may only now be read, after the device paired
+    /// again, and revokes nothing.
     UnpairRequest {
         cert: DeviceCert,
     },
@@ -122,6 +124,15 @@ pub enum PairMsg {
     /// lost can safely ask again, and for a pairing the device has since
     /// replaced, which has nothing left to revoke.
     UnpairRecorded,
+    /// Device to primary, version 3 only, on the pairing connection once the
+    /// certificate from the `Response`, at `generation`, is durably saved. Only
+    /// then does the primary take a request about an earlier pairing for
+    /// obsolete: the reply can be lost, or fail to save, and leave the device
+    /// on its earlier certificate. The primary closes the connection once it
+    /// has saved this.
+    CertificateSaved {
+        generation: u64,
+    },
 }
 
 /// Messages for the `ray connect` friend-request handshake (ALPN
