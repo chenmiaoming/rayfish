@@ -4,7 +4,6 @@ import OSLog
 enum RayfishLog {
     static let app = Logger(subsystem: "xyz.rayfish.ios", category: "app")
     static let tunnel = Logger(subsystem: "xyz.rayfish.ios", category: "tunnel")
-    static let ipc = Logger(subsystem: "xyz.rayfish.ios", category: "ipc")
 }
 
 /// Storage the app and its packet tunnel share. The node's identity and config
@@ -75,4 +74,8 @@ func userMessage(_ error: Error) -> String {
     case .IdentityExists: "This device already has an identity"
     case .NodeRunning: "Turn Rayfish off first"
     }
+}
+
+func formatSize(_ bytes: UInt64) -> String {
+    ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
 }

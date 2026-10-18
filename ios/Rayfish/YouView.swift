@@ -11,7 +11,8 @@ struct YouView: View {
     @State private var backingUp = false
     @State private var restoring = false
     @State private var autoAccept = Preferences.autoAcceptOwnDevices
-    @State private var onDemand = false
+    @State private var keychain: [KeychainBackup] = []
+    @State private var savingKeychain = false
 
     private var snapshot: Snapshot { model.snapshot }
 
@@ -59,9 +60,6 @@ struct YouView: View {
         }
         .sheet(isPresented: $backingUp) { BackupSheet() }
         .sheet(isPresented: $restoring) { RestoreSheet(onRestored: { Task { await model.restart() } }) }
-        .task {
-            if let device = model.tunnel as? DeviceTunnel { onDemand = device.onDemand }
-        }
     }
 
     private var device: some View {
@@ -78,14 +76,12 @@ struct YouView: View {
             }
             if !snapshot.nodeId.isEmpty {
                 KeyValueRow(key: "Node id", value: String(snapshot.nodeId.prefix(16)) + "…") {
-                    copyToClipboard(snapshot.nodeId)
-                    model.toast = "Node id copied"
+                    model.copy(snapshot.nodeId, toast: "Node id copied")
                 }
             }
             if !snapshot.ipv6.isEmpty {
                 KeyValueRow(key: "Address", value: snapshot.ipv6) {
-                    copyToClipboard(snapshot.ipv6)
-                    model.toast = "Address copied"
+                    model.copy(snapshot.ipv6, toast: "Address copied")
                 }
             }
         }
@@ -120,43 +116,30 @@ struct YouView: View {
                 }
             }
             .onChange(of: autoAccept) { _, on in Preferences.autoAcceptOwnDevices = on }
-            if !model.isSimulator {
-                Toggle(isOn: $onDemand) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Connect on demand").font(Rf.text()).foregroundStyle(Rf.body)
-                        Text("iOS turns Rayfish back on when needed").font(Rf.mono(12)).foregroundStyle(Rf.faint)
-                    }
-                }
-                .onChange(of: onDemand) { _, on in
-                    guard let device = model.tunnel as? DeviceTunnel, device.onDemand != on else { return }
-                    Task {
-                        do {
-                            try await device.setOnDemand(on)
-                        } catch {
-                            onDemand = device.onDemand
-                            model.toast = error.localizedDescription
-                        }
-                    }
-                }
-            }
             HStack {
                 Text("QUIC engine").font(Rf.text()).foregroundStyle(Rf.body)
                 Spacer()
-                Picker("QUIC engine", selection: Binding(
-                    get: { snapshot.quicEngine },
-                    set: { engine in
-                        Task {
-                            if await model.perform(.setQuicEngine(engine), success: "Engine saved, restarting") != nil {
-                                await model.restart()
+                // A Menu rather than a menu Picker: the picker's label ignores
+                // custom fonts and renders in the large system style.
+                Menu {
+                    Picker("QUIC engine", selection: Binding(
+                        get: { snapshot.quicEngine },
+                        set: { engine in
+                            Task {
+                                if await model.perform(.setQuicEngine(engine), success: "Engine saved, restarting") != nil {
+                                    await model.restart()
+                                }
                             }
                         }
+                    )) {
+                        Text("Standalone").tag(QuicEngineChoice.standalone)
+                        Text("FQ-CoDel").tag(QuicEngineChoice.fqCodel)
                     }
-                )) {
-                    Text("Standalone").tag(QuicEngineChoice.standalone)
-                    Text("FQ-CoDel").tag(QuicEngineChoice.fqCodel)
+                } label: {
+                    Text("\(snapshot.quicEngine == .fqCodel ? "FQ-CoDel" : "Standalone") ✎")
+                        .font(Rf.semibold(14)).foregroundStyle(Rf.rose400)
+                        .padding(.vertical, 6).padding(.horizontal, 8)
                 }
-                .pickerStyle(.menu)
-                .font(Rf.mono(14))
             }
         }
         .tint(Rf.rose400)
@@ -178,6 +161,53 @@ struct YouView: View {
                 }
             }
             .padding(.top, 8)
+            let saved = keychain.first { $0.publicKey == snapshot.nodeId }
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("iCloud Keychain").font(Rf.text()).foregroundStyle(Rf.body)
+                    Text(saved.map { "Saved \($0.saved.formatted(date: .abbreviated, time: .shortened))" } ?? "Not saved")
+                        .font(Rf.mono(12)).foregroundStyle(saved == nil ? Rf.faint : Rf.emerald)
+                }
+                Spacer()
+                LinkButton(savingKeychain ? "Saving…" : (saved == nil ? "Save" : "Update")) {
+                    Task { await saveToKeychain() }
+                }
+                .disabled(savingKeychain || snapshot.nodeId.isEmpty)
+                if let saved {
+                    LinkButton("Remove") { removeFromKeychain(saved) }
+                }
+            }
+            .padding(.top, 14)
+        }
+        .task { await reloadKeychain() }
+    }
+
+    private func reloadKeychain() async {
+        keychain = await Task.detached { IdentityKeychain.list() }.value
+    }
+
+    private func saveToKeychain() async {
+        savingKeychain = true
+        defer { savingKeychain = false }
+        do {
+            try await IdentityKeychain.authenticate("Save your Rayfish identity to iCloud Keychain")
+            let node = model.tunnel.local.node
+            let name = snapshot.deviceName.isEmpty ? UIDevice.current.model : snapshot.deviceName
+            try await Task.detached { try IdentityKeychain.save(node: node, deviceName: name) }.value
+            await reloadKeychain()
+            model.toast = "Saved to iCloud Keychain"
+        } catch {
+            model.toast = userMessage(error)
+        }
+    }
+
+    private func removeFromKeychain(_ backup: KeychainBackup) {
+        do {
+            try IdentityKeychain.remove(backup.publicKey)
+            keychain.removeAll { $0.publicKey == backup.publicKey }
+            model.toast = "Removed from iCloud Keychain"
+        } catch {
+            model.toast = userMessage(error)
         }
     }
 
@@ -287,6 +317,7 @@ struct RestoreSheet: View {
     @State private var importing = false
     @State private var existing: String?
     @State private var working = false
+    @State private var keychain: [KeychainBackup] = []
 
     var body: some View {
         ScrollView {
@@ -306,9 +337,17 @@ struct RestoreSheet: View {
                 RayfishField("Password", text: $password, secure: true)
                 PillButton(working ? "Restoring…" : "Restore") { Task { await restore(replace: false) } }
                     .disabled(code.isEmpty || password.isEmpty || working)
+                if !keychain.isEmpty {
+                    KeychainRestoreCard(backups: keychain) {
+                        dismiss()
+                        onRestored()
+                    }
+                    .padding(.top, 14)
+                }
             }
             .padding(20)
         }
+        .task { keychain = await Task.detached { IdentityKeychain.list() }.value }
         .rayfishPage()
         .presentationDetents([.medium, .large])
         .fileImporter(isPresented: $importing, allowedContentTypes: [.plainText, .data]) { result in
@@ -332,20 +371,87 @@ struct RestoreSheet: View {
     private func restore(replace: Bool) async {
         working = true
         defer { working = false }
+        switch await IdentityRestore.run(model: model, code: code, password: password, replace: replace) {
+        case .restored:
+            dismiss()
+            onRestored()
+        case .exists(let key):
+            existing = key
+        case .failed:
+            break
+        }
+    }
+}
+
+enum IdentityRestore {
+    enum Outcome { case restored, exists(String), failed }
+
+    /// Restore off the main thread. A different identity already on the device
+    /// comes back as `exists`, for the caller to confirm before replacing it.
+    @MainActor
+    static func run(model: AppModel, code: String, password: String, replace: Bool) async -> Outcome {
         let node = model.tunnel.local.node
-        let (code, password) = (code, password)
         do {
             let key = try await Task.detached {
                 try node.restoreIdentity(code: code, password: password, replaceExisting: replace)
             }.value
             model.toast = "Restored \(key.prefix(8))…"
             model.hasIdentity = true
-            dismiss()
-            onRestored()
+            return .restored
         } catch RayError.IdentityExists(let key) {
-            existing = key
+            return .exists(key)
         } catch {
             model.toast = userMessage(error)
+            return .failed
+        }
+    }
+}
+
+/// Backups found in iCloud Keychain, restored after Face ID.
+struct KeychainRestoreCard: View {
+    @EnvironmentObject private var model: AppModel
+    var backups: [KeychainBackup]
+    var onRestored: () -> Void = {}
+    @State private var replacing: KeychainBackup?
+
+    var body: some View {
+        SectionCard {
+            SectionLabel("In iCloud Keychain")
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(backups) { backup in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            RowTitle(backup.deviceName)
+                            RowSubtitle("\(backup.publicKey.prefix(8)) · \(backup.saved.formatted(date: .abbreviated, time: .omitted))")
+                        }
+                        Spacer()
+                        LinkButton("Restore") { Task { await restore(backup, replace: false) } }
+                    }
+                }
+            }
+            .padding(.top, 10)
+        }
+        .alert("Replace this identity?", isPresented: Binding(get: { replacing != nil }, set: { if !$0 { replacing = nil } })) {
+            Button("Replace", role: .destructive) {
+                if let backup = replacing { Task { await restore(backup, replace: true) } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This device's current identity, and every network it joined, is dropped unless you backed it up.")
+        }
+    }
+
+    private func restore(_ backup: KeychainBackup, replace: Bool) async {
+        do {
+            try await IdentityKeychain.authenticate("Restore your Rayfish identity from iCloud Keychain")
+        } catch {
+            model.toast = userMessage(error)
+            return
+        }
+        switch await IdentityRestore.run(model: model, code: backup.code, password: backup.password, replace: replace) {
+        case .restored: onRestored()
+        case .exists: replacing = backup
+        case .failed: break
         }
     }
 }

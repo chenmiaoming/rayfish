@@ -58,6 +58,7 @@ final class AppModel: ObservableObject {
             try? await tunnel.connect()
         }
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+        Task.detached(priority: .utility) { Outbox.prune() }
         refresh()
     }
 
@@ -88,13 +89,13 @@ final class AppModel: ObservableObject {
             }
             do {
                 let reply = try await tunnel.send(.snapshot)
-                if let snapshot = reply.snapshot { self.snapshot = snapshot }
-                refreshFailed = false
+                if let snapshot = reply.snapshot { apply(snapshot) }
+                if refreshFailed { refreshFailed = false }
             } catch {
-                refreshFailed = true
+                if !refreshFailed { refreshFailed = true }
             }
-            loaded = true
-            ReceivedFiles.collect()
+            if !loaded { loaded = true }
+            await Task.detached(priority: .utility) { ReceivedFiles.collect() }.value
         }
     }
 
@@ -103,14 +104,30 @@ final class AppModel: ObservableObject {
     func perform(_ command: Command, success: String? = nil) async -> Reply? {
         do {
             let reply = try await tunnel.send(command)
-            if let snapshot = reply.snapshot { self.snapshot = snapshot }
             if let message = success ?? reply.message { toast = message }
-            refresh()
+            // Most commands answer with a fresh snapshot; only fetch one if not.
+            if let snapshot = reply.snapshot { apply(snapshot) } else { refresh() }
             return reply
         } catch {
             toast = error.localizedDescription
             return nil
         }
+    }
+
+    /// Every published change redraws the tabs; the 2 s poll mostly repeats itself.
+    private func apply(_ next: Snapshot) {
+        if next != snapshot { snapshot = next }
+    }
+
+    /// An invite code for `network`, ready to show.
+    func invite(_ network: String) async -> SharedCode? {
+        guard let code = await perform(.invite(network: network))?.code else { return nil }
+        return SharedCode(title: "Invite to \(network)", code: code)
+    }
+
+    func copy(_ text: String, toast message: String? = nil) {
+        copyToClipboard(text)
+        toast = message ?? "Copied \(text)"
     }
 
     func setTunnel(_ on: Bool) async {

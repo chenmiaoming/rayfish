@@ -22,29 +22,24 @@ protocol Tunnel: AnyObject {
 }
 
 enum TunnelError: LocalizedError {
-    case offline, timedOut, noResponse, notConfigured
+    case timedOut, noResponse
     case node(String)
 
     var errorDescription: String? {
         switch self {
-        case .offline: "Turn Rayfish on first"
         case .timedOut: "Rayfish did not answer in time"
         case .noResponse: "Rayfish returned no response"
-        case .notConfigured: "The Rayfish VPN configuration is missing"
         case .node(let message): message
         }
     }
 }
 
 extension NodeHost {
-    /// Run a command off the main thread. A node that is not running reports
-    /// that plainly instead of the core's internal error name.
+    /// Run a command off the main thread, with the core's errors in words.
     func run(_ command: Command) async throws -> Reply {
         try await Task.detached(priority: .userInitiated) {
             do {
                 return try self.handle(command)
-            } catch RayError.NotStarted {
-                throw TunnelError.offline
             } catch let error as RayError {
                 throw TunnelError.node(userMessage(error))
             }
@@ -80,26 +75,25 @@ final class DeviceTunnel: Tunnel {
         update()
     }
 
+    /// Connecting also turns on-demand on, so iOS brings the tunnel back after
+    /// a reboot or when it stops the extension, like an always-on VPN.
     func connect() async throws {
-        let manager = try await configuredManager()
+        let manager = try await configuredManager(onDemand: true)
         try manager.connection.startVPNTunnel()
         update()
     }
 
+    /// On-demand goes off first: otherwise iOS restarts the tunnel right away.
     func disconnect() async {
+        if let manager, manager.isOnDemandEnabled {
+            do {
+                _ = try await configuredManager(onDemand: false)
+            } catch {
+                RayfishLog.app.error("Turning off on-demand failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
         manager?.connection.stopVPNTunnel()
         update()
-    }
-
-    /// Whether the VPN starts by itself whenever the device has a network.
-    var onDemand: Bool { manager?.isOnDemandEnabled ?? false }
-
-    func setOnDemand(_ enabled: Bool) async throws {
-        let manager = try await configuredManager()
-        manager.onDemandRules = [NEOnDemandRuleConnect()]
-        manager.isOnDemandEnabled = enabled
-        try await manager.saveToPreferences()
-        try await manager.loadFromPreferences()
     }
 
     func send(_ command: Command) async throws -> Reply {
@@ -116,7 +110,7 @@ final class DeviceTunnel: Tunnel {
     }
 
     /// Install the VPN configuration on first use. iOS asks the person to allow it.
-    private func configuredManager() async throws -> NETunnelProviderManager {
+    private func configuredManager(onDemand: Bool) async throws -> NETunnelProviderManager {
         let manager = manager ?? NETunnelProviderManager()
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = AppGroup.tunnelBundleIdentifier
@@ -124,6 +118,8 @@ final class DeviceTunnel: Tunnel {
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Rayfish"
         manager.isEnabled = true
+        manager.onDemandRules = [NEOnDemandRuleConnect()]
+        manager.isOnDemandEnabled = onDemand
         try await manager.saveToPreferences()
         // A freshly saved configuration cannot start until it is reloaded.
         try await manager.loadFromPreferences()
@@ -198,9 +194,9 @@ enum ProviderMessage {
     ) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             let pending = PendingReply(continuation)
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                pending.finish(.failure(TunnelError.timedOut))
-            }
+            let timer = DispatchWorkItem { pending.finish(.failure(TunnelError.timedOut)) }
+            pending.setTimer(timer)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
             do {
                 try sendMessage(data) { reply in
                     pending.finish(reply.map { .success($0) } ?? .failure(TunnelError.noResponse))
@@ -212,19 +208,32 @@ enum ProviderMessage {
     }
 }
 
+/// Resumes once, with the reply or the timeout, and cancels the timeout so a
+/// fast reply does not leave it pending for the full wait.
 private final class PendingReply: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Data, Error>?
+    private var timer: DispatchWorkItem?
 
     init(_ continuation: CheckedContinuation<Data, Error>) {
         self.continuation = continuation
     }
 
-    func finish(_ result: Result<Data, Error>) {
-        let continuation = lock.withLock {
-            defer { self.continuation = nil }
-            return self.continuation
+    func setTimer(_ timer: DispatchWorkItem) {
+        lock.withLock {
+            if continuation == nil { timer.cancel() } else { self.timer = timer }
         }
+    }
+
+    func finish(_ result: Result<Data, Error>) {
+        let (continuation, timer) = lock.withLock {
+            defer {
+                self.continuation = nil
+                self.timer = nil
+            }
+            return (self.continuation, self.timer)
+        }
+        timer?.cancel()
         continuation?.resume(with: result)
     }
 }

@@ -265,10 +265,17 @@ extension View {
     }
 }
 
-func formatSize(_ bytes: UInt64) -> String {
-    ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
-}
 
 func copyToClipboard(_ text: String) {
     UIPasteboard.general.string = text
+}
+
+extension PeerModel.State {
+    var color: Color {
+        switch self {
+        case .active: Rf.emerald
+        case .idle: Rf.amber
+        case .offline: Rf.faint
+        }
+    }
 }

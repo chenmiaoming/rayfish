@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		080FD8A1A58C68F98B78E82F /* IdentityKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21E6F711DADDCC3A6868F0DD /* IdentityKeychain.swift */; };
 		0A70EB9A90223A35C4515B0E /* ChakraPetch-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DAE515FB1D088A2EDEC64EAF /* ChakraPetch-SemiBold.ttf */; };
 		0EE4B483378FEA62BB06A41C /* NetworkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0CE67690A500D0A9F453EF /* NetworkDetailView.swift */; };
 		1317CED293FD296660DF6D62 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D1CB076E7E355518C78C3FE /* NetworkExtension.framework */; };
@@ -18,8 +19,6 @@
 		447896AC04BD5534B575D87C /* SendFilesSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC13CDAC751E2B306E7F1096 /* SendFilesSheet.swift */; };
 		4C62621009FB6E8BC6220E95 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4697C6E505B5E6961EBCA597 /* AppGroup.swift */; };
 		517485C7A3159A439B0CA00C /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8853920C086231394A47F4E /* Protocol.swift */; };
-		6325D0CA3B5E736D4C625047 /* ChakraPetch-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D5014BE9D50BCDB2C07549CC /* ChakraPetch-Medium.ttf */; };
-		6CE78099DCBF46D6175521DC /* IBMPlexMono-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C0621CE3A57DCADE949AA00A /* IBMPlexMono-Medium.ttf */; };
 		73345803EE12AF7B4BE6CC8D /* ChakraPetch-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1C5CD7CCAA517105B84127D7 /* ChakraPetch-Bold.ttf */; };
 		797BD9BCA78CE61A4DADA531 /* ray_mobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 191F972E06E65E72D5272695 /* ray_mobile.swift */; };
 		7E98F5AD5043F7D2A49CEF19 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4697C6E505B5E6961EBCA597 /* AppGroup.swift */; };
@@ -79,6 +78,7 @@
 		191F972E06E65E72D5272695 /* ray_mobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ray_mobile.swift; sourceTree = "<group>"; };
 		1C084CC03F1B8F160247D616 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
 		1C5CD7CCAA517105B84127D7 /* ChakraPetch-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ChakraPetch-Bold.ttf"; sourceTree = "<group>"; };
+		21E6F711DADDCC3A6868F0DD /* IdentityKeychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityKeychain.swift; sourceTree = "<group>"; };
 		2D1CB076E7E355518C78C3FE /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
 		2F5D3652FDCD75FEDBF133B6 /* NetworksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworksView.swift; sourceTree = "<group>"; };
 		3140C30CD4A55D1274DD40F5 /* NodeHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeHost.swift; sourceTree = "<group>"; };
@@ -100,9 +100,7 @@
 		A8853920C086231394A47F4E /* Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocol.swift; sourceTree = "<group>"; };
 		B6740B866AD744A73D20C505 /* IBMPlexMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Regular.ttf"; sourceTree = "<group>"; };
 		B7A823F76CDEEF7D18D9DE5F /* ChakraPetch-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "ChakraPetch-OFL.txt"; sourceTree = "<group>"; };
-		C0621CE3A57DCADE949AA00A /* IBMPlexMono-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Medium.ttf"; sourceTree = "<group>"; };
 		D197B20BBFB76277D50D3BEF /* PressStart2P-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "PressStart2P-OFL.txt"; sourceTree = "<group>"; };
-		D5014BE9D50BCDB2C07549CC /* ChakraPetch-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ChakraPetch-Medium.ttf"; sourceTree = "<group>"; };
 		DAE515FB1D088A2EDEC64EAF /* ChakraPetch-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ChakraPetch-SemiBold.ttf"; sourceTree = "<group>"; };
 		DF0CE67690A500D0A9F453EF /* NetworkDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDetailView.swift; sourceTree = "<group>"; };
 		EA6E6748C8715BF45A6683B1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -137,11 +135,9 @@
 			isa = PBXGroup;
 			children = (
 				1C5CD7CCAA517105B84127D7 /* ChakraPetch-Bold.ttf */,
-				D5014BE9D50BCDB2C07549CC /* ChakraPetch-Medium.ttf */,
 				B7A823F76CDEEF7D18D9DE5F /* ChakraPetch-OFL.txt */,
 				F84513862593E54A7901FFA3 /* ChakraPetch-Regular.ttf */,
 				DAE515FB1D088A2EDEC64EAF /* ChakraPetch-SemiBold.ttf */,
-				C0621CE3A57DCADE949AA00A /* IBMPlexMono-Medium.ttf */,
 				67092EEC7F40EE61708C5A2F /* IBMPlexMono-OFL.txt */,
 				B6740B866AD744A73D20C505 /* IBMPlexMono-Regular.ttf */,
 				D197B20BBFB76277D50D3BEF /* PressStart2P-OFL.txt */,
@@ -176,6 +172,7 @@
 				EBE2041689161DB5B3D3D1C4 /* AppModel.swift */,
 				EA6E6748C8715BF45A6683B1 /* Assets.xcassets */,
 				49545382A1AA860D33EC5B3D /* HomeView.swift */,
+				21E6F711DADDCC3A6868F0DD /* IdentityKeychain.swift */,
 				DF0CE67690A500D0A9F453EF /* NetworkDetailView.swift */,
 				2F5D3652FDCD75FEDBF133B6 /* NetworksView.swift */,
 				417C9CF54A9DAF78E58E5E6A /* QRViews.swift */,
@@ -339,11 +336,9 @@
 			files = (
 				D1DAD4DF0D9F1B71525FBF36 /* Assets.xcassets in Resources */,
 				73345803EE12AF7B4BE6CC8D /* ChakraPetch-Bold.ttf in Resources */,
-				6325D0CA3B5E736D4C625047 /* ChakraPetch-Medium.ttf in Resources */,
 				CC218C48C572A49EA4258487 /* ChakraPetch-OFL.txt in Resources */,
 				9BB912272827DC64EF5D163C /* ChakraPetch-Regular.ttf in Resources */,
 				0A70EB9A90223A35C4515B0E /* ChakraPetch-SemiBold.ttf in Resources */,
-				6CE78099DCBF46D6175521DC /* IBMPlexMono-Medium.ttf in Resources */,
 				31CD200C348AD2E0B9D540D2 /* IBMPlexMono-OFL.txt in Resources */,
 				AE6DCB47E27A6A7FFEBB1393 /* IBMPlexMono-Regular.ttf in Resources */,
 				FD76A00338BF9FA62680114C /* PressStart2P-OFL.txt in Resources */,
@@ -403,6 +398,7 @@
 				7E98F5AD5043F7D2A49CEF19 /* AppGroup.swift in Sources */,
 				EFE12C5AF75AB24C22B24DA4 /* AppModel.swift in Sources */,
 				A0DFB2C522D60FE3E44738DD /* HomeView.swift in Sources */,
+				080FD8A1A58C68F98B78E82F /* IdentityKeychain.swift in Sources */,
 				0EE4B483378FEA62BB06A41C /* NetworkDetailView.swift in Sources */,
 				F199620C7EFAE51FC1F4FC79 /* NetworksView.swift in Sources */,
 				EF0292170C83B58F206B1A04 /* NodeHost.swift in Sources */,

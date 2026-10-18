@@ -87,9 +87,9 @@ use crate::network_name;
 use crate::peers::{self, PeerTable};
 use crate::stats::ForwardMetrics;
 use crate::transport;
-// The desktop TUN device and its CGNAT pre-flight check don't exist on Android,
-// where the packet interface is a `VpnService` fd supplied from Kotlin.
-#[cfg(not(target_os = "android"))]
+// The desktop TUN device and its CGNAT pre-flight check don't exist on Android
+// or iOS, where the platform supplies the packet interface.
+#[cfg(not(embedded_tun))]
 use crate::tun;
 use crate::tun::{TunRead, TunWrite};
 use ray_proto::SuggestedFirewall;
@@ -788,8 +788,8 @@ pub(crate) struct FatalExit {
 
 impl FatalExit {
     /// Only the desktop daemon arms it, after creating its own TUN; Android
-    /// gets its TUN from the embedding app.
-    #[cfg(any(not(target_os = "android"), test))]
+    /// and iOS get theirs from the embedding app.
+    #[cfg(any(not(embedded_tun), test))]
     pub(crate) fn arm(&self) {
         self.armed.store(true, Ordering::Relaxed);
     }

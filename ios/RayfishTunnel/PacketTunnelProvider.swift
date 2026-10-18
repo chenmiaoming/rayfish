@@ -164,7 +164,7 @@ final class OfferNotifier: @unchecked Sendable {
             announced.insert(offer.id)
             if offer.ownDevice && Preferences.autoAcceptOwnDevices { continue }
             post(id: "offer-\(offer.id)", title: "File from \(offer.from)",
-                 body: "\(offer.filename), \(ByteCountFormatter.string(fromByteCount: Int64(offer.size), countStyle: .file))")
+                 body: "\(offer.filename), \(formatSize(offer.size))")
         }
     }
 

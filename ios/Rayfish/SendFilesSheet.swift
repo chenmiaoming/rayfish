@@ -25,7 +25,7 @@ struct SendFilesSheet: View {
                         picking = true
                     } label: {
                         HStack(spacing: 10) {
-                            Dot(color: peer.isActive ? Rf.emerald : (peer.state == .idle ? Rf.amber : Rf.faint))
+                            Dot(color: peer.state.color)
                             VStack(alignment: .leading, spacing: 2) {
                                 RowTitle(peer.displayName)
                                 RowSubtitle("\(peer.nodeId.prefix(8)) · \(peer.state.rawValue)")
@@ -60,17 +60,19 @@ struct SendFilesSheet: View {
             .sorted { (rank[$0.state] ?? 3, $0.displayName) < (rank[$1.state] ?? 3, $1.displayName) }
     }
 
+    /// Copying can take a while for a large file, so it runs off the main thread
+    /// after the sheet closes.
     private func send(_ urls: [URL], to peer: PeerModel) {
-        do {
-            let paths = try Outbox.stage(urls)
-            dismiss()
-            Task {
+        dismiss()
+        Task {
+            do {
+                let paths = try await Task.detached(priority: .userInitiated) { try Outbox.stage(urls) }.value
                 let noun = paths.count == 1 ? "file" : "\(paths.count) files"
                 await model.perform(.sendFiles(paths: paths, peer: peer.nodeId),
                                     success: "Sending \(noun) to \(peer.displayName)")
+            } catch {
+                model.toast = "Could not read the file: \(error.localizedDescription)"
             }
-        } catch {
-            model.toast = "Could not read the file: \(error.localizedDescription)"
         }
     }
 }

@@ -5,26 +5,34 @@ import SwiftUI
 struct WelcomeView: View {
     @EnvironmentObject private var model: AppModel
     @State private var restoring = false
+    @State private var keychain: [KeychainBackup] = []
 
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
                 BrandHeader(title: "Rayfish")
+                    .padding(.bottom, 40)
                 SectionCard {
                     SectionLabel("This device")
                     Text("Rayfish gives this device an identity of its own. Peers know it by that and nothing else, so it is worth keeping.")
                         .font(Rf.text()).foregroundStyle(Rf.muted)
-                    PillButton("Get started") { model.hasIdentity = true }
-                        .padding(.top, 10)
-                    PillButton("Restore a backup", outline: true) { restoring = true }
+                    VStack(spacing: 10) {
+                        PillButton("Get started") { model.hasIdentity = true }
+                        PillButton("Restore a backup", outline: true) { restoring = true }
+                    }
+                    .padding(.top, 14)
                     Text("Restoring moves an identity from another device, or back from a backup you saved. You will need the password you chose for it.")
                         .font(Rf.mono(12)).foregroundStyle(Rf.faint)
-                        .padding(.top, 4)
+                        .padding(.top, 10)
+                }
+                if !keychain.isEmpty {
+                    KeychainRestoreCard(backups: keychain)
                 }
             }
             .padding(20)
         }
         .rayfishPage()
         .sheet(isPresented: $restoring) { RestoreSheet() }
+        .task { keychain = await Task.detached { IdentityKeychain.list() }.value }
     }
 }

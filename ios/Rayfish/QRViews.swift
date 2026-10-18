@@ -12,12 +12,18 @@ struct SharedCode: Identifiable {
 struct CodeSheet: View {
     var code: SharedCode
     @State private var copied = false
+    private let image: UIImage?
+
+    init(code: SharedCode) {
+        self.code = code
+        image = QRCode.image(code.code)
+    }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
                 SectionLabel(code.title)
-                if let image = QRCode.image(code.code) {
+                if let image {
                     Image(uiImage: image).interpolation(.none).resizable()
                         .frame(width: 220, height: 220)
                         .padding(10).background(Color.white)
@@ -49,12 +55,14 @@ struct CodeSheet: View {
 }
 
 enum QRCode {
+    private static let context = CIContext()
+
     static func image(_ text: String) -> UIImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(text.utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage,
-              let cgImage = CIContext().createCGImage(output, from: output.extent) else { return nil }
+              let cgImage = context.createCGImage(output, from: output.extent) else { return nil }
         return UIImage(cgImage: cgImage)
     }
 }

@@ -1268,10 +1268,10 @@ impl Daemon {
         // wrong instead of silently reporting success on a degraded VPN.
         let mut warnings: Vec<String> = Vec::new();
 
-        // The TUN device/routes are managed by the OS on desktop. On Android the
-        // packet interface is a `VpnService` fd whose routes are configured on the
-        // Kotlin side, so these desktop route calls don't apply.
-        #[cfg(not(target_os = "android"))]
+        // The TUN device/routes are managed by the OS on desktop. On Android and
+        // iOS the platform owns the packet interface and configures its routes,
+        // so these desktop route calls don't apply.
+        #[cfg(not(embedded_tun))]
         {
             let tun_name = self.tun_name.load().as_str().to_owned();
             let my_v6 = derive_ipv6(&self.transport.identity.local_identity());
@@ -2055,7 +2055,7 @@ impl Daemon {
         #[cfg(target_os = "macos")]
         crate::hostfw::remove_tun_passthrough();
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(embedded_tun))]
         if let Err(e) = tun::set_link_down(&tun_name).await {
             tracing::warn!(error = %format!("{e:#}"), "failed to bring TUN interface down");
         }

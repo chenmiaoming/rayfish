@@ -97,8 +97,6 @@ final class NodeHost: @unchecked Sendable {
             try node.unpair()
         case .setQuicEngine(let choice):
             try node.setQuicEngine(engine: choice == .fqCodel ? .fqCodel : .standalone)
-        case .networkChanged:
-            node.networkChanged()
         }
         return Reply(snapshot: snapshot())
     }
@@ -107,7 +105,6 @@ final class NodeHost: @unchecked Sendable {
         let status = node.status()
         var snapshot = Snapshot(
             controlPlane: isStarted,
-            running: status.running,
             nodeId: status.nodeId,
             ipv6: status.ipv6,
             deviceName: node.defaultHostname(),
@@ -118,10 +115,9 @@ final class NodeHost: @unchecked Sendable {
         )
         guard isStarted else { return snapshot }
         let accepting = lock.withLock { acceptingIds }
-        snapshot.accepting = Array(accepting)
         snapshot.offers = ((try? node.listFileOffers()) ?? [])
             .filter { !accepting.contains($0.id) }
-            .map { OfferModel(id: $0.id, from: $0.from, filename: $0.filename, size: $0.size, ownDevice: $0.ownDevice) }
+            .map { OfferModel(id: $0.id, from: $0.from, filename: $0.filename, size: $0.size) }
         snapshot.queued = ((try? node.listQueuedSends()) ?? [])
             .map { QueuedModel(id: $0.id, peer: $0.peer, filename: $0.filename, size: $0.size) }
         snapshot.transfers = ((try? node.listTransfers()) ?? []).map(Self.transfer)
@@ -184,7 +180,7 @@ final class NodeHost: @unchecked Sendable {
             rules: state.rules.enumerated().map { index, rule in
                 FirewallRuleModel(index: UInt32(index), direction: rule.direction, action: rule.action,
                                   protocolName: rule.protocol, port: rule.port,
-                                  peer: rule.peer, network: rule.network)
+                                  peer: rule.peer)
             }
         )
     }
@@ -198,7 +194,7 @@ final class NodeHost: @unchecked Sendable {
             state: NetworkModel.State(detail.state),
             reason: detail.reason,
             peers: detail.peers.map { peer in
-                PeerModel(nodeId: peer.nodeId, hostname: peer.hostname, ipv6: peer.ipv6,
+                PeerModel(nodeId: peer.nodeId, hostname: peer.hostname,
                           state: PeerModel.State(peer.state))
             }
         )

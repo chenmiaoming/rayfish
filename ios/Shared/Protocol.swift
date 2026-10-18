@@ -26,7 +26,6 @@ enum Command: Codable, Equatable {
     case startPairing
     case unpair
     case setQuicEngine(QuicEngineChoice)
-    case networkChanged
 
     /// How long the app waits for a reply. Joining, pairing and approving dial
     /// peers, and sending wakes the receiver first.
@@ -38,10 +37,8 @@ enum Command: Codable, Equatable {
     }
 }
 
-enum QuicEngineChoice: String, Codable, CaseIterable, Identifiable {
+enum QuicEngineChoice: String, Codable {
     case standalone, fqCodel
-
-    var id: String { rawValue }
 }
 
 struct Reply: Codable {
@@ -56,8 +53,6 @@ struct Reply: Codable {
 struct Snapshot: Codable, Equatable {
     /// The node is up: peers can reach it and files can move.
     var controlPlane = false
-    /// The packet tunnel carries traffic.
-    var running = false
     var nodeId = ""
     var ipv6 = ""
     var deviceName = ""
@@ -70,7 +65,6 @@ struct Snapshot: Codable, Equatable {
     var transfers: [TransferModel] = []
     var connects: [RequestModel] = []
     var joins: [JoinRequestModel] = []
-    var accepting: [UInt64] = []
 }
 
 struct NetworkModel: Codable, Equatable, Identifiable {
@@ -94,11 +88,13 @@ struct PeerModel: Codable, Equatable, Identifiable {
 
     var nodeId: String
     var hostname: String
-    var ipv6: String
     var state: State
 
     var id: String { nodeId }
     var isActive: Bool { state == .active }
+    func domain(in network: NetworkModel) -> String? {
+        hostname.isEmpty ? nil : "\(hostname).\(network.name).ray"
+    }
     var displayName: String { hostname.isEmpty ? String(nodeId.prefix(8)) : hostname }
 }
 
@@ -107,7 +103,6 @@ struct OfferModel: Codable, Equatable, Identifiable {
     var from: String
     var filename: String
     var size: UInt64
-    var ownDevice: Bool
 }
 
 struct QueuedModel: Codable, Equatable, Identifiable {
@@ -161,5 +156,4 @@ struct FirewallRuleModel: Codable, Equatable {
     var protocolName: String
     var port: String
     var peer: String
-    var network: String
 }

@@ -10,8 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - An iOS app, the counterpart of the Android one: networks, invites and QR
   codes, pairing, file transfer, firewall rules, join and connect requests,
-  and identity backup and restore. It runs Rayfish as a VPN through a packet
-  tunnel extension.
+  and identity backup and restore, including a backup in iCloud Keychain
+  behind Face ID. It runs Rayfish as a VPN through a packet tunnel extension.
 - `ray up --set KEY=VALUE` persists settings after startup, alongside controller
   enrollment. Repeat the flag for multiple settings; `--enable` is an alias and
   a bare key means `on`, for example `--enable v4-bridge --set dns=partial`.
@@ -32,6 +32,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- After pairing, a new device joins all of its networks at once instead of
+  waiting for each join to finish before starting the next.
 - On systemd-resolved hosts, Rayfish no longer receives DNS queries for every
   name on the machine; only `.ray` is routed to it.
 - After a crash, Rayfish no longer restores an old resolv.conf over one that

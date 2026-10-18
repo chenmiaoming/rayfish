@@ -3,9 +3,10 @@
 # the app and the tunnel link.
 set -eu
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
-# Xcode exports the iOS SDK; cargo's build scripts run on the Mac and must not see it.
+# Xcode exports the iOS SDK and IPHONEOS_DEPLOYMENT_TARGET. The deployment
+# target reaches the C code built into the library; the SDK must not, since
+# cargo's build scripts run on the Mac.
 unset SDKROOT
-export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 case "${PLATFORM_NAME:-iphonesimulator}" in
     iphonesimulator) target=aarch64-apple-ios-sim ;;
     iphoneos) target=aarch64-apple-ios ;;

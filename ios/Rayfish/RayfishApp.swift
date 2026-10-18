@@ -12,6 +12,9 @@ struct RayfishApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                // Compose's 14sp body text sits on a 20sp line; match it so
+                // wrapped text reads the same as on Android.
+                .lineSpacing(5)
         }
     }
 }

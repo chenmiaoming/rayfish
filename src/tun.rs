@@ -313,9 +313,13 @@ fn split_device(device: AsyncDevice, mtu: u16) -> (TunReader, TunWriter) {
 /// Opens the utun interface owned by `NEPacketTunnelProvider` without routing
 /// packets through Swift. The provider keeps its descriptor; Rayfish owns a
 /// duplicate that is closed when the attached data plane stops.
-#[cfg(target_os = "macos")]
+///
+/// Only macOS takes the batched `sendmsg_x`/`recvmsg_x` path: those are private
+/// symbols, and App Store review rejects iOS apps that look them up.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn open_packet_tunnel() -> Result<(TunReader, TunWriter)> {
     let fd = packet_tunnel_fd()?;
+    #[cfg(target_os = "macos")]
     if apple::is_available() {
         let (reader, writer) = apple::split(fd).context("enable batched packet tunnel I/O")?;
         return Ok((
@@ -329,18 +333,6 @@ pub fn open_packet_tunnel() -> Result<(TunReader, TunWriter)> {
         ));
     }
     let raw_fd = fd.into_raw_fd();
-    // SAFETY: `raw_fd` is an owned duplicate of the provider's open utun fd.
-    let device = unsafe { AsyncDevice::from_fd(raw_fd) }.context("open packet tunnel utun fd")?;
-    Ok(split_device(device, TUN_MTU))
-}
-
-/// Opens the utun interface owned by the iOS `NEPacketTunnelProvider`.
-///
-/// Unlike macOS this never takes the batched `sendmsg_x`/`recvmsg_x` path: those
-/// are private symbols, and App Store review rejects apps that look them up.
-#[cfg(target_os = "ios")]
-pub fn open_packet_tunnel() -> Result<(TunReader, TunWriter)> {
-    let raw_fd = packet_tunnel_fd()?.into_raw_fd();
     // SAFETY: `raw_fd` is an owned duplicate of the provider's open utun fd.
     let device = unsafe { AsyncDevice::from_fd(raw_fd) }.context("open packet tunnel utun fd")?;
     Ok(split_device(device, TUN_MTU))
@@ -711,20 +703,6 @@ pub async fn unroute_peer_range(_tun_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// iOS apps cannot create a TUN device. The packet tunnel provider supplies one
-/// through [`open_packet_tunnel`] and NetworkExtension owns its routes.
-#[cfg(target_os = "ios")]
-pub async fn create(_v6: Ipv6Addr) -> Result<(TunReader, TunWriter, String)> {
-    Err(anyhow!(
-        "iOS has no TUN device of its own; attach the packet tunnel instead"
-    ))
-}
-
-#[cfg(target_os = "ios")]
-pub async fn route_peer_range(_tun_name: &str) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 pub async fn route_peer_range(tun_name: &str) -> Result<()> {
     let index = windows_interface_index(tun_name).await?;
@@ -887,7 +865,7 @@ pub async fn route_self_loopback(_v6: Ipv6Addr) -> Result<()> {
 }
 
 /// Bring the TUN interface administratively up (used when activating the VPN).
-#[cfg(not(target_os = "android"))]
+#[cfg(not(embedded_tun))]
 pub async fn set_link_up(tun_name: &str) -> Result<()> {
     set_link_state(tun_name, true).await
 }
@@ -895,16 +873,13 @@ pub async fn set_link_up(tun_name: &str) -> Result<()> {
 /// Bring the TUN interface administratively down (standby). The underlying file
 /// descriptor stays open, so the device can be brought back up without
 /// recreating it.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(embedded_tun))]
 pub async fn set_link_down(tun_name: &str) -> Result<()> {
     set_link_state(tun_name, false).await
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(embedded_tun))]
 async fn set_link_state(tun_name: &str, up: bool) -> Result<()> {
-    // NetworkExtension owns the iOS interface's link state.
-    #[cfg(target_os = "ios")]
-    let _ = (tun_name, up);
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     {
         let state = if up { "up" } else { "down" };

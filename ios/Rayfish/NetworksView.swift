@@ -30,11 +30,8 @@ struct NetworksView: View {
                     .buttonStyle(.plain)
                     .contextMenu {
                         if let domain = network.domain { Text(domain) }
-                        Button("Invite") { Task { await showInvite(network.name) } }
-                        Button("Copy address") {
-                            copyToClipboard(network.domain ?? network.ipv6)
-                            model.toast = "Address copied"
-                        }
+                        Button("Invite") { Task { invite = await model.invite(network.name) } }
+                        Button("Copy address") { model.copy(network.domain ?? network.ipv6, toast: "Address copied") }
                     }
                 }
                 ForEach(model.snapshot.pendingNetworks, id: \.self) { name in
@@ -59,12 +56,6 @@ struct NetworksView: View {
         }
         .sheet(isPresented: $adding) { AddNetworkSheet() }
         .sheet(item: $invite) { CodeSheet(code: $0) }
-    }
-
-    private func showInvite(_ network: String) async {
-        if let code = await model.perform(.invite(network: network))?.code {
-            invite = SharedCode(title: "Invite to \(network)", code: code)
-        }
     }
 }
 

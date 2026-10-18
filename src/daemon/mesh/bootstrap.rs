@@ -74,9 +74,9 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
 
     // Attach the real OS TUN device: create it, record its name, and spawn the
     // writer + `run_mesh` forwarding loop. On Android the packet interface is a
-    // `VpnService` fd attached later by `ray-mobile` via `attach_tun`, so this is
-    // skipped here.
-    #[cfg(not(target_os = "android"))]
+    // `VpnService` fd attached later by `ray-mobile` via `attach_tun`, and on iOS
+    // the NetworkExtension utun, so this is skipped there.
+    #[cfg(not(embedded_tun))]
     {
         let my_ipv6 = derive_ipv6(&daemon.transport.identity.local_identity());
         let (tun_reader, tun_writer, tun_name) = tun::create(my_ipv6)

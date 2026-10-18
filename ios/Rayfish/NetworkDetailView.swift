@@ -41,7 +41,7 @@ struct NetworkDetailView: View {
                         .font(Rf.mono(14))
                     }
                     if let domain = network.domain {
-                        KeyValueRow(key: "Your address", value: domain) { copy(domain) }
+                        KeyValueRow(key: "Your address", value: domain) { model.copy(domain) }
                     }
                     KeyValueRow(key: "Role", value: network.isCoordinator ? "coordinator" : "member")
                     switch network.state {
@@ -61,7 +61,7 @@ struct NetworkDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             Menu {
-                Button("Invite") { Task { await showInvite() } }
+                Button("Invite") { Task { invite = await model.invite(name) } }
                 Button("Leave network", role: .destructive) { confirmLeave = true }
             } label: {
                 Image(systemName: "ellipsis.circle").foregroundStyle(Rf.muted)
@@ -103,12 +103,12 @@ struct NetworkDetailView: View {
                 Text("No peers yet").font(Rf.mono(14)).foregroundStyle(Rf.faint)
             }
             ForEach(network.peers) { peer in
-                let domain = peer.hostname.isEmpty ? nil : "\(peer.hostname).\(network.name).ray"
+                let domain = peer.domain(in: network)
                 Button {
-                    if let domain { copy(domain) }
+                    if let domain { model.copy(domain) }
                 } label: {
                     HStack(spacing: 8) {
-                        Dot(color: peer.isActive ? Rf.emerald : Rf.faint, size: 6)
+                        Dot(color: peer.state.color, size: 6)
                         Text(peer.displayName).font(Rf.text(16)).foregroundStyle(Rf.body)
                         Spacer()
                         Text(peer.nodeId.prefix(8)).font(Rf.mono(12)).foregroundStyle(Rf.faint)
@@ -170,17 +170,6 @@ struct NetworkDetailView: View {
     private func peerName(_ id: String, in network: NetworkModel) -> String {
         if id == "any" { return "any peer" }
         return network.peers.first { $0.nodeId.hasPrefix(id) && !$0.hostname.isEmpty }?.hostname ?? id
-    }
-
-    private func showInvite() async {
-        if let code = await model.perform(.invite(network: name))?.code {
-            invite = SharedCode(title: "Invite to \(name)", code: code)
-        }
-    }
-
-    private func copy(_ text: String) {
-        copyToClipboard(text)
-        model.toast = "Copied \(text)"
     }
 }
 
