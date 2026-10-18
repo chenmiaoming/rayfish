@@ -30,6 +30,7 @@ import xyz.rayfish.android.R
 import xyz.rayfish.android.isActive
 import xyz.rayfish.android.ui.components.*
 import xyz.rayfish.android.ui.theme.*
+import xyz.rayfish.android.ui.userMessage
 
 @Composable
 fun NetworkDetailScreen(
@@ -62,7 +63,7 @@ fun NetworkDetailScreen(
                 MenuItem(stringResource(R.string.menu_invite)) {
                     scope.launch {
                         try { inviteCode = withContext(Dispatchers.IO) { NodeHolder.get(context).invite(detail.name) } }
-                        catch (t: Throwable) { onToast(context.getString(R.string.error_invite_failed, t.message.orEmpty())) }
+                        catch (t: Throwable) { onToast(context.getString(R.string.error_invite_failed, t.userMessage)) }
                     }
                 },
                 if (detail.isCoordinator) MenuItem(stringResource(R.string.menu_send_invite)) { sendingInvite = true } else null,
@@ -127,7 +128,7 @@ fun NetworkDetailScreen(
                                 try {
                                     withContext(Dispatchers.IO) { NodeHolder.get(context).firewallSetDefaultInbound(next) }
                                     reloadFirewall(); onToast(context.getString(R.string.toast_inbound_default, next))
-                                } catch (t: Throwable) { onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
+                                } catch (t: Throwable) { onToast(context.getString(R.string.error_failed, t.userMessage)) }
                             }
                         },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
@@ -163,7 +164,7 @@ fun NetworkDetailScreen(
                                 try {
                                     withContext(Dispatchers.IO) { NodeHolder.get(context).firewallRemove(globalIndex.toUInt()) }
                                     reloadFirewall(); onToast(context.getString(R.string.toast_rule_removed))
-                                } catch (t: Throwable) { onToast(context.getString(R.string.error_remove_failed, t.message.orEmpty())) }
+                                } catch (t: Throwable) { onToast(context.getString(R.string.error_remove_failed, t.userMessage)) }
                             }
                         }) { Text(stringResource(R.string.action_remove), fontFamily = PlexMono, fontSize = 12.sp, color = Rf.Rose400) }
                     }
@@ -187,7 +188,7 @@ fun NetworkDetailScreen(
                     confirmLeave = false
                     scope.launch {
                         try { withContext(Dispatchers.IO) { NodeHolder.get(context).leave(detail.name) }; onToast(context.getString(R.string.toast_left, detail.name)); onLeft() }
-                        catch (t: Throwable) { onToast(context.getString(R.string.error_leave_failed, t.message.orEmpty())) }
+                        catch (t: Throwable) { onToast(context.getString(R.string.error_leave_failed, t.userMessage)) }
                     }
                 }) { Text(stringResource(R.string.action_leave), color = Rf.Rose400, fontFamily = Chakra, fontWeight = FontWeight.SemiBold) }
             },
@@ -207,7 +208,7 @@ fun NetworkDetailScreen(
                         try {
                             withContext(Dispatchers.IO) { NodeHolder.get(context).setHostname(detail.name, h) }
                             onToast(context.getString(R.string.toast_hostname_set)); onChanged(); editing = false
-                        } catch (t: Throwable) { onToast(context.getString(R.string.error_invalid_hostname, t.message.orEmpty())) }
+                        } catch (t: Throwable) { onToast(context.getString(R.string.error_invalid_hostname, t.userMessage)) }
                     }
                 }) { Text(stringResource(R.string.action_save), color = Rf.Rose400, fontFamily = Chakra, fontWeight = FontWeight.SemiBold) }
             },
@@ -253,7 +254,7 @@ fun NetworkDetailScreen(
                                 )
                             }
                             reloadFirewall(); onToast(context.getString(R.string.toast_rule_added)); showAddRule = false
-                        } catch (t: Throwable) { onToast(context.getString(R.string.error_add_failed, t.message.orEmpty())) }
+                        } catch (t: Throwable) { onToast(context.getString(R.string.error_add_failed, t.userMessage)) }
                     }
                 }) { Text(stringResource(R.string.action_add_rule), color = Rf.Rose400, fontFamily = Chakra, fontWeight = FontWeight.SemiBold) }
             },

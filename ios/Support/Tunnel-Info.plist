@@ -23,5 +23,9 @@
         <key>NSExtensionPrincipalClass</key>
         <string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
     </dict>
+    <key>RayfishSentryDSN</key>
+    <string>$(RAYFISH_SENTRY_DSN)</string>
+    <key>RayfishGitSHA</key>
+    <string>$(RAYFISH_GIT_SHA)</string>
 </dict>
 </plist>

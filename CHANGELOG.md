@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- iOS: crash reporting, with an opt-out toggle and a Send diagnostics button in
+  the You tab, as on Android.
 - `just ios-run` builds, installs, and launches the iOS app on a connected iPhone.
 - An iOS app, the counterpart of the Android one: networks, invites and QR
   codes, pairing, file transfer, firewall rules, join and connect requests,
@@ -43,6 +45,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Android and iOS: a new install takes its mesh name from the device name in
+  Settings, so `Alice's Pixel` joins as `alice-pixel`. iOS shares only
+  `iPhone` until Apple grants the app the device name entitlement. A possessive `'s` is
+  dropped from system hostnames everywhere, so `Alice's MacBook` becomes
+  `alice-macbook` instead of `alice-s-macbook`.
+- The `nightly` pre-release no longer includes the Android APK. Apps ship only
+  with versioned releases; `ray update --nightly` still updates the CLI and
+  daemon.
 - Linux: the file-transfer and membership store moved from
   `/etc/rayfish/blobs` to `/var/lib/rayfish/blobs`. An existing store is moved
   on first start.
@@ -60,6 +70,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Android: error messages say what went wrong instead of showing `v1=...` or
+  nothing.
 - After pairing, a new device joins all of its networks at once instead of
   waiting for each join to finish before starting the next.
 - Android: receiving or sending a file no longer crashes the app when Android

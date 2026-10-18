@@ -109,51 +109,8 @@ enum TunnelIPC {
         timeout: TimeInterval = 10,
         using sendMessage: @MainActor (Data, @escaping (Data?) -> Void) throws -> Void
     ) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            let pending = PendingTunnelReply(continuation: continuation)
-            let timer = DispatchWorkItem { pending.finish(.failure(TunnelIPCError.timedOut)) }
-            pending.setTimer(timer)
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
-            do {
-                try sendMessage(data) { response in
-                    if let response {
-                        pending.finish(.success(response))
-                    } else {
-                        pending.finish(.failure(TunnelIPCError.noResponse))
-                    }
-                }
-            } catch {
-                pending.finish(.failure(error))
-            }
-        }
-    }
-}
-
-private final class PendingTunnelReply: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data, Error>?
-    private var timer: DispatchWorkItem?
-
-    init(continuation: CheckedContinuation<Data, Error>) {
-        self.continuation = continuation
-    }
-
-    func setTimer(_ timer: DispatchWorkItem) {
-        lock.lock()
-        if continuation == nil { timer.cancel() } else { self.timer = timer }
-        lock.unlock()
-    }
-
-    func finish(_ result: Result<Data, Error>) {
-        lock.lock()
-        let continuation = self.continuation
-        self.continuation = nil
-        let timer = self.timer
-        self.timer = nil
-        lock.unlock()
-        guard let continuation else { return }
-        timer?.cancel()
-        continuation.resume(with: result)
+        try await ProviderReply.send(data, timeout: timeout, timedOut: TunnelIPCError.timedOut,
+                                     noResponse: TunnelIPCError.noResponse, using: sendMessage)
     }
 }
 

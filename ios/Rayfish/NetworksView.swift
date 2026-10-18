@@ -60,7 +60,7 @@ struct NetworksView: View {
 }
 
 struct NetworkRow: View {
-    var network: NetworkModel
+    var network: NetworkDetail
     var running: Bool
 
     var body: some View {

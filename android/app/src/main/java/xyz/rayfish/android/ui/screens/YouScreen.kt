@@ -26,6 +26,7 @@ import xyz.rayfish.android.Telemetry
 import xyz.rayfish.android.ui.components.*
 import xyz.rayfish.android.ui.qr.rememberQrScanner
 import xyz.rayfish.android.ui.theme.*
+import xyz.rayfish.android.ui.userMessage
 
 @Composable
 fun YouScreen(status: Status?, onToast: (String) -> Unit, onChanged: () -> Unit) {
@@ -57,7 +58,7 @@ fun YouScreen(status: Status?, onToast: (String) -> Unit, onChanged: () -> Unit)
                 val action = withContext(Dispatchers.IO) { NodeHolder.get(context).submitCode(result.trim()) }
                 onToast(context.messageForLinkAction(action))
                 onChanged()
-            } catch (t: Throwable) { onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
+            } catch (t: Throwable) { onToast(context.getString(R.string.error_failed, t.userMessage)) }
         }
     }
 
@@ -96,7 +97,7 @@ fun YouScreen(status: Status?, onToast: (String) -> Unit, onChanged: () -> Unit)
                     PillButton(stringResource(R.string.pairing_show_code), onClick = {
                         scope.launch {
                             try { pairingTicket = withContext(Dispatchers.IO) { NodeHolder.get(context).startPairing() } }
-                            catch (t: Throwable) { onToast(context.getString(R.string.error_pairing_failed, t.message.orEmpty())) }
+                            catch (t: Throwable) { onToast(context.getString(R.string.error_pairing_failed, t.userMessage)) }
                         }
                     }, modifier = Modifier.weight(1f))
                     OutlinePillButton(stringResource(R.string.pairing_scan_code), onClick = scan, modifier = Modifier.weight(1f))
@@ -242,7 +243,7 @@ fun YouScreen(status: Status?, onToast: (String) -> Unit, onChanged: () -> Unit)
                             }
                             deviceName = h
                             onToast(context.getString(R.string.toast_device_name_set)); onChanged(); editing = false
-                        } catch (t: Throwable) { onToast(context.getString(R.string.error_invalid_name, t.message.orEmpty())) }
+                        } catch (t: Throwable) { onToast(context.getString(R.string.error_invalid_name, t.userMessage)) }
                     }
                 }) { Text(stringResource(R.string.action_save), color = Rf.Rose400, fontFamily = Chakra, fontWeight = FontWeight.SemiBold) }
             },
@@ -266,7 +267,7 @@ fun YouScreen(status: Status?, onToast: (String) -> Unit, onChanged: () -> Unit)
                             withContext(Dispatchers.IO) { NodeHolder.get(context).unpair() }
                             paired = false
                             onToast(context.getString(R.string.toast_unpaired)); onChanged()
-                        } catch (t: Throwable) { onToast(context.getString(R.string.error_unpair_failed, t.message.orEmpty())) }
+                        } catch (t: Throwable) { onToast(context.getString(R.string.error_unpair_failed, t.userMessage)) }
                     }
                 }) { Text(stringResource(R.string.action_unpair), color = Rf.Rose400, fontFamily = Chakra, fontWeight = FontWeight.SemiBold) }
             },

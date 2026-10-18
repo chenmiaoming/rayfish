@@ -25,6 +25,7 @@ import xyz.rayfish.android.NodeHolder
 import xyz.rayfish.android.R
 import xyz.rayfish.android.ui.components.*
 import xyz.rayfish.android.ui.theme.*
+import xyz.rayfish.android.ui.userMessage
 
 /** The identity peers connect to and invite, plus the way to ask a peer to connect. */
 @Composable
@@ -80,7 +81,7 @@ fun InboundCard(running: Boolean, onToast: (String) -> Unit) {
         scope.launch {
             try { withContext(Dispatchers.IO) { call() }; reload(); after() }
             catch (t: CancellationException) { throw t }
-            catch (t: Exception) { onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
+            catch (t: Exception) { onToast(context.getString(R.string.error_failed, t.userMessage)) }
             finally { saving = false }
         }
     }
@@ -170,7 +171,7 @@ fun IdentityDialog(
                         onToast(withContext(Dispatchers.IO) { submit(peer) })
                         onDismiss()
                     } catch (t: CancellationException) { throw t }
-                    catch (t: Exception) { onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
+                    catch (t: Exception) { onToast(context.getString(R.string.error_failed, t.userMessage)) }
                     finally { busy = false }
                 }
             }) { Text(confirmLabel, color = Rf.Rose400, fontFamily = Chakra, fontWeight = FontWeight.SemiBold) }

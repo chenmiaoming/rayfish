@@ -48,7 +48,8 @@ xcodegen generate --quiet --spec ios/project.yml --project ios
 xcodebuild -quiet -project ios/Rayfish.xcodeproj -scheme Rayfish \
     -configuration Debug -destination "id=$device" -derivedDataPath target/ios-device \
     -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
-    CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$team" build
+    CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$team" \
+    RAYFISH_GIT_SHA="$(git rev-parse --short HEAD)" build
 app=target/ios-device/Build/Products/Debug-iphoneos/Rayfish.app
 bundle=xyz.rayfish.ios
 
