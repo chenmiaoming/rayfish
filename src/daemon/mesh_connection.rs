@@ -8,7 +8,12 @@
 //! [`forward::DisconnectEvent`] to the supervisor, so there is exactly one report
 //! per dropped connection and no data/control race over who reports.
 
-use iroh::endpoint::ConnectionError;
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::Hash;
+
+use iroh::endpoint::{ConnectionError, SendStream};
+use tokio::task::JoinSet;
 
 use super::*;
 
@@ -51,6 +56,85 @@ impl NackGate {
         }
         self.sent.insert(msg_kind.to_string())
     }
+}
+
+/// Runs queued items one at a time per key, and different keys side by side.
+///
+/// Each key gets one worker task that drains its own queue in arrival order.
+/// Nothing is locked while an item runs, so a slow item delays only the items
+/// queued behind it under the same key.
+struct SerialLanes<K, T> {
+    lanes: HashMap<K, mpsc::UnboundedSender<T>>,
+    workers: JoinSet<()>,
+}
+
+impl<K, T> SerialLanes<K, T>
+where
+    K: Eq + Hash,
+    T: Send + 'static,
+{
+    fn new() -> Self {
+        Self {
+            lanes: HashMap::new(),
+            workers: JoinSet::new(),
+        }
+    }
+
+    /// Queue `item` behind the earlier items under `key`. `run` handles one
+    /// item; each new lane's worker keeps its own clone of it.
+    fn push<R, Fut>(&mut self, key: K, item: T, run: &R)
+    where
+        R: Fn(T) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let item = match self.lanes.get(&key) {
+            Some(lane) => match lane.send(item) {
+                Ok(()) => return,
+                // The lane's worker is gone (a handler panicked). Start a new
+                // one rather than dropping this network's frames for good.
+                Err(mpsc::error::SendError(item)) => item,
+            },
+            None => item,
+        };
+        let (lane, mut queue) = mpsc::unbounded_channel();
+        // The receiver is alive in this scope, so the send cannot fail.
+        let _ = lane.send(item);
+        let run = run.clone();
+        self.workers.spawn(async move {
+            while let Some(item) = queue.recv().await {
+                run(item).await;
+            }
+        });
+        self.lanes.insert(key, lane);
+    }
+
+    /// Stop taking items and wait until every queued one has run.
+    async fn finish(mut self) {
+        self.lanes.clear();
+        while self.workers.join_next().await.is_some() {}
+    }
+
+    /// Stop taking items and let the queued ones finish on their own.
+    fn detach(mut self) {
+        self.lanes.clear();
+        self.workers.detach_all();
+    }
+}
+
+/// One network-scoped control frame, queued on its network's lane.
+struct LaneFrame {
+    handler: AcceptHandler,
+    send: SendStream,
+    msg: ControlMsg,
+}
+
+/// The peer's latest `NetworkHandles` announcement. Applying it needs the peer
+/// registered on this connection, so it is applied again each time a network
+/// frame registers the peer.
+struct PeerAnnouncement {
+    entries: Vec<control::NetworkHandle>,
+    features: u64,
+    receive_mtu: u16,
 }
 
 impl MeshConnection {
@@ -101,6 +185,78 @@ impl MeshConnection {
         );
         // Whether this connection ever became a registered member (see struct docs).
         let mut registered = self.pre_registered;
+        let mut announcement: Option<PeerAnnouncement> = None;
+
+        // Network-scoped frames run on one lane per network, so a slow frame on
+        // one network does not hold up the others on this connection. Pairing
+        // sends one `JoinRequest` per shared network over a single connection,
+        // and each admission writes a roster snapshot and waits on the relay;
+        // handled inline they ran one after another.
+        //
+        // Ordering that still holds:
+        // - Frames for one network run in arrival order, as before. Membership
+        //   frames (`MeshHello`, `JoinRequest`, `MemberApproved`, `LeaveNetwork`,
+        //   `KickedFromNetwork`) only depend on earlier frames for that network.
+        // - Connection-level frames (`NetworkHandles`, `Ping`, ...) stay inline.
+        //   A `NetworkHandles` that overtakes the frame registering the peer
+        //   would be dropped by the peer table, so the latest one is kept and
+        //   applied again whenever a lane reports a registration.
+        // - `registered` is only read when the loop exits, after the lanes have
+        //   drained, so a frame that registers the peer just before the
+        //   connection drops still gets its disconnect reported.
+        let (registered_tx, mut registered_rx) = mpsc::unbounded_channel::<()>();
+        let mut lanes: SerialLanes<EndpointId, LaneFrame> = SerialLanes::new();
+        let run_frame = {
+            let conn = self.conn.clone();
+            let peers = self.ctx.peers.clone();
+            let peer_id = self.peer_id;
+            move |frame: LaneFrame| {
+                let conn = conn.clone();
+                let peers = peers.clone();
+                let registered_tx = registered_tx.clone();
+                async move {
+                    // The reachability wall for the control plane, mirroring
+                    // what `resolve_inbound_by_id` does for datagrams: a frame
+                    // is dispatched to a network's handler on the strength of
+                    // the network id it names, and that id is public, so the
+                    // sender has to be someone this network's roster accounts
+                    // for. The exceptions are the messages by which a peer that
+                    // is legitimately not on the roster yet reaches us; see
+                    // `stranger_may_send`. Checked here rather than on arrival
+                    // so it sees the roster as the earlier frames on this lane
+                    // left it, as it did when frames ran inline. Lanes belong
+                    // to this connection, so a stranger's queued frames only
+                    // ever wait behind its own.
+                    if !stranger_may_send(&frame.msg) && !frame.handler.knows_sender(peer_id) {
+                        tracing::debug!(
+                            peer = %peer_id.fmt_short(),
+                            network = %frame.handler.network_name(),
+                            "control frame from a peer this network's roster does not list; ignoring"
+                        );
+                        return;
+                    }
+                    // `handle_frame` registers the peer (route) as a side effect
+                    // and returns its mesh address once it is a member on this
+                    // network.
+                    let Some(peer_ip) = frame
+                        .handler
+                        .handle_frame(&conn, frame.send, peer_id, frame.msg)
+                        .await
+                    else {
+                        return;
+                    };
+                    let _ = registered_tx.send(());
+                    // (Re)announce our outbound handle table so the peer can
+                    // decode datagrams we tag for this (possibly newly-shared)
+                    // network. Look it up by the address `handle_frame`
+                    // registered it under, not by one derived from the transport
+                    // key: a device whose `MeshHello` claims a cert-bound
+                    // identity is keyed on *that* identity's address, and a
+                    // recompute would find an empty handle table.
+                    announce_network_handles(&peers, &conn, peer_ip).await;
+                }
+            }
+        };
 
         loop {
             // On-demand idle teardown. Armed only when we run on-demand *and* the
@@ -132,8 +288,19 @@ impl MeshConnection {
                 // Daemon shutdown: drop the reader and leave without reporting a
                 // disconnect (the peer isn't gone, we are).
                 _ = self.token.cancelled() => {
+                    lanes.detach();
                     reader.abort();
                     return;
+                }
+                // A lane registered the peer on one of its networks: the
+                // connection now counts as a member's, and a handle announcement
+                // that arrived before the registration can take effect.
+                Some(()) = registered_rx.recv() => {
+                    registered = true;
+                    if let Some(announcement) = &announcement {
+                        self.apply_announcement(announcement);
+                    }
+                    continue;
                 }
                 // Idle timer. When disarmed (`None`) this branch parks forever, so it
                 // costs nothing. When it fires we re-check: a send or read may have
@@ -160,6 +327,8 @@ impl MeshConnection {
                     self.conn.close(VarInt::from_u32(forward::IDLE_CODE), b"idle");
                     reader.abort();
                     self.ctx.stats.record_idle_teardown();
+                    lanes.finish().await;
+                    registered |= registered_rx.try_recv().is_ok();
                     // We close, so our own loop only ever sees `LocallyClosed`, never
                     // our IDLE_CODE. Report `Idle` explicitly so the supervisor removes
                     // the peer and does not reconnect, matching the remote (which does
@@ -176,6 +345,8 @@ impl MeshConnection {
                 // Connection closed. Tear down the reader and report the drop.
                 Err(e) => {
                     reader.abort();
+                    lanes.finish().await;
+                    registered |= registered_rx.try_recv().is_ok();
                     if registered {
                         self.report_disconnect(close_reason(&e)).await;
                     }
@@ -206,6 +377,8 @@ impl MeshConnection {
                     self.conn
                         .close(VarInt::from_u32(forward::ABUSE_CODE), b"control flood");
                     reader.abort();
+                    lanes.finish().await;
+                    registered |= registered_rx.try_recv().is_ok();
                     // A flood close is not a graceful leave, so the supervisor
                     // treats it as a transient drop and reconnects.
                     if registered {
@@ -222,21 +395,13 @@ impl MeshConnection {
                     features,
                     receive_mtu,
                 } => {
-                    self.manager
-                        .apply_network_handles(&self.conn, self.peer_id, entries);
-                    self.ctx
-                        .peers
-                        .note_receive_mtu(&self.peer_id, &self.conn, *receive_mtu);
-                    // The handle announcement is the one control message both ends
-                    // send right after connect, so it is where we learn the peer's
-                    // idle-close capability (the MeshHello handshake is one-way). Gate
-                    // the per-connection idle timer on it: a peer that does not
-                    // advertise support is held open, never idle-closed.
-                    self.ctx.peers.note_idle_support_by_id(
-                        &self.peer_id,
-                        &self.conn,
-                        features & crate::transport::FEATURE_IDLE_CLOSE != 0,
-                    );
+                    let latest = PeerAnnouncement {
+                        entries: entries.clone(),
+                        features: *features,
+                        receive_mtu: *receive_mtu,
+                    };
+                    self.apply_announcement(&latest);
+                    announcement = Some(latest);
                     continue;
                 }
                 ControlMsg::Ping { nonce } => {
@@ -313,40 +478,38 @@ impl MeshConnection {
                 self.ctx.registry.nudge_restore();
                 continue;
             };
-            // The reachability wall for the control plane, mirroring what
-            // `resolve_inbound_by_id` does for datagrams: a frame is dispatched
-            // to a network's handler on the strength of the network id it names,
-            // and that id is public, so the sender has to be someone this
-            // network's roster accounts for. The exceptions are the messages by
-            // which a peer that is legitimately not on the roster yet reaches us;
-            // see `stranger_may_send`.
-            if !stranger_may_send(&frame.msg) && !handler.knows_sender(self.peer_id) {
-                tracing::debug!(
-                    peer = %self.peer_id.fmt_short(),
-                    net = %net_pubkey.fmt_short(),
-                    "control frame from a peer this network's roster does not list; ignoring"
-                );
-                continue;
-            }
             drop(recv); // one message per stream; the reply rides `send`
-            // `handle_frame` registers the peer (route) as a side effect and
-            // returns its mesh address once it is a member on this network.
-            if let Some(peer_ip) = handler
-                .handle_frame(&self.conn, send, self.peer_id, frame.msg)
-                .await
-            {
-                // The peer is now a member on this network, so this connection is
-                // registered: a later drop must be reported.
-                registered = true;
-                // (Re)announce our outbound handle table so the peer can decode
-                // datagrams we tag for this (possibly newly-shared) network. Look
-                // it up by the address `handle_frame` registered it under, not by
-                // one derived from the transport key: a device whose `MeshHello`
-                // claims a cert-bound identity is keyed on *that* identity's
-                // address, and a recompute would find an empty handle table.
-                announce_network_handles(&self.ctx.peers, &self.conn, peer_ip).await;
-            }
+            lanes.push(
+                net_pubkey,
+                LaneFrame {
+                    handler,
+                    send,
+                    msg: frame.msg,
+                },
+                &run_frame,
+            );
         }
+    }
+
+    /// Apply the peer's handle announcement: its inbound decode table, receive
+    /// MTU and idle-close capability. Each is a no-op until the peer is
+    /// registered on this connection.
+    fn apply_announcement(&self, announcement: &PeerAnnouncement) {
+        self.manager
+            .apply_network_handles(&self.conn, self.peer_id, &announcement.entries);
+        self.ctx
+            .peers
+            .note_receive_mtu(&self.peer_id, &self.conn, announcement.receive_mtu);
+        // The handle announcement is the one control message both ends send
+        // right after connect, so it is where we learn the peer's idle-close
+        // capability (the MeshHello handshake is one-way). Gate the
+        // per-connection idle timer on it: a peer that does not advertise
+        // support is held open, never idle-closed.
+        self.ctx.peers.note_idle_support_by_id(
+            &self.peer_id,
+            &self.conn,
+            announcement.features & crate::transport::FEATURE_IDLE_CLOSE != 0,
+        );
     }
 
     /// Whether this peer is the selected exit node.
@@ -437,6 +600,49 @@ mod tests {
             error_code: VarInt::from_u32(code),
             reason: Vec::new().into(),
         })
+    }
+
+    /// Items under one key run in arrival order; a key whose item is stuck does
+    /// not hold up another key's items.
+    #[tokio::test]
+    async fn serial_lanes_keep_order_per_key_and_overlap_keys() {
+        let (log_tx, mut log) = mpsc::unbounded_channel::<&'static str>();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let run = {
+            let gate = Arc::clone(&gate);
+            move |(label, wait): (&'static str, bool)| {
+                let gate = Arc::clone(&gate);
+                let log_tx = log_tx.clone();
+                async move {
+                    if wait {
+                        gate.notified().await;
+                    }
+                    let _ = log_tx.send(label);
+                }
+            }
+        };
+        let mut lanes = SerialLanes::new();
+        lanes.push("a", ("a1", true), &run);
+        lanes.push("a", ("a2", false), &run);
+        lanes.push("b", ("b1", false), &run);
+
+        async fn next(log: &mut mpsc::UnboundedReceiver<&'static str>) -> &'static str {
+            tokio::time::timeout(Duration::from_secs(2), log.recv())
+                .await
+                .expect("an item ran")
+                .expect("log open")
+        }
+        assert_eq!(next(&mut log).await, "b1");
+        // a2 waits behind a1 even though it could run immediately.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), log.recv())
+                .await
+                .is_err()
+        );
+        gate.notify_one();
+        assert_eq!(next(&mut log).await, "a1");
+        assert_eq!(next(&mut log).await, "a2");
+        lanes.finish().await;
     }
 
     #[test]

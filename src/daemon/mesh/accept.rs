@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use iroh_dns::pkarr::SignedPacket;
+
 use crate::daemon;
 
 use super::super::*;
@@ -1097,20 +1099,27 @@ impl CoordinatorAcceptState {
                 return AdmissionCommit::PendingDurability;
             }
         }
+        // Sign the record for this generation while still holding the commit
+        // lock, so its timestamp orders it after every earlier commit, then
+        // release the lock before the relay round trip. Other joins to this
+        // network commit while this one waits on the relay; the relay keeps the
+        // most recent record whichever publish lands last.
         let target = {
             let s = self.state.read().unwrap();
             s.network_secret_key.clone().zip(s.converged_hash)
         };
-        let published_record = match target {
-            Some((key, hash)) => {
-                self.ctx
-                    .registry
-                    .publish_group_hash(&self.network_name, &key, hash)
-                    .await
-            }
-            None => None,
+        let own_id = self.ctx.registry.transport.endpoint.id();
+        let signed = target.and_then(|(key, hash)| {
+            dht::encode_network_record(&key, &hash, &[own_id])
+                .ok()
+                .map(|packet| (hash, packet))
+        });
+        drop(commit_guard);
+        let published = match &signed {
+            Some((hash, packet)) => self.publish_admitted_record(*hash, packet).await,
+            None => false,
         };
-        if published_record.is_none() {
+        if !published {
             // The complete generation and unpublished pointer are already
             // durable. Keep the admission live and let the tracked publisher
             // retry. This also conservatively covers a successful DHT write whose
@@ -1122,24 +1131,39 @@ impl CoordinatorAcceptState {
                 "admission publication was not confirmed; retaining its durable pending generation"
             );
         }
-        let direct_record_published = grant_direct && published_record.is_some();
-        let direct_record = if grant_direct {
-            published_record.or_else(|| {
-                let s = self.state.read().unwrap();
-                let key = s.network_secret_key.as_ref()?;
-                let hash = s.converged_hash?;
-                dht::encode_network_record(key, &hash, &[self.ctx.registry.transport.endpoint.id()])
-                    .ok()
-                    .map(|packet| packet.as_bytes().to_vec())
-            })
-        } else {
-            None
-        };
-        drop(commit_guard);
+        let direct_record_published = grant_direct && published;
+        let direct_record = grant_direct
+            .then(|| signed.map(|(_, packet)| packet.as_bytes().to_vec()))
+            .flatten();
         AdmissionCommit::Committed {
             direct_record,
             direct_record_published,
         }
+    }
+
+    /// Publish the record [`Self::commit_admission`] signed for `hash`, then
+    /// mark that generation published if it is still the recovery pointer.
+    /// Returns whether both happened. Holds no lock across the relay call; the
+    /// mark takes the commit lock briefly because it compares against the
+    /// pointer that commits move.
+    async fn publish_admitted_record(&self, hash: blake3::Hash, packet: &SignedPacket) -> bool {
+        let client = match dht::create_pkarr_client(
+            &self.ctx.registry.transport.endpoint,
+            &self.ctx.registry.transport.pkarr_relay_url,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build pkarr client for admission record");
+                return false;
+            }
+        };
+        if let Err(e) = dht::publish_record(&client, packet).await {
+            tracing::warn!(error = %e, "failed to publish network record");
+            return false;
+        }
+        let snapshot_commit = Arc::clone(&self.state.read().unwrap().snapshot_commit);
+        let _commit_guard = snapshot_commit.lock().await;
+        mark_group_hash_published(&self.network_name, hash)
     }
 
     /// Decide a joiner's hostname against the current roster, or return a denial

@@ -225,8 +225,13 @@ pub(crate) fn spawn_network_publisher(
                     registry.schedule_destruction(&network_name, packet);
                     break;
                 }
+                // Decide and sign under the commit lock, publish after releasing
+                // it. The relay round trip can take seconds, and admissions and
+                // reconverges on this network queue on the same lock. Signing
+                // under it keeps record timestamps in commit order, so the relay
+                // never keeps an older generation over a newer one.
                 let commit = Arc::clone(&state.read().unwrap().snapshot_commit);
-                let _commit = commit.lock().await;
+                let commit_guard = commit.lock().await;
                 if token.is_cancelled() {
                     break;
                 }
@@ -240,6 +245,7 @@ pub(crate) fn spawn_network_publisher(
                     }
                 }
 
+                let mut prepared = None;
                 if persistence_ready
                     && let Some(hash) = configured_group_hash(&network_name)
                     && attempt_is_due(hash, last_publish, retry, Instant::now())
@@ -253,33 +259,43 @@ pub(crate) fn spawn_network_publisher(
                         seed_peers.push(endpoint_id);
                         seed_peers.sort();
                         seed_peers.dedup();
-
-                        match dht::publish_network(&client, &net_secret_key, &hash, &seed_peers)
-                            .await
-                        {
-                            Ok(_) => {
-                                if mark_group_hash_published(&network_name, hash) {
-                                    tracing::info!(
-                                        peers = seed_peers.len(),
-                                        "published network record"
-                                    );
-                                    last_publish = Some((hash, Instant::now()));
-                                    retry = None;
-                                } else {
-                                    retry = Some((
-                                        hash,
-                                        Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL,
-                                    ));
-                                }
-                            }
+                        match dht::encode_network_record(&net_secret_key, &hash, &seed_peers) {
+                            Ok(packet) => prepared = Some((hash, packet, seed_peers.len())),
                             Err(e) => {
-                                tracing::warn!(error = %e, "failed to publish network record");
+                                tracing::warn!(error = %e, "failed to build network record");
                                 retry =
                                     Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
                             }
                         }
                     } else {
                         retry = Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
+                    }
+                }
+                drop(commit_guard);
+
+                if let Some((hash, packet, seed_count)) = prepared {
+                    match dht::publish_record(&client, &packet).await {
+                        Ok(()) => {
+                            // Mark under the lock again: the mark is a compare on
+                            // the recovery pointer, and a commit may have moved it
+                            // on while the publish was in flight.
+                            let marked = {
+                                let _commit = commit.lock().await;
+                                mark_group_hash_published(&network_name, hash)
+                            };
+                            if marked {
+                                tracing::info!(peers = seed_count, "published network record");
+                                last_publish = Some((hash, Instant::now()));
+                                retry = None;
+                            } else {
+                                retry =
+                                    Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to publish network record");
+                            retry = Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
+                        }
                     }
                 }
             }

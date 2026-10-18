@@ -7,10 +7,10 @@
 
 use super::super::*;
 
-/// Maximum time one serialized mesh dial may own or wait for a peer's dial gate.
-/// The bound covers the transport connection and mesh registration so a stalled
-/// attempt cannot block every later reconnect and on-demand dial to that peer.
-const MESH_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time one supervisor dial attempt may take, covering the (shared)
+/// transport dial plus each network's hello and registration, so a stalled
+/// attempt cannot hold up the reconnect loop or an on-demand dial for long.
+const PEER_DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct NetworkToNullify {
     name: String,
@@ -391,7 +391,7 @@ impl NetworkRegistry {
         targets: &[DialTarget],
     ) -> bool {
         match tokio::time::timeout(
-            MESH_DIAL_TIMEOUT,
+            PEER_DIAL_ATTEMPT_TIMEOUT,
             self.dial_peer_once_inner(peer_id, targets),
         )
         .await
@@ -401,7 +401,7 @@ impl NetworkRegistry {
                 self.reachability.note_fail(peer_id);
                 tracing::debug!(
                     peer = %peer_id.fmt_short(),
-                    timeout_secs = MESH_DIAL_TIMEOUT.as_secs(),
+                    timeout_secs = PEER_DIAL_ATTEMPT_TIMEOUT.as_secs(),
                     "mesh dial timed out"
                 );
                 false
@@ -420,24 +420,12 @@ impl NetworkRegistry {
         let peer_ip = derive_ipv6(&peer_id);
         let my_identity = self.transport.identity.local_identity();
         let device_cert = self.current_device_cert();
-        let dial_lock = self.mesh_dial_lock(peer_id);
-        let _dial_guard = dial_lock.lock().await;
         // An accept or another network's dial may already have established the
-        // peer. Reuse that connection and send the remaining network hellos on it.
-        let connected = if let Some(conn) = self.peers.conn_for_ip(&peer_ip)
-            && conn.close_reason().is_none()
-        {
-            Ok(conn)
-        } else {
-            transport::connect_to_peer_with_alpn(
-                &self.transport.endpoint,
-                peer_id,
-                &transport::mesh_alpn(),
-            )
-            .await
-        };
-        let conn = match connected {
-            Ok(c) => c,
+        // peer, or be dialing it now. Reuse that connection and send the
+        // remaining network hellos on it. The claim keeps a fresh connection
+        // findable by other dialers until it is registered below.
+        let (conn, _claim) = match self.connect_mesh_peer(peer_id).await {
+            Ok(DialedPeer { conn, claim }) => (conn, claim),
             Err(e) => {
                 // Flag an incompatible-version peer (ALPN gate) so `ray status`
                 // shows it instead of plain offline; a different failure can't be

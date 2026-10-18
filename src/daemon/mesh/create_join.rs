@@ -3,16 +3,6 @@
 
 use super::super::*;
 use futures::StreamExt;
-use tokio::sync::OwnedMutexGuard;
-
-/// Upper bound on a single proactive full-mesh dial in `dial_all_members`. An
-/// offline peer's `connect` fails on its own (fast when it has no fresh
-/// discovery record, but up to iroh's internal handshake timeout (tens of
-/// seconds) when a stale record still points at it). We cap it so a
-/// restart/reconnect never blocks that long on a dead peer: the dial is
-/// best-effort and the peer's own reconnect loop re-establishes the link once it
-/// comes back online.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A cold resume should give every recently known peer an equal chance to win
 /// the first connection race.  This cap avoids turning a large roster into an
@@ -25,7 +15,6 @@ const WARM_DIAL_CONCURRENCY: usize = 12;
 struct JoinContext<'a> {
     display_name: &'a str,
     my_hostname: &'a str,
-    alpn: &'a [u8],
     net_pubkey: EndpointId,
     /// Exact GroupBlob hash committed by the signed record used for this join.
     group_hash: blake3::Hash,
@@ -469,7 +458,6 @@ impl NetworkRegistry {
             anyhow::bail!("this device has been unpaired by its primary");
         }
 
-        let alpn = transport::mesh_alpn();
         // Use coordinator's network name from GroupBlob, or user alias, or truncated key as fallback
         let blob_name = data
             .name
@@ -510,7 +498,6 @@ impl NetworkRegistry {
         let ctx = JoinContext {
             display_name,
             my_hostname: &my_hostname,
-            alpn: &alpn,
             net_pubkey,
             group_hash,
             invite,
@@ -648,49 +635,24 @@ impl NetworkRegistry {
         let mut last_err = anyhow::anyhow!("no coordinators tried");
         let mut pending = false;
         for coordinator_id in &order {
-            let dial_guard = self.mesh_dial_lock(*coordinator_id).lock_owned().await;
             // Reconnect + cleanup are daemon-wide now (the connection supervisor),
             // so no per-network reconnect task; readers report to the shared sender.
             let cancel = self.shutdown_token.child_token();
 
-            let peer_ip = derive_ipv6(coordinator_id);
-            // A registered connection is shared as is: release the gate so joins
-            // to the same peer (pairing queues one per network) run side by side.
-            let (conn, dial_guard) = if let Some(conn) = self
-                .peers
-                .conn_for_ip(&peer_ip)
-                .filter(|conn| conn.close_reason().is_none())
-            {
-                (conn, None)
-            } else {
-                tracing::info!(coordinator = %coordinator_id.fmt_short(), "connecting to coordinator");
-                let Ok(dialed) = tokio::time::timeout(
-                    DIAL_TIMEOUT,
-                    transport::connect_to_peer_with_alpn(
-                        &self.transport.endpoint,
-                        *coordinator_id,
-                        ctx.alpn,
-                    ),
-                )
-                .await
-                else {
+            // Joins to the same peer (pairing queues one per network) share one
+            // connection and run their handshakes on it side by side.
+            let DialedPeer { conn, claim } = match self.connect_mesh_peer(*coordinator_id).await {
+                Ok(dialed) => dialed,
+                Err(e) => {
+                    tracing::warn!(coordinator = %coordinator_id.fmt_short(), error = %e, "coordinator unreachable, trying next");
                     cancel.cancel();
-                    last_err = anyhow::anyhow!("coordinator dial timed out");
+                    last_err = anyhow::anyhow!("coordinator offline: {e}");
                     continue;
-                };
-                match dialed {
-                    Ok(conn) => (conn, Some(dial_guard)),
-                    Err(e) => {
-                        tracing::warn!(coordinator = %coordinator_id.fmt_short(), error = %e, "coordinator unreachable, trying next");
-                        cancel.cancel();
-                        last_err = anyhow::anyhow!("coordinator offline: {e}");
-                        continue;
-                    }
                 }
             };
 
             match self
-                .run_join_handshake(ctx, data, conn, dial_guard, true, &cancel)
+                .run_join_handshake(ctx, data, conn, claim, true, &cancel)
                 .await
             {
                 Ok(JoinResult::Joined {
@@ -811,23 +773,9 @@ impl NetworkRegistry {
             }));
         }
 
-        let dial_guard = self.mesh_dial_lock(coordinator_id).lock_owned().await;
-        let peer_ip = derive_ipv6(&coordinator_id);
-        let connected = if let Some(conn) = self
-            .peers
-            .conn_for_ip(&peer_ip)
-            .filter(|conn| conn.close_reason().is_none())
-        {
-            Ok((conn, None))
-        } else {
-            tracing::info!(coordinator = %coordinator_id.fmt_short(), "connecting to coordinator");
-            transport::connect_to_peer_with_alpn(&self.transport.endpoint, coordinator_id, ctx.alpn)
-                .await
-                .map(|conn| (conn, Some(dial_guard)))
-        };
-        let state = match connected {
-            Ok((conn, dial_guard)) => match self
-                .run_join_handshake(ctx, data, conn, dial_guard, false, &cancel)
+        let state = match self.connect_mesh_peer(coordinator_id).await {
+            Ok(DialedPeer { conn, claim }) => match self
+                .run_join_handshake(ctx, data, conn, claim, false, &cancel)
                 .await
             {
                 Ok(JoinResult::Joined {
@@ -944,12 +892,10 @@ impl NetworkRegistry {
                     .and_then(|member| member.hostname.clone())
             })
             .unwrap_or_else(|| default_join_hostname(&data.members, my_identity));
-        let alpn = transport::mesh_alpn();
         let invite_lock = Arc::new(AsyncMutex::new(()));
         let ctx = JoinContext {
             display_name: name,
             my_hostname: &my_hostname,
-            alpn: &alpn,
             net_pubkey,
             group_hash,
             invite: None,
@@ -1010,7 +956,7 @@ impl NetworkRegistry {
         ctx: &JoinContext<'_>,
         data: &crate::membership::GroupBlob,
         conn: iroh::endpoint::Connection,
-        dial_guard: Option<OwnedMutexGuard<()>>,
+        dial_claim: Option<DialClaim>,
         initial: bool,
         cancel: &CancellationToken,
     ) -> Result<JoinResult> {
@@ -1018,7 +964,6 @@ impl NetworkRegistry {
             conn,
             &self.transport.endpoint,
             ctx.display_name,
-            ctx.alpn,
             self.mesh_ctx(),
             JoinParams {
                 my_hostname: Some(ctx.my_hostname.to_string()),
@@ -1029,7 +974,7 @@ impl NetworkRegistry {
                 auto_accept_firewall: ctx.auto_accept_firewall,
                 auto_accept_files: ctx.auto_accept_files,
                 initial,
-                dial_guard,
+                dial_claim,
             },
             cancel.clone(),
             Arc::clone(self),
@@ -1448,42 +1393,17 @@ impl NetworkRegistry {
     ) {
         let ctx = self.mesh_ctx();
         let m = member;
-        let dial_lock = self.mesh_dial_lock(m.identity);
-        let _dial_guard = dial_lock.lock().await;
-        // Bound each dial so a dead peer with a stale discovery record can't
-        // stall restore for iroh's full internal handshake timeout; the
-        // connection supervisor retries anything still unreachable.
-        let peer_ip = derive_ipv6(&m.identity);
-        let dialed = if let Some(conn) = self
-            .peers
-            .conn_for_ip(&peer_ip)
-            .filter(|conn| conn.close_reason().is_none())
-        {
-            Ok(conn)
-        } else {
-            let Ok(dialed) = tokio::time::timeout(
-                DIAL_TIMEOUT,
-                transport::connect_to_peer_with_alpn(
-                    &self.transport.endpoint,
-                    m.identity,
-                    &transport::mesh_alpn(),
-                ),
-            )
-            .await
-            else {
-                self.reachability.note_fail(m.identity);
-                tracing::debug!(
-                    network = %network_name,
-                    peer = %m.identity.fmt_short(),
-                    timeout_secs = DIAL_TIMEOUT.as_secs(),
-                    "dial timed out; connection supervisor will retry"
-                );
-                return;
-            };
-            dialed
-        };
+        // Bounded inside the dialer, so a dead peer with a stale discovery
+        // record can't stall restore for iroh's full internal handshake
+        // timeout; the connection supervisor retries anything still
+        // unreachable. A dial another network already has in flight to this
+        // peer is shared rather than repeated.
+        let dialed = self.connect_mesh_peer(m.identity).await;
         match dialed {
-            Ok(peer_conn) => {
+            Ok(DialedPeer {
+                conn: peer_conn,
+                claim,
+            }) => {
                 if let Err(error) = send_mesh_hello(
                     &peer_conn,
                     net_pubkey,
@@ -1515,6 +1435,8 @@ impl NetworkRegistry {
                     network_name,
                 )
                 .await;
+                // Registered: later callers find the connection in the peer table.
+                drop(claim);
                 // Eager-connect reachability: a successful dial marks the peer
                 // reachable so `ray status` shows it active/idle, not offline.
                 self.reachability.note_ok(m.identity);
@@ -1735,7 +1657,6 @@ mod tests {
         let context = JoinContext {
             display_name: "box",
             my_hostname: "studio",
-            alpn: &alpn,
             net_pubkey: id(90),
             group_hash: blake3::hash(b"test roster"),
             invite: None,

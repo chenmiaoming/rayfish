@@ -110,11 +110,10 @@ pub(crate) struct NetworkRegistry {
     pub(crate) transport: Arc<Transport>,
     /// Live peer routing table, for severing / notifying peers on roster change.
     pub(crate) peers: PeerTable,
-    /// Serializes outbound mesh handshakes to one peer until the first caller
-    /// registers its connection. Pairing can join several networks at once;
-    /// checking the peer table without this gate lets every join dial before any
+    /// Shares outbound mesh dials per peer. Pairing joins several networks at
+    /// once; checking the peer table alone would let every join dial before any
     /// of them has installed the shared connection.
-    mesh_dial_locks: DashMap<EndpointId, Arc<AsyncMutex<()>>>,
+    pub(crate) mesh_dialer: MeshDialer,
     /// The per-peer connection driver, so the registry can (re-)register a
     /// network's accept handler (coordinator promotion) or unregister it on
     /// teardown directly.
@@ -297,7 +296,7 @@ impl NetworkRegistry {
             networks,
             transport,
             peers,
-            mesh_dial_locks: DashMap::new(),
+            mesh_dialer: MeshDialer::default(),
             conn,
             dns,
             tun_name,
@@ -326,12 +325,12 @@ impl NetworkRegistry {
         }
     }
 
-    pub(crate) fn mesh_dial_lock(&self, peer: EndpointId) -> Arc<AsyncMutex<()>> {
-        let entry = self
-            .mesh_dial_locks
-            .entry(peer)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())));
-        Arc::clone(entry.value())
+    /// A live mesh connection to `peer`, registered or freshly dialed, sharing
+    /// any dial to it already in flight. See [`MeshDialer`].
+    pub(crate) async fn connect_mesh_peer(&self, peer: EndpointId) -> Result<DialedPeer> {
+        self.mesh_dialer
+            .connect(&self.transport.endpoint, &self.peers, peer)
+            .await
     }
 
     /// Resolve a destination mesh IP to a roster member the on-demand forwarding

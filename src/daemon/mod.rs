@@ -261,6 +261,10 @@ pub(crate) use connection_manager::{ConnectionManager, MeshDispatch};
 mod mesh_connection;
 pub(crate) use mesh_connection::MeshConnection;
 
+// Shared outbound mesh dials, one in flight per peer.
+mod mesh_dialer;
+pub(crate) use mesh_dialer::{DialClaim, DialedPeer, MeshDialer};
+
 // The service that owns the set of active networks (M5 migration seam).
 mod network_registry;
 pub(crate) use network_registry::{DialTarget, NameOwner, NetworkRegistry, missing_networks};
@@ -4459,6 +4463,137 @@ mod accept_handler_tests {
             recorded,
             "sync_exit_offers did not get the offer recorded on the coordinator over the retained connection"
         );
+    }
+
+    /// Pairing sends one join per shared network over a single connection to
+    /// the primary. A frame that is slow on one network (here: waiting on that
+    /// network's snapshot commit) must not hold up another network's frame on
+    /// the same connection, and the slow one still completes afterwards.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn demux_handles_frames_for_different_networks_side_by_side() {
+        use iroh::address_lookup::memory::MemoryLookup;
+
+        let env = TestConfigDir::new();
+        let alpn = transport::mesh_alpn();
+        let coord_ep = loopback_endpoint_on(MemoryLookup::new(), vec![alpn.clone()]).await;
+        let member_ep = loopback_endpoint_on(MemoryLookup::new(), vec![alpn.clone()]).await;
+        let member_id = member_ep.id();
+        let coord_id = coord_ep.id();
+        let blob_store = FsStore::load(env.dir.path().join("blobs")).await.unwrap();
+        let registry = sample_registry(
+            coord_ep.clone(),
+            IrohIdentityProvider::new(coord_id),
+            blob_store.clone(),
+        );
+
+        // Network A seats the member, so its MeshHello is a reconnect that takes
+        // A's snapshot commit lock. On network B the member is a stranger, so its
+        // JoinRequest is queued for approval and answered with JoinPending.
+        let state_a = make_network_state();
+        let net_a = state_a.read().unwrap().network_public_key;
+        state_a.write().unwrap().members.add(seated(member_id));
+        let state_b = make_network_state();
+        let net_b = SecretKey::from_bytes(&[3u8; 32]).public();
+        {
+            let mut s = state_b.write().unwrap();
+            s.network_public_key = net_b;
+            s.network_name = Some("net-b".to_string());
+        }
+
+        let connmgr = Arc::new(ConnectionManager::new());
+        connmgr.set_mesh_dispatch(MeshDispatch {
+            ctx: sample_mesh_ctx(
+                IrohIdentityProvider::new(coord_id),
+                blob_store.clone(),
+                Arc::clone(&registry),
+            ),
+            token: CancellationToken::new(),
+            on_peer_connected: Arc::new(|_| {}),
+        });
+        for (net, name, state) in [
+            (net_a, "net-a", Arc::clone(&state_a)),
+            (net_b, "net-b", Arc::clone(&state_b)),
+        ] {
+            connmgr.register(
+                net,
+                AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
+                    ctx: sample_mesh_ctx(
+                        IrohIdentityProvider::new(coord_id),
+                        blob_store.clone(),
+                        Arc::clone(&registry),
+                    ),
+                    network_name: name.to_string(),
+                    state,
+                    dht_notify: None,
+                    invite_lock: Arc::new(AsyncMutex::new(())),
+                })),
+            );
+        }
+        let accept = {
+            let coord_ep = coord_ep.clone();
+            let cm = Arc::clone(&connmgr);
+            tokio::spawn(async move {
+                let conn = coord_ep
+                    .accept()
+                    .await
+                    .expect("incoming")
+                    .await
+                    .expect("accept connection");
+                cm.drive_mesh_connection(conn, false).await;
+            })
+        };
+        let conn = member_ep
+            .connect(coord_ep.addr(), &alpn)
+            .await
+            .expect("member dials coordinator");
+
+        // Stall network A behind its commit lock, then send A's frame first.
+        let commit_a = Arc::clone(&state_a.read().unwrap().snapshot_commit);
+        let commit_guard = commit_a.lock().await;
+        let (mut send_a, mut recv_a) = conn.open_bi().await.unwrap();
+        control::send_msg(
+            &mut send_a,
+            Some(net_a),
+            &ControlMsg::MeshHello {
+                identity: member_id,
+                hostname: None,
+                device_cert: None,
+            },
+        )
+        .await
+        .unwrap();
+        let (mut send_b, mut recv_b) = conn.open_bi().await.unwrap();
+        control::send_msg(
+            &mut send_b,
+            Some(net_b),
+            &ControlMsg::JoinRequest {
+                invite_secret: None,
+                hostname: None,
+                device_cert: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let reply_b = tokio::time::timeout(Duration::from_secs(5), control::recv_msg(&mut recv_b))
+            .await
+            .expect("network B must be answered while network A is still busy")
+            .unwrap();
+        assert!(matches!(reply_b, ControlMsg::JoinPending), "{reply_b:?}");
+
+        drop(commit_guard);
+        let reply_a = tokio::time::timeout(Duration::from_secs(5), control::recv_msg(&mut recv_a))
+            .await
+            .expect("network A completes once its commit lock is free")
+            .unwrap();
+        assert!(matches!(reply_a, ControlMsg::Welcome { .. }), "{reply_a:?}");
+        drop(recv_a);
+
+        accept.abort();
+        coord_ep.close().await;
+        member_ep.close().await;
+        blob_store.shutdown().await.unwrap();
     }
 
     #[test]

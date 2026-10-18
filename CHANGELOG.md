@@ -55,7 +55,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - After pairing, a new device joins all of its networks at once instead of
-  waiting for each join to finish before starting the next.
+  waiting for each join to finish before starting the next. The device it
+  paired with now admits those joins side by side too, so pairing with many
+  shared networks takes about as long as joining one.
 - Android: receiving or sending a file no longer crashes the app when Android
   15 or later has used up the daily background transfer time; the transfer is
   marked failed instead.

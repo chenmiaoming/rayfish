@@ -278,7 +278,6 @@ pub(crate) async fn reconverge_and_apply(
     network_name: &str,
     state: &SharedNetworkState,
     my_identity: EndpointId,
-    alpn: &[u8],
     device_cert: &Option<control::DeviceCert>,
 ) {
     let MeshCtx {
@@ -335,7 +334,6 @@ pub(crate) async fn reconverge_and_apply(
         drain_pending_rename(
             endpoint,
             &roster,
-            alpn,
             network_name,
             my_identity,
             device_cert,
@@ -451,7 +449,6 @@ pub(crate) async fn reconverge_and_apply(
     drain_pending_rename(
         endpoint,
         &roster,
-        alpn,
         network_name,
         my_identity,
         device_cert,

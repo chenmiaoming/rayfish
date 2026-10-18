@@ -23,8 +23,8 @@ pub(crate) mod destruction;
 /// stopped resolving the relay's own name) would otherwise leave `ray join`
 /// hanging with nothing on screen.
 const RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-/// Bound publication too: snapshot commits wait behind an in-flight publish so
-/// an older record cannot land after a newer recovery pointer.
+/// Bound publication too, so a blackholed relay cannot hold a publisher or an
+/// admission waiting on its record forever.
 const PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Resolve the pkarr relay URL for one daemon from its startup configuration.
@@ -159,8 +159,20 @@ pub async fn publish_network(
     seed_peers: &[EndpointId],
 ) -> Result<Vec<u8>> {
     let packet = encode_network_record(key, blob_hash, seed_peers)?;
-    match tokio::time::timeout(PUBLISH_TIMEOUT, client.publish(&packet)).await {
-        Ok(Ok(())) => Ok(packet.as_bytes().to_vec()),
+    publish_record(client, &packet).await?;
+    Ok(packet.as_bytes().to_vec())
+}
+
+/// Publish a network record built earlier by [`encode_network_record`].
+///
+/// Callers that order their records against local state sign the packet while
+/// they hold that state's lock and publish it after releasing the lock. The
+/// packet's timestamp is taken at signing, and the relay keeps the most recent
+/// one, so a record signed earlier cannot replace a later one even when its
+/// publish finishes last.
+pub async fn publish_record(client: &PkarrRelayClient, packet: &SignedPacket) -> Result<()> {
+    match tokio::time::timeout(PUBLISH_TIMEOUT, client.publish(packet)).await {
+        Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(anyhow::anyhow!("failed to publish network record: {e:#}")),
         Err(_) => Err(anyhow::anyhow!(
             "timed out publishing network record after {}s",
