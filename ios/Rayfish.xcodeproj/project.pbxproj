@@ -537,7 +537,7 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RAYFISH_GIT_SHA = "";
-				RAYFISH_SENTRY_DSN = "";
+				RAYFISH_SENTRY_DSN = "https://3ace3eb4551a022cfd59fabe5b9f9c7e@o4511671603625984.ingest.de.sentry.io/4511671605198928";
 				RUST_LIB_iphoneos = "$(SRCROOT)/../target/aarch64-apple-ios/release/libray_mobile.a";
 				RUST_LIB_iphonesimulator = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release/libray_mobile.a";
 				SDKROOT = iphoneos;
@@ -724,7 +724,7 @@
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RAYFISH_GIT_SHA = "";
-				RAYFISH_SENTRY_DSN = "";
+				RAYFISH_SENTRY_DSN = "https://3ace3eb4551a022cfd59fabe5b9f9c7e@o4511671603625984.ingest.de.sentry.io/4511671605198928";
 				RUST_LIB_iphoneos = "$(SRCROOT)/../target/aarch64-apple-ios/release/libray_mobile.a";
 				RUST_LIB_iphonesimulator = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release/libray_mobile.a";
 				SDKROOT = iphoneos;

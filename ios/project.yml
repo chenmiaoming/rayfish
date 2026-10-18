@@ -9,8 +9,10 @@ settings:
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
-    # Empty turns crash reporting off. The just recipes pass the commit.
-    RAYFISH_SENTRY_DSN: ""
+    # Shared with Android (android/app/build.gradle.kts). Not a secret: it only
+    # authorizes sending events to the project. Empty turns crash reporting off.
+    # The just recipes pass the commit.
+    RAYFISH_SENTRY_DSN: "https://3ace3eb4551a022cfd59fabe5b9f9c7e@o4511671603625984.ingest.de.sentry.io/4511671605198928"
     RAYFISH_GIT_SHA: ""
     TARGETED_DEVICE_FAMILY: "1"
     SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
