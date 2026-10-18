@@ -2066,4 +2066,116 @@ mod tests {
         );
         daemon.shutdown_and_close().await;
     }
+
+    /// A discovery relay that holds every request until `open` is set, then
+    /// answers a publish with 200 and a resolve with 404.
+    async fn gated_relay(open: tokio::sync::watch::Receiver<bool>) -> url::Url {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let url = url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut open = open.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    if open.wait_for(|open| *open).await.is_err() {
+                        return;
+                    }
+                    let status = if request.starts_with(b"PUT") {
+                        "200 OK"
+                    } else {
+                        "404 Not Found"
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        url
+    }
+
+    /// A create saves the network's config before its first record publish
+    /// returns, and registers the handle only after. A restore sweep landing in
+    /// that gap used to see a saved network that was not live and restore it,
+    /// leaving two coordinator states whose publishers fought over the record:
+    /// a joiner admitted by one was then removed by the other's older roster.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_restore_sweep_skips_a_network_still_being_created() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = TempConfigDir::new();
+        let (open_tx, open_rx) = tokio::sync::watch::channel(false);
+        let relay = gated_relay(open_rx).await;
+        config::update_settings(|cfg| {
+            cfg.mdns_enabled = false;
+            cfg.discovery_dns = config::ServerOverride {
+                servers: vec![relay.to_string()],
+                replace: true,
+            };
+            Ok(())
+        })
+        .unwrap();
+        let daemon = build_headless(false).await.unwrap();
+        let registry = Arc::clone(&daemon.registry);
+
+        let create = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move {
+                registry
+                    .create_network_inner(
+                        GroupMode::Restricted,
+                        Some("lab".into()),
+                        None,
+                        false,
+                        None,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while config::load_network("lab").unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the create saves its config before publishing");
+        assert!(
+            !registry.networks.contains_key("lab"),
+            "publish is held open"
+        );
+
+        let saved = config::load().unwrap();
+        let missing = missing_networks(
+            &saved.networks,
+            |name| registry.networks.contains_key(name),
+            |name| registry.restoring.contains(name),
+        );
+        assert!(
+            missing.iter().all(|m| m.name != "lab"),
+            "a sweep would restore a network that is still being created"
+        );
+        assert!(registry.claim_registration("lab").is_none());
+
+        open_tx.send(true).unwrap();
+        let created = create.await.unwrap().unwrap();
+        assert!(matches!(created, IpcMessage::Created { .. }), "{created:?}");
+        assert!(registry.networks.contains_key("lab"));
+        assert!(!registry.restoring.contains("lab"), "the claim is released");
+        daemon.shutdown_and_close().await;
+    }
 }

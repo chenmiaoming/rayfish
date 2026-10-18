@@ -58,6 +58,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   waiting for each join to finish before starting the next. The device it
   paired with now admits those joins side by side too, so pairing with many
   shared networks takes about as long as joining one.
+- Someone who joins a network seconds after it was created is no longer
+  dropped from it right away. A background check could mistake the new network
+  for one that failed to start and start it a second time, and the second copy
+  then published the roster from before the join.
 - Android: receiving or sending a file no longer crashes the app when Android
   15 or later has used up the daily background transfer time; the transfer is
   marked failed instead.

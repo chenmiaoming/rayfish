@@ -190,9 +190,11 @@ pub(crate) struct NetworkRegistry {
     /// fires while the data plane is down (boot, standby) from withdrawing an
     /// offer that `activate()` is about to re-advertise.
     pub(crate) exit_sync_enabled: AtomicBool,
-    /// Networks whose restore is already running, so a sweep never starts a
-    /// second one for the same network. Removed when the restore finishes,
-    /// however it finishes.
+    /// Networks that a create or restore is bringing up right now, each held by
+    /// a [`RegistrationClaim`]. A sweep skips them: a create saves the config
+    /// before its handle is registered, and a restore started in that gap would
+    /// run a second coordinator state for the same network. See
+    /// [`NetworkRegistry::claim_registration`].
     pub(crate) restoring: Arc<DashSet<String>>,
     /// Why each saved-but-unregistered network's last restore attempt failed,
     /// keyed by network name. `ray status` reports it beside the network so a
@@ -248,6 +250,19 @@ fn peer_selector_for_network<'a>(network: &str, selector: &'a str) -> Option<&'a
 /// testable without a running daemon, which is the part worth pinning down: the
 /// sweep runs on a timer and on peer traffic, so starting a duplicate restore
 /// (or skipping a genuinely dead network) is the failure mode that matters.
+/// A network name held in [`NetworkRegistry::restoring`] while one path brings
+/// that network up. Dropping it releases the name, however that path ends.
+pub(crate) struct RegistrationClaim {
+    claims: Arc<DashSet<String>>,
+    name: String,
+}
+
+impl Drop for RegistrationClaim {
+    fn drop(&mut self) {
+        self.claims.remove(&self.name);
+    }
+}
+
 pub(crate) fn missing_networks(
     saved: &[config::NetworkConfig],
     is_live: impl Fn(&str) -> bool,
@@ -324,6 +339,17 @@ impl NetworkRegistry {
             restore_nudge: Arc::new(Notify::new()),
             poll_nudge: Arc::new(Notify::new()),
         }
+    }
+
+    /// Claim `name` for the one create or restore that may register it, or
+    /// `None` while another holds it.
+    pub(crate) fn claim_registration(&self, name: &str) -> Option<RegistrationClaim> {
+        self.restoring
+            .insert(name.to_string())
+            .then(|| RegistrationClaim {
+                claims: Arc::clone(&self.restoring),
+                name: name.to_string(),
+            })
     }
 
     /// A live mesh connection to `peer`, registered or freshly dialed, sharing
@@ -946,6 +972,14 @@ impl NetworkRegistry {
                 n
             }
             None => self.unclaimed_network_name(&network_name::generate_name(), None)?,
+        };
+        // Held until the handle is registered. The config is saved first and the
+        // record publish in between can take seconds; a restore sweep in that
+        // gap would see a saved network that is not live and restore a second
+        // coordinator state for it, whose publisher then republishes its stale
+        // roster over every admission this one makes.
+        let Some(_registration) = self.claim_registration(&name) else {
+            return Ok(ipc_err(format!("network '{name}' is already being set up")));
         };
 
         let net_secret_key = SecretKey::generate();
