@@ -67,10 +67,7 @@ final class AppModel: ObservableObject {
     private func seedDeviceName() async {
         let node = tunnel.local.node
         let model = UIDevice.current.model
-        await Task.detached {
-            guard node.defaultHostname().isEmpty else { return }
-            try? node.setDefaultHostname(name: Hostnames.sanitize(model))
-        }.value
+        await Task.detached { try? node.seedDefaultHostname(model: model) }.value
     }
 
     func refresh() {
@@ -168,18 +165,5 @@ enum ReceivedFiles {
                 RayfishLog.app.error("Moving a received file failed: \(error.localizedDescription, privacy: .public)")
             }
         }
-    }
-}
-
-enum Hostnames {
-    /// Lowercase `[a-z0-9-]`, hyphens collapsed and trimmed, at most 63
-    /// characters: the core's hostname rules.
-    static func sanitize(_ raw: String) -> String {
-        var name = raw.lowercased()
-            .replacingOccurrences(of: "[^a-z0-9-]", with: "-", options: .regularExpression)
-            .replacingOccurrences(of: "-+", with: "-", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        if name.count > 63 { name = String(name.prefix(63)).trimmingCharacters(in: CharacterSet(charactersIn: "-")) }
-        return name.isEmpty ? "phone" : name
     }
 }

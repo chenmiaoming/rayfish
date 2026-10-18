@@ -496,6 +496,11 @@ void uniffi_ray_mobile_fn_method_node_reject_file_offer(void*_Nonnull ptr, uint6
 RustBuffer uniffi_ray_mobile_fn_method_node_restore_identity(void*_Nonnull ptr, RustBuffer code, RustBuffer password, int8_t replace_existing, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEED_DEFAULT_HOSTNAME
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEED_DEFAULT_HOSTNAME
+void uniffi_ray_mobile_fn_method_node_seed_default_hostname(void*_Nonnull ptr, RustBuffer model, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEND_FILE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEND_FILE
 void uniffi_ray_mobile_fn_method_node_send_file(void*_Nonnull ptr, RustBuffer path, RustBuffer peer, RustCallStatus *_Nonnull out_status
@@ -589,6 +594,11 @@ void*_Nonnull uniffi_ray_mobile_fn_method_node_watch_files(void*_Nonnull ptr, ui
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_INIT_CALLBACK_VTABLE_FILECHANGELISTENER
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_INIT_CALLBACK_VTABLE_FILECHANGELISTENER
 void uniffi_ray_mobile_fn_init_callback_vtable_filechangelistener(const UniffiVTableCallbackInterfaceFileChangeListener* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_FUNC_ERROR_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_FUNC_ERROR_MESSAGE
+RustBuffer uniffi_ray_mobile_fn_func_error_message(RustBuffer error, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_RAY_MOBILE_RUSTBUFFER_ALLOC
@@ -871,6 +881,12 @@ void ffi_ray_mobile_rust_future_free_void(uint64_t handle
 void ffi_ray_mobile_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_FUNC_ERROR_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_FUNC_ERROR_MESSAGE
+uint16_t uniffi_ray_mobile_checksum_func_error_message(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_FILEWATCH_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_FILEWATCH_CANCEL
 uint16_t uniffi_ray_mobile_checksum_method_filewatch_cancel(void
@@ -1114,6 +1130,12 @@ uint16_t uniffi_ray_mobile_checksum_method_node_reject_file_offer(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_RESTORE_IDENTITY
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_RESTORE_IDENTITY
 uint16_t uniffi_ray_mobile_checksum_method_node_restore_identity(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SEED_DEFAULT_HOSTNAME
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SEED_DEFAULT_HOSTNAME
+uint16_t uniffi_ray_mobile_checksum_method_node_seed_default_hostname(void
 
 );
 #endif

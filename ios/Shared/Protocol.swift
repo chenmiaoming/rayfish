@@ -48,10 +48,11 @@ struct Reply: Codable {
     var snapshot: Snapshot? = nil
     var code: String? = nil
     var message: String? = nil
-    var firewall: FirewallModel? = nil
+    var firewall: FirewallStateInfo? = nil
 }
 
-/// Everything the screens show, read in one round trip.
+/// Everything the screens show, read in one round trip. The core's own
+/// records, which the bindings make Codable for the trip from the tunnel.
 struct Snapshot: Codable, Equatable {
     /// The node is up: peers can reach it and files can move.
     var controlPlane = false
@@ -60,102 +61,56 @@ struct Snapshot: Codable, Equatable {
     var deviceName = ""
     var paired = false
     var quicEngine = QuicEngineChoice.standalone
-    var networks: [NetworkModel] = []
+    var networks: [NetworkDetail] = []
     var pendingNetworks: [String] = []
-    var offers: [OfferModel] = []
-    var queued: [QueuedModel] = []
-    var transfers: [TransferModel] = []
-    var connects: [RequestModel] = []
+    var offers: [FileOffer] = []
+    var queued: [QueuedSend] = []
+    var transfers: [Transfer] = []
+    var connects: [PendingRequest] = []
     var joins: [JoinRequestModel] = []
 }
 
-struct NetworkModel: Codable, Equatable, Identifiable {
-    enum State: String, Codable { case connected, connecting, notConnected }
-
-    var name: String
-    var ipv6: String
-    var hostname: String
-    var isCoordinator: Bool
-    var state: State
-    var reason: String?
-    var peers: [PeerModel]
-
-    var id: String { name }
+extension NetworkDetail: Identifiable {
+    public var id: String { name }
     var domain: String? { hostname.isEmpty ? nil : "\(hostname).\(name).ray" }
     var peersOnline: Int { peers.filter(\.isActive).count }
 }
 
-struct PeerModel: Codable, Equatable, Identifiable {
-    enum State: String, Codable { case active, idle, offline }
-
-    var nodeId: String
-    var hostname: String
-    var state: State
-
-    var id: String { nodeId }
+extension PeerInfo: Identifiable {
+    public var id: String { nodeId }
     var isActive: Bool { state == .active }
-    func domain(in network: NetworkModel) -> String? {
+    func domain(in network: NetworkDetail) -> String? {
         hostname.isEmpty ? nil : "\(hostname).\(network.name).ray"
     }
     var displayName: String { hostname.isEmpty ? String(nodeId.prefix(8)) : hostname }
 }
 
-struct OfferModel: Codable, Equatable, Identifiable {
-    var id: UInt64
-    var from: String
-    var filename: String
-    var size: UInt64
+extension PeerConnState {
+    var label: String {
+        switch self {
+        case .active: "active"
+        case .idle: "idle"
+        case .offline: "offline"
+        }
+    }
 }
 
-struct QueuedModel: Codable, Equatable, Identifiable {
-    var id: UInt64
-    var peer: String
-    var filename: String
-    var size: UInt64
-}
+extension FileOffer: Identifiable {}
+extension QueuedSend: Identifiable {}
 
-struct TransferModel: Codable, Equatable, Identifiable {
-    enum State: String, Codable { case offered, transferring, done, failed }
-
-    var id: UInt64
-    var outgoing: Bool
-    var peer: String
-    var filename: String
-    var size: UInt64
-    var transferred: UInt64
-    var state: State
-
+extension Transfer: Identifiable {
     var isActive: Bool { state == .offered || state == .transferring }
 }
 
-struct RequestModel: Codable, Equatable, Identifiable {
-    var shortId: String
-    var hostname: String?
-    var waitingSecs: UInt64
-
-    var id: String { shortId }
+extension PendingRequest: Identifiable {
+    public var id: String { shortId }
 }
 
+/// A join request carries no network of its own; the list it came from does.
 struct JoinRequestModel: Codable, Equatable, Identifiable {
     var network: String
     var shortId: String
     var hostname: String?
 
     var id: String { "\(network):\(shortId)" }
-}
-
-struct FirewallModel: Codable, Equatable {
-    var defaultInbound: String
-    var defaultOutbound: String
-    var rules: [FirewallRuleModel]
-}
-
-struct FirewallRuleModel: Codable, Equatable {
-    /// Position in the node's full rule list, which removal takes.
-    var index: UInt32
-    var direction: String
-    var action: String
-    var protocolName: String
-    var port: String
-    var peer: String
 }

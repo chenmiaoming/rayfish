@@ -108,36 +108,44 @@ const START_TIMEOUT: Duration = Duration::from_secs(45);
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum RayError {
     /// A method that needs the daemon was called before [`Node::start`].
-    #[error("node not started")]
+    #[error("Rayfish is not running")]
     NotStarted,
     /// The supplied invite/pairing code could not be decoded.
-    #[error("bad code: {0}")]
+    #[error("that code is not valid: {0}")]
     BadCode(String),
     /// Joining a network failed (dial, handshake, or admission).
-    #[error("join failed: {0}")]
+    #[error("could not join: {0}")]
     JoinFailed(String),
     /// Pairing with a primary device failed.
-    #[error("pair failed: {0}")]
+    #[error("could not pair: {0}")]
     PairFailed(String),
     /// Any other core error: identity load, endpoint bind, create, or an
     /// unexpected protocol response.
     #[error("{0}")]
     Network(String),
     /// A backup code would not decode, or the password was wrong. The two are
-    /// one case: the AEAD cannot tell them apart.
-    #[error("{0}")]
+    /// one case: the AEAD cannot tell them apart, so neither can the message.
+    #[error("wrong password, or the backup is damaged")]
     BadBackup(String),
     /// [`Node::restore_identity`] found an identity already on the device and
     /// was not told to replace it. Carries the existing public key so the UI can
     /// name what it is about to overwrite. Not a failure on its own: the caller
     /// is expected to confirm with the user and call again with
     /// `replace_existing`.
-    #[error("device already has identity {0}")]
+    #[error("this device already has identity {0}")]
     IdentityExists(String),
     /// A restore was attempted while the node was running. The endpoint is bound
     /// to the old key, so the identity cannot change under it; stop first.
-    #[error("stop the node before restoring an identity")]
+    #[error("turn Rayfish off before restoring an identity")]
     NodeRunning,
+}
+
+/// The error in words, from its `Display`. The generated bindings describe an
+/// error by its variant and fields (`v1=...` in Kotlin, the case name in
+/// Swift), which is not something to show a person.
+#[uniffi::export]
+pub fn error_message(error: RayError) -> String {
+    error.to_string()
 }
 
 impl RayError {
@@ -887,6 +895,18 @@ impl Node {
         })
         .map_err(RayError::network)?;
         Ok(())
+    }
+
+    /// Name the device after its model on first run, so pairing auto-joins all
+    /// use one name. Folded into a hostname the way the desktop folds its OS
+    /// hostname, or `phone` when nothing usable is left. No-op once a name is
+    /// set.
+    pub fn seed_default_hostname(&self, model: String) -> Result<(), RayError> {
+        if !self.default_hostname().is_empty() {
+            return Ok(());
+        }
+        let name = hostname::mesh_form(&model).unwrap_or_else(|| "phone".to_string());
+        self.set_default_hostname(name)
     }
 
     /// Saved engine selection. Available before the node starts.
@@ -1760,6 +1780,9 @@ mod device_name_tests {
 
         #[cfg(not(windows))]
         {
+            node.seed_default_hostname("iPhone 15 Pro".into()).unwrap();
+            assert_eq!(node.default_hostname(), "iphone-15-pro");
+
             node.set_default_hostname("my-phone".into()).unwrap();
             assert_eq!(node.default_hostname(), "my-phone");
             assert_eq!(
@@ -1769,6 +1792,10 @@ mod device_name_tests {
 
             // Invalid name is rejected and does not overwrite the stored value.
             assert!(node.set_default_hostname("BAD NAME".into()).is_err());
+            assert_eq!(node.default_hostname(), "my-phone");
+
+            // A name the user chose is never replaced by the model.
+            node.seed_default_hostname("Pixel 9".into()).unwrap();
             assert_eq!(node.default_hostname(), "my-phone");
 
             assert_eq!(node.quic_engine().unwrap(), QuicEngine::Standalone);

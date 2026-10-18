@@ -73,7 +73,7 @@ fn raw_system_hostname() -> Option<String> {
 /// full FQDN, or (on macOS) a sentence with spaces and an apostrophe in it. So
 /// only the first label is kept, it is lowercased, and every other character
 /// becomes a hyphen: `Alice's MacBook.local` -> `alice-s-macbook`.
-fn mesh_form(raw: &str) -> Option<String> {
+pub fn mesh_form(raw: &str) -> Option<String> {
     let label = raw.split('.').next().unwrap_or(raw).to_ascii_lowercase();
     let mut name = String::with_capacity(label.len());
     for c in label.chars() {

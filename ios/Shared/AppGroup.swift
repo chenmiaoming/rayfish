@@ -74,20 +74,11 @@ enum AppGroupError: LocalizedError {
     var errorDescription: String? { "Rayfish shared storage is unavailable" }
 }
 
-/// The core's errors in words for a toast. UniFFI's own description prints
-/// the Swift case name.
+/// The core's error message, capitalized to stand alone in a toast.
 func userMessage(_ error: Error) -> String {
     guard let error = error as? RayError else { return error.localizedDescription }
-    return switch error {
-    case .NotStarted: "Turn Rayfish on first"
-    case .BadCode(let detail): "That code is not valid: \(detail)"
-    case .JoinFailed(let detail): "Could not join: \(detail)"
-    case .PairFailed(let detail): "Could not pair: \(detail)"
-    case .Network(let detail): detail
-    case .BadBackup: "Wrong password, or the backup is damaged"
-    case .IdentityExists: "This device already has an identity"
-    case .NodeRunning: "Turn Rayfish off first"
-    }
+    let text = errorMessage(error: error)
+    return text.prefix(1).uppercased() + text.dropFirst()
 }
 
 func formatSize(_ bytes: UInt64) -> String {

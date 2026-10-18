@@ -57,17 +57,17 @@ final class NodeHost: @unchecked Sendable {
                 }
             }
         case .firewall:
-            return Reply(firewall: try firewall())
+            return Reply(firewall: try node.firewallShow())
         case .allowInbound(let network, let protocolName, let port, let peer):
             try node.firewallAdd(direction: "in", action: "allow", protocol: protocolName,
                                  port: port, peer: peer, network: network)
-            return Reply(firewall: try firewall())
+            return Reply(firewall: try node.firewallShow())
         case .removeFirewallRule(let index):
             try node.firewallRemove(index: index)
-            return Reply(firewall: try firewall())
+            return Reply(firewall: try node.firewallShow())
         case .setDefaultInbound(let action):
             try node.firewallSetDefaultInbound(action: action)
-            return Reply(firewall: try firewall())
+            return Reply(firewall: try node.firewallShow())
         case .approveConnect(let id):
             try node.approveConnectRequest(shortId: id)
         case .rejectConnect(let id):
@@ -116,19 +116,15 @@ final class NodeHost: @unchecked Sendable {
             deviceName: node.defaultHostname(),
             paired: node.isPaired(),
             quicEngine: (try? node.quicEngine()) == .fqCodel ? .fqCodel : .standalone,
-            networks: status.networks.map(Self.network),
+            networks: status.networks,
             pendingNetworks: status.pendingNetworks
         )
         guard isStarted else { return snapshot }
         let accepting = lock.withLock { acceptingIds }
-        snapshot.offers = ((try? node.listFileOffers()) ?? [])
-            .filter { !accepting.contains($0.id) }
-            .map { OfferModel(id: $0.id, from: $0.from, filename: $0.filename, size: $0.size) }
-        snapshot.queued = ((try? node.listQueuedSends()) ?? [])
-            .map { QueuedModel(id: $0.id, peer: $0.peer, filename: $0.filename, size: $0.size) }
-        snapshot.transfers = ((try? node.listTransfers()) ?? []).map(Self.transfer)
-        snapshot.connects = ((try? node.listConnectRequests()) ?? [])
-            .map { RequestModel(shortId: $0.shortId, hostname: $0.hostname, waitingSecs: $0.waitingSecs) }
+        snapshot.offers = ((try? node.listFileOffers()) ?? []).filter { !accepting.contains($0.id) }
+        snapshot.queued = (try? node.listQueuedSends()) ?? []
+        snapshot.transfers = (try? node.listTransfers()) ?? []
+        snapshot.connects = (try? node.listConnectRequests()) ?? []
         snapshot.joins = status.networks
             .filter { $0.isCoordinator && $0.state == .connected }
             .flatMap { network in
@@ -175,73 +171,6 @@ final class NodeHost: @unchecked Sendable {
             let target = FileNames.unique(file.lastPathComponent, in: received)
             try manager.moveItem(at: file, to: target)
             return file.lastPathComponent
-        }
-    }
-
-    private func firewall() throws -> FirewallModel {
-        let state = try node.firewallShow()
-        return FirewallModel(
-            defaultInbound: state.defaultInbound,
-            defaultOutbound: state.defaultOutbound,
-            rules: state.rules.enumerated().map { index, rule in
-                FirewallRuleModel(index: UInt32(index), direction: rule.direction, action: rule.action,
-                                  protocolName: rule.protocol, port: rule.port,
-                                  peer: rule.peer)
-            }
-        )
-    }
-
-    private static func network(_ detail: NetworkDetail) -> NetworkModel {
-        NetworkModel(
-            name: detail.name,
-            ipv6: detail.ipv6,
-            hostname: detail.hostname,
-            isCoordinator: detail.isCoordinator,
-            state: NetworkModel.State(detail.state),
-            reason: detail.reason,
-            peers: detail.peers.map { peer in
-                PeerModel(nodeId: peer.nodeId, hostname: peer.hostname,
-                          state: PeerModel.State(peer.state))
-            }
-        )
-    }
-
-    private static func transfer(_ transfer: Transfer) -> TransferModel {
-        TransferModel(
-            id: transfer.id, outgoing: transfer.outgoing, peer: transfer.peer,
-            filename: transfer.filename, size: transfer.size, transferred: transfer.transferred,
-            state: TransferModel.State(transfer.state)
-        )
-    }
-}
-
-extension NetworkModel.State {
-    init(_ state: NetworkConnState) {
-        self = switch state {
-        case .connected: .connected
-        case .connecting: .connecting
-        case .notConnected: .notConnected
-        }
-    }
-}
-
-extension PeerModel.State {
-    init(_ state: PeerConnState) {
-        self = switch state {
-        case .active: .active
-        case .idle: .idle
-        case .offline: .offline
-        }
-    }
-}
-
-extension TransferModel.State {
-    init(_ state: TransferState) {
-        self = switch state {
-        case .offered: .offered
-        case .transferring: .transferring
-        case .done: .done
-        case .failed: .failed
         }
     }
 }

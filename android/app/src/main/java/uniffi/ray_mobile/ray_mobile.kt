@@ -791,6 +791,8 @@ internal open class UniffiVTableCallbackInterfaceFileChangeListener(
 // when the library is loaded.
 internal interface IntegrityCheckingUniffiLib : Library {
     // Integrity check functions only
+    fun uniffi_ray_mobile_checksum_func_error_message(): Short
+
     fun uniffi_ray_mobile_checksum_method_filewatch_cancel(): Short
 
     fun uniffi_ray_mobile_checksum_method_node_accept_file_offer(): Short
@@ -872,6 +874,8 @@ internal interface IntegrityCheckingUniffiLib : Library {
     fun uniffi_ray_mobile_checksum_method_node_reject_file_offer(): Short
 
     fun uniffi_ray_mobile_checksum_method_node_restore_identity(): Short
+
+    fun uniffi_ray_mobile_checksum_method_node_seed_default_hostname(): Short
 
     fun uniffi_ray_mobile_checksum_method_node_send_file(): Short
 
@@ -1227,6 +1231,12 @@ internal interface UniffiLib : Library {
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
 
+    fun uniffi_ray_mobile_fn_method_node_seed_default_hostname(
+        `ptr`: Pointer,
+        `model`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
     fun uniffi_ray_mobile_fn_method_node_send_file(
         `ptr`: Pointer,
         `path`: RustBuffer.ByValue,
@@ -1333,6 +1343,11 @@ internal interface UniffiLib : Library {
     ): Pointer
 
     fun uniffi_ray_mobile_fn_init_callback_vtable_filechangelistener(`vtable`: UniffiVTableCallbackInterfaceFileChangeListener): Unit
+
+    fun uniffi_ray_mobile_fn_func_error_message(
+        `error`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
 
     fun ffi_ray_mobile_rustbuffer_alloc(
         `size`: Long,
@@ -1563,6 +1578,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_ray_mobile_checksum_func_error_message() != 1071.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_ray_mobile_checksum_method_filewatch_cancel() != 10590.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1684,6 +1702,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ray_mobile_checksum_method_node_restore_identity() != 5366.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_ray_mobile_checksum_method_node_seed_default_hostname() != 8750.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ray_mobile_checksum_method_node_send_file() != 40644.toShort()) {
@@ -2701,6 +2722,14 @@ public interface NodeInterface {
         `replaceExisting`: kotlin.Boolean,
     ): kotlin.String
 
+    /**
+     * Name the device after its model on first run, so pairing auto-joins all
+     * use one name. Folded into a hostname the way the desktop folds its OS
+     * hostname, or `phone` when nothing usable is left. No-op once a name is
+     * set.
+     */
+    fun `seedDefaultHostname`(`model`: kotlin.String)
+
     fun `sendFile`(
         `path`: kotlin.String,
         `peer`: kotlin.String,
@@ -3536,6 +3565,20 @@ open class Node :
                 }
             },
         )
+
+    /**
+     * Name the device after its model on first run, so pairing auto-joins all
+     * use one name. Folded into a hostname the way the desktop folds its OS
+     * hostname, or `phone` when nothing usable is left. No-op once a name is
+     * set.
+     */
+    @Throws(RayException::class)
+    override fun `seedDefaultHostname`(`model`: kotlin.String) =
+        callWithPointer {
+            uniffiRustCallWithError(RayException) { _status ->
+                UniffiLib.INSTANCE.uniffi_ray_mobile_fn_method_node_seed_default_hostname(it, FfiConverterString.lower(`model`), _status)
+            }
+        }
 
     @Throws(RayException::class)
     override fun `sendFile`(
@@ -4896,7 +4939,7 @@ sealed class RayException : kotlin.Exception() {
 
     /**
      * A backup code would not decode, or the password was wrong. The two are
-     * one case: the AEAD cannot tell them apart.
+     * one case: the AEAD cannot tell them apart, so neither can the message.
      */
     class BadBackup(
         val v1: kotlin.String,
@@ -5489,3 +5532,15 @@ public object FfiConverterSequenceTypeTransfer : FfiConverterRustBuffer<List<Tra
         }
     }
 }
+
+/**
+ * The error in words, from its `Display`. The generated bindings describe an
+ * error by its variant and fields (`v1=...` in Kotlin, the case name in
+ * Swift), which is not something to show a person.
+ */
+fun `errorMessage`(`error`: RayException): kotlin.String =
+    FfiConverterString.lift(
+        uniffiRustCall { _status ->
+            UniffiLib.INSTANCE.uniffi_ray_mobile_fn_func_error_message(FfiConverterTypeRayError.lower(`error`), _status)
+        },
+    )

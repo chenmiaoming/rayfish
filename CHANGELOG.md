@@ -58,6 +58,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Android: error messages say what went wrong instead of showing `v1=...` or
+  nothing.
 - After pairing, a new device joins all of its networks at once instead of
   waiting for each join to finish before starting the next.
 - Android: receiving or sending a file no longer crashes the app when Android

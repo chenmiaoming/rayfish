@@ -4,7 +4,7 @@ struct NetworkDetailView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     var name: String
-    @State private var firewall: FirewallModel?
+    @State private var firewall: FirewallStateInfo?
     @State private var invite: SharedCode?
     @State private var confirmLeave = false
     @State private var editingHostname = false
@@ -27,7 +27,7 @@ struct NetworkDetailView: View {
         }
     }
 
-    private func content(_ network: NetworkModel) -> some View {
+    private func content(_ network: NetworkDetail) -> some View {
         ScrollView {
             VStack(spacing: 12) {
                 SectionCard {
@@ -96,7 +96,7 @@ struct NetworkDetailView: View {
         .sheet(isPresented: $sending) { SendFilesSheet(peers: network.peers) }
     }
 
-    private func peers(_ network: NetworkModel) -> some View {
+    private func peers(_ network: NetworkDetail) -> some View {
         SectionCard {
             SectionLabel("Peers · \(network.peersOnline) online")
             if network.peers.isEmpty {
@@ -122,7 +122,7 @@ struct NetworkDetailView: View {
         }
     }
 
-    private func firewallCard(_ firewall: FirewallModel, network: NetworkModel) -> some View {
+    private func firewallCard(_ firewall: FirewallStateInfo, network: NetworkDetail) -> some View {
         SectionCard {
             SectionLabel("Firewall")
             HStack {
@@ -139,21 +139,22 @@ struct NetworkDetailView: View {
                 .font(Rf.mono(14))
             }
             KeyValueRow(key: "Outbound default", value: firewall.defaultOutbound)
-            let inbound = firewall.rules.filter { $0.direction == "in" }
+            // Removal takes a rule's position in the node's full list.
+            let inbound = firewall.rules.enumerated().filter { $0.element.direction == "in" }
             if inbound.isEmpty {
                 Text("No inbound rules").font(Rf.mono(14)).foregroundStyle(Rf.faint).padding(.top, 6)
             }
-            ForEach(inbound, id: \.index) { rule in
+            ForEach(inbound, id: \.offset) { index, rule in
                 HStack {
                     // `allow`, `deny` and the protocol stay in the node's own words,
                     // the ones `ray firewall` prints.
-                    Text(rule.port == "*" ? "\(rule.action) \(rule.protocolName)" : "\(rule.action) \(rule.protocolName):\(rule.port)")
+                    Text(rule.port == "*" ? "\(rule.action) \(rule.protocol)" : "\(rule.action) \(rule.protocol):\(rule.port)")
                         .font(Rf.mono(14)).foregroundStyle(Rf.body)
                     Spacer()
                     Text(peerName(rule.peer, in: network)).font(Rf.mono(12)).foregroundStyle(Rf.faint)
                     LinkButton("Remove") {
                         Task {
-                            if let updated = await model.perform(.removeFirewallRule(index: rule.index), success: "Rule removed")?.firewall {
+                            if let updated = await model.perform(.removeFirewallRule(index: UInt32(index)), success: "Rule removed")?.firewall {
                                 self.firewall = updated
                             }
                         }
@@ -167,7 +168,7 @@ struct NetworkDetailView: View {
     }
 
     /// The node prints a rule's peer as a short id; name it when a peer matches.
-    private func peerName(_ id: String, in network: NetworkModel) -> String {
+    private func peerName(_ id: String, in network: NetworkDetail) -> String {
         if id == "any" { return "any peer" }
         return network.peers.first { $0.nodeId.hasPrefix(id) && !$0.hostname.isEmpty }?.hostname ?? id
     }
@@ -176,8 +177,8 @@ struct NetworkDetailView: View {
 struct AllowInboundSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    var network: NetworkModel
-    var updated: (FirewallModel) -> Void
+    var network: NetworkDetail
+    var updated: (FirewallStateInfo) -> Void
     @State private var peer: String?
     @State private var protocolName = "tcp"
     @State private var port = ""
