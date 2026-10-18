@@ -13,7 +13,7 @@
 //! checksum existed still decode.
 
 use std::fmt::{self, Debug, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -164,8 +164,14 @@ pub fn generate_secret() -> [u8; SECRET_LEN] {
 
 /// Path to a network's invite ledger: `<config_dir>/invites/<network>.toml`.
 pub fn invite_path(network: &str) -> Result<PathBuf> {
-    let dir = crate::config::config_dir()?.join("invites");
-    Ok(dir.join(format!("{network}.toml")))
+    Ok(ledger_path_in(&crate::config::config_dir()?, network))
+}
+
+/// Where the config directory `dir` keeps a network's invite ledger: under the
+/// network's local name, so renaming the network moves it
+/// (`config::rename_network`).
+pub(crate) fn ledger_path_in(dir: &Path, network: &str) -> PathBuf {
+    dir.join("invites").join(format!("{network}.toml"))
 }
 
 /// Payload of an invite code, before the checksum: two keys and the secret.

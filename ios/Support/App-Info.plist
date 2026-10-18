@@ -67,5 +67,9 @@
     </array>
     <key>UIUserInterfaceStyle</key>
     <string>Dark</string>
+    <key>RayfishSentryDSN</key>
+    <string>$(RAYFISH_SENTRY_DSN)</string>
+    <key>RayfishGitSHA</key>
+    <string>$(RAYFISH_GIT_SHA)</string>
 </dict>
 </plist>

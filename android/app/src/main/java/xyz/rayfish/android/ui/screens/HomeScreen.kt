@@ -37,6 +37,7 @@ import xyz.rayfish.android.isActive
 import xyz.rayfish.android.ui.AppSnapshot
 import xyz.rayfish.android.ui.components.*
 import xyz.rayfish.android.ui.theme.*
+import xyz.rayfish.android.ui.userMessage
 
 @Composable
 fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Unit, onOpenNetworks: () -> Unit = {}, onRefresh: () -> Unit = {}) {
@@ -128,7 +129,7 @@ fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Un
     fun act(onFailure: () -> Unit = {}, block: suspend () -> Unit) {
         scope.launch {
             try { withContext(Dispatchers.IO) { block() }; onRefresh() }
-            catch (t: Throwable) { onFailure(); if (t is CancellationException) throw t; onToast(context.getString(R.string.error_failed, t.message.orEmpty())) }
+            catch (t: Throwable) { onFailure(); if (t is CancellationException) throw t; onToast(context.getString(R.string.error_failed, t.userMessage)) }
         }
     }
     // The foreground service owns downloads, including their move to Downloads.

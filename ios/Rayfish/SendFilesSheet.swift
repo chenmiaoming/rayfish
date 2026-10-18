@@ -8,8 +8,8 @@ struct SendFilesSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     /// Nil offers every peer in every network.
-    var peers: [PeerModel]?
-    @State private var target: PeerModel?
+    var peers: [PeerInfo]?
+    @State private var target: PeerInfo?
     @State private var picking = false
 
     var body: some View {
@@ -28,7 +28,7 @@ struct SendFilesSheet: View {
                             Dot(color: peer.state.color)
                             VStack(alignment: .leading, spacing: 2) {
                                 RowTitle(peer.displayName)
-                                RowSubtitle("\(peer.nodeId.prefix(8)) · \(peer.state.rawValue)")
+                                RowSubtitle("\(peer.nodeId.prefix(8)) · \(peer.state)")
                             }
                         }
                     }
@@ -52,17 +52,17 @@ struct SendFilesSheet: View {
     }
 
     /// One row per device, reachable ones first.
-    private var choices: [PeerModel] {
+    private var choices: [PeerInfo] {
         var seen = Set<String>()
         let all = peers ?? model.snapshot.networks.flatMap(\.peers)
-        let rank: [PeerModel.State: Int] = [.active: 0, .idle: 1, .offline: 2]
+        let rank: [PeerConnState: Int] = [.active: 0, .idle: 1, .offline: 2]
         return all.filter { seen.insert($0.nodeId).inserted }
             .sorted { (rank[$0.state] ?? 3, $0.displayName) < (rank[$1.state] ?? 3, $1.displayName) }
     }
 
     /// Copying can take a while for a large file, so it runs off the main thread
     /// after the sheet closes.
-    private func send(_ urls: [URL], to peer: PeerModel) {
+    private func send(_ urls: [URL], to peer: PeerInfo) {
         dismiss()
         Task {
             do {

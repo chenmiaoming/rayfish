@@ -11,6 +11,7 @@ struct YouView: View {
     @State private var backingUp = false
     @State private var restoring = false
     @State private var autoAccept = Preferences.autoAcceptOwnDevices
+    @State private var crashReporting = Preferences.crashReporting
     @State private var keychain: [KeychainBackup] = []
     @State private var savingKeychain = false
 
@@ -132,14 +133,32 @@ struct YouView: View {
                             }
                         }
                     )) {
-                        Text("Standalone").tag(QuicEngineChoice.standalone)
-                        Text("FQ-CoDel").tag(QuicEngineChoice.fqCodel)
+                        Text("Standalone").tag(QuicEngine.standalone)
+                        Text("FQ-CoDel").tag(QuicEngine.fqCodel)
                     }
                 } label: {
                     Text("\(snapshot.quicEngine == .fqCodel ? "FQ-CoDel" : "Standalone") ✎")
                         .font(Rf.semibold(14)).foregroundStyle(Rf.rose400)
                         .padding(.vertical, 6).padding(.horizontal, 8)
                 }
+            }
+            Toggle(isOn: $crashReporting) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Crash reporting").font(Rf.text()).foregroundStyle(Rf.body)
+                    Text(crashReporting ? "on · diagnostics" : "off").font(Rf.mono(12)).foregroundStyle(Rf.faint)
+                }
+            }
+            .onChange(of: crashReporting) { _, on in
+                Preferences.crashReporting = on
+                Telemetry.apply()
+                // The tunnel runs its own client.
+                Task { _ = await model.perform(.reloadTelemetry) }
+            }
+            if crashReporting {
+                PillButton("Send diagnostics", outline: true) {
+                    Task { _ = await model.perform(.sendDiagnostics) }
+                }
+                .padding(.top, 8)
             }
         }
         .tint(Rf.rose400)
@@ -191,7 +210,7 @@ struct YouView: View {
         defer { savingKeychain = false }
         do {
             let node = model.tunnel.local.node
-            let name = snapshot.deviceName.isEmpty ? UIDevice.current.model : snapshot.deviceName
+            let name = snapshot.deviceName.isEmpty ? UIDevice.current.name : snapshot.deviceName
             try await Task.detached { try IdentityKeychain.save(node: node, deviceName: name) }.value
             await reloadKeychain()
             model.toast = "Saved to iCloud Keychain"

@@ -270,7 +270,7 @@ func copyToClipboard(_ text: String) {
     UIPasteboard.general.string = text
 }
 
-extension PeerModel.State {
+extension PeerConnState {
     var color: Color {
         switch self {
         case .active: Rf.emerald
