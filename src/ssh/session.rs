@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use super::login::LoginInfo;
-use super::session_env::{drop_privs, login_env, login_program, tty_name};
+use super::session_env::{drop_privs, login_env, login_program, prepare_pts, tty_name};
 use super::{ChildProc, Origin, PtyReq};
 
 /// Everything a session runner needs beyond its SSH channel.
@@ -194,6 +194,7 @@ pub(super) async fn run_pty_session(
     } = spec;
     let (pty, pts) = pty_process::open().context("opening pty")?;
     let _ = pty.resize(Size::new(pty_req.row, pty_req.col));
+    prepare_pts(&pts);
     let tty = tty_name(&pts);
     // Keep a slave fd open until the child exits. `login` briefly reopens its
     // terminal while starting, which would otherwise make the PTY reader see

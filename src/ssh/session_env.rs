@@ -26,6 +26,26 @@ pub(super) fn login_program() -> Option<PathBuf> {
         })
 }
 
+/// illumos ptys are STREAMS devices: the slave is not a terminal until
+/// `ptem` and `ldterm` are pushed onto it.
+#[cfg(target_os = "illumos")]
+pub(super) fn prepare_pts(pts: &impl AsRawFd) {
+    const STR: libc::c_int = (b'S' as libc::c_int) << 8;
+    const I_PUSH: libc::c_int = STR | 0o02;
+    const I_FIND: libc::c_int = STR | 0o13;
+    let fd = pts.as_raw_fd();
+    for module in [c"ptem", c"ldterm"] {
+        unsafe {
+            if libc::ioctl(fd, I_FIND, module.as_ptr()) == 0 {
+                libc::ioctl(fd, I_PUSH, module.as_ptr());
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "illumos"))]
+pub(super) fn prepare_pts(_pts: &impl AsRawFd) {}
+
 pub(super) fn tty_name(pts: &impl AsRawFd) -> Option<String> {
     let mut buf = [0 as libc::c_char; 128];
     let result = unsafe { libc::ttyname_r(pts.as_raw_fd(), buf.as_mut_ptr(), buf.len()) };
