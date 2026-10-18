@@ -80,4 +80,4 @@ just macos-ui-test     # live menu updates and hide-on-close behavior, no VPN
 - Conventional commit subjects (`feat`/`fix`/`docs`/...) so git-cliff can generate the changelog.
 - Any user-visible change gets an `[Unreleased]` CHANGELOG entry (`Added`/`Changed`/`Fixed`/`Security`/`Performance`, in that order), written from the user's view. Skip internal churn.
 - Keep `docs/` untracked. It holds local plans and specifications.
-- Release the apps (Android, macOS, iOS) only when a new version is cut with a `v*` tag. Do not publish app builds from master pushes, nightlies, or PRs, and do not upload to TestFlight, the Play Store, or a GitHub release outside a version release.
+- Deploy the apps (Android, macOS, iOS) only for a patch or minor release, cut with a `v*` tag. Nothing else publishes builds: no nightlies, and no uploads to TestFlight, the App Store, the Play Store, or a GitHub release from master pushes or PRs.
