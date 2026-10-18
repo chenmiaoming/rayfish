@@ -1105,21 +1105,6 @@ impl NetworkRegistry {
             });
         }
 
-        // Publish the contact record immediately so `ray connect` works right
-        // away, rather than waiting up to one publisher interval (the active-gated
-        // `spawn_contact_publisher` only re-checks every TTL/2).
-        if let Some(secret) = app_config.contact_secret_key.clone()
-            && let Ok(client) =
-                dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-        {
-            let endpoint_id = self.transport.endpoint.id();
-            tokio::spawn(async move {
-                if let Err(e) = dht::publish_contact(&client, &secret, endpoint_id).await {
-                    tracing::warn!(error = %e, "failed to publish contact record on connect");
-                }
-            });
-        }
-
         tracing::info!(
             networks = app_config.networks.len(),
             "control plane connected"
@@ -1268,10 +1253,10 @@ impl Daemon {
         // wrong instead of silently reporting success on a degraded VPN.
         let mut warnings: Vec<String> = Vec::new();
 
-        // The TUN device/routes are managed by the OS on desktop. On Android the
-        // packet interface is a `VpnService` fd whose routes are configured on the
-        // Kotlin side, so these desktop route calls don't apply.
-        #[cfg(not(target_os = "android"))]
+        // The TUN device/routes are managed by the OS on desktop. On Android and
+        // iOS the platform owns the packet interface and configures its routes,
+        // so these desktop route calls don't apply.
+        #[cfg(not(embedded_tun))]
         {
             let tun_name = self.tun_name.load().as_str().to_owned();
             let my_v6 = derive_ipv6(&self.transport.identity.local_identity());
@@ -2055,7 +2040,7 @@ impl Daemon {
         #[cfg(target_os = "macos")]
         crate::hostfw::remove_tun_passthrough();
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(embedded_tun))]
         if let Err(e) = tun::set_link_down(&tun_name).await {
             tracing::warn!(error = %format!("{e:#}"), "failed to bring TUN interface down");
         }

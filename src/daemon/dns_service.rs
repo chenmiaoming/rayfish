@@ -108,10 +108,10 @@ impl DnsService {
     /// spawn the re-assert watcher the platform's backend needs.
     /// Failures are non-fatal: pushed to `warnings` so `ray up` can surface them.
     pub(crate) async fn configure(self: &Arc<Self>, tun_name: &str, warnings: &mut Vec<String>) {
-        // Android's VpnService configures DNS and supplies the loopback proxy
-        // upstreams. Desktop backend detection is permanently unsupported there;
-        // retrying it only creates a timer and a misleading warning.
-        if cfg!(target_os = "android") {
+        // Android's VpnService and iOS NetworkExtension configure DNS. Desktop
+        // backend detection is permanently unsupported there; retrying it only
+        // creates a timer and a misleading warning.
+        if cfg!(embedded_tun) {
             return;
         }
         if !config::load().map(|c| c.dns_mode.enabled()).unwrap_or(true) {
