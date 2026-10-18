@@ -81,7 +81,7 @@ ahash = "0.8"
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"] }
 # Token-bucket rate limiter guarding inbound control streams against floods
 # (src/ratelimit.rs). One per control-listener task; no shared state.
-ratelimit = "0.10"
+ratelimit = "2.0.0"
 dashmap = "6"
 dirs = "6.0.0"
 futures = "0.3"
@@ -244,4 +244,8 @@ iroh-relay = { git = "https://github.com/rayfish/iroh", branch = "rayfish-integr
 # netwatch's configure-socket hook, which the iroh branch above threads through.
 # Merged upstream (n0-computer/net-tools#182); drop this once a netwatch release
 # past 0.19.3 carries it.
-netwatch = { git = "https://github.com/n0-computer/net-tools", branch = "main" }
+#netwatch = { git = "https://github.com/n0-computer/net-tools", branch = "main" }
+netdev = { git = "https://github.com/extrowerk/netdev.git", branch = "illumos" }
+netwatch = { git = "https://github.com/extrowerk/net-tools", branch = "illumos" }
+swarm-discovery = { git = "https://github.com/extrowerk/swarm-discovery", branch = "master" }
+tun-rs = { git = "https://github.com/extrowerk/tun-rs", branch = "illumos" }
