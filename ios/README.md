@@ -7,6 +7,7 @@ messages (`Shared/Protocol.swift`). `project.yml` is the XcodeGen source.
 ```bash
 just ios-sim        # build, then run the UI walkthrough in the simulator
 just ios            # generate and open the project for a device build
+just ios-run        # build, install, and launch on a connected iPhone
 just ios-bindings   # regenerate Generated/ after a ray-mobile API change
 ```
 
@@ -19,9 +20,12 @@ tunnel needs a device.
 
 ## Device
 
-Needs a paid Apple developer team. Set `DEVELOPMENT_TEAM` in `project.yml`
-and enable these capabilities for `xyz.rayfish.ios` and
-`xyz.rayfish.ios.tunnel`:
+Needs a paid Apple developer team and an iPhone paired with Xcode with
+Developer Mode enabled. `just ios-run` uses the local Apple Development
+certificate's team; `IOS_TEAM_ID` overrides it. Pass a device ID or name
+to select one, for example `just ios-run "My iPhone"`.
+
+Enable these capabilities for `xyz.rayfish.ios` and `xyz.rayfish.ios.tunnel`:
 
 - Network Extensions: Packet Tunnel
 - App Groups: `group.xyz.rayfish.ios`

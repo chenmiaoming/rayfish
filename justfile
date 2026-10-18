@@ -67,6 +67,11 @@ ios:
     xcodegen generate --spec ios/project.yml --project ios
     open ios/Rayfish.xcodeproj
 
+# Build, install, and launch on a connected iPhone. Optional device ID or name.
+[positional-arguments]
+ios-run device="":
+    bash ios/run-device.sh "$1"
+
 # Test macOS legacy-service detection and migration without touching launchd.
 macos-test:
     mkdir -p target/macos-tests

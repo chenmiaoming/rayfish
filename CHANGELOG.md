@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `just ios-run` builds, installs, and launches the iOS app on a connected iPhone.
 - An iOS app, the counterpart of the Android one: networks, invites and QR
   codes, pairing, file transfer, firewall rules, join and connect requests,
   and identity backup and restore, including a backup in iCloud Keychain
