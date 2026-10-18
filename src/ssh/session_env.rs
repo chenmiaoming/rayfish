@@ -13,6 +13,11 @@ pub(super) fn env_accepted(name: &str) -> bool {
 }
 
 pub(super) fn login_program() -> Option<PathBuf> {
+    // illumos login(1) has no pre-authenticated `-f` mode, so the handoff
+    // would prompt for a password and fail with "Login incorrect".
+    if cfg!(target_os = "illumos") {
+        return None;
+    }
     if uzers::get_effective_uid() != 0 || std::env::var_os("RAYFISH_SSH_NO_LOGIN").is_some() {
         return None;
     }
