@@ -9,6 +9,9 @@ settings:
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
+    # Empty turns crash reporting off. The just recipes pass the commit.
+    RAYFISH_SENTRY_DSN: ""
+    RAYFISH_GIT_SHA: ""
     TARGETED_DEVICE_FAMILY: "1"
     SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
     SUPPORTS_MACCATALYST: NO
@@ -31,6 +34,10 @@ settings:
       - "-framework"
       - "Security"
       - "-lresolv"
+packages:
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa
+    exactVersion: 9.29.2
 targets:
   Rayfish:
     type: application
@@ -49,6 +56,7 @@ targets:
     dependencies:
       - target: RayfishTunnel
         embed: true
+      - package: Sentry
   RayfishTunnel:
     type: app-extension
     platform: iOS
@@ -65,6 +73,7 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
     dependencies:
       - sdk: NetworkExtension.framework
+      - package: Sentry
     preBuildScripts:
       - name: Build the Rust core
         script: '"$SRCROOT/build-rust.sh"'

@@ -52,6 +52,20 @@ enum Preferences {
         get { AppGroup.defaults.bool(forKey: autoAcceptOwnDevicesKey) }
         set { AppGroup.defaults.set(newValue, forKey: autoAcceptOwnDevicesKey) }
     }
+
+    /// On unless the user turned it off.
+    static var crashReporting: Bool {
+        get { AppGroup.defaults.object(forKey: "crashReporting") as? Bool ?? true }
+        set { AppGroup.defaults.set(newValue, forKey: "crashReporting") }
+    }
+
+    /// A random id that ties one install's reports together and nothing else.
+    static var installId: String {
+        if let id = AppGroup.defaults.string(forKey: "installId") { return id }
+        let id = UUID().uuidString.lowercased()
+        AppGroup.defaults.set(id, forKey: "installId")
+        return id
+    }
 }
 
 enum AppGroupError: LocalizedError {

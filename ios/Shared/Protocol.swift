@@ -26,6 +26,8 @@ enum Command: Codable, Equatable {
     case startPairing
     case unpair
     case setQuicEngine(QuicEngineChoice)
+    case setCrashReporting(Bool)
+    case sendDiagnostics
 
     /// How long the app waits for a reply. Joining, pairing and approving dial
     /// peers, and sending wakes the receiver first.

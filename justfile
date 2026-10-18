@@ -60,7 +60,7 @@ ios-sim device="iPhone 17 Pro":
     xcodegen generate --spec ios/project.yml --project ios
     xcodebuild -project ios/Rayfish.xcodeproj -scheme Rayfish -sdk iphonesimulator \
         -destination 'platform=iOS Simulator,name={{device}}' -derivedDataPath target/ios-derived \
-        CODE_SIGNING_ALLOWED=NO test
+        CODE_SIGNING_ALLOWED=NO RAYFISH_GIT_SHA=$(git rev-parse --short HEAD) test
 
 # Generate and open the iOS project for a signed device build.
 ios:

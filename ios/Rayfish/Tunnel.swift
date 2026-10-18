@@ -161,6 +161,7 @@ final class SimulatorTunnel: Tunnel {
             try await Task.detached { [local] in try local.start() }.value
             set(.on)
         } catch {
+            Telemetry.captureStartFailure(error, node: local.node)
             set(.off)
             throw error
         }

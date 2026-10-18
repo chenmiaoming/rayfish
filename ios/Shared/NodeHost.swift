@@ -97,6 +97,12 @@ final class NodeHost: @unchecked Sendable {
             try node.unpair()
         case .setQuicEngine(let choice):
             try node.setQuicEngine(engine: choice == .fqCodel ? .fqCodel : .standalone)
+        case .setCrashReporting(let on):
+            Preferences.crashReporting = on
+            Telemetry.apply()
+        case .sendDiagnostics:
+            guard Telemetry.sendDiagnostics(node: node) != nil else { throw DiagnosticsError.unavailable }
+            return Reply(message: "Diagnostics sent")
         }
         return Reply(snapshot: snapshot())
     }
@@ -255,4 +261,10 @@ enum FileNames {
         }
         return candidate
     }
+}
+
+enum DiagnosticsError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? { "Diagnostics unavailable" }
 }

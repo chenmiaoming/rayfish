@@ -5,6 +5,7 @@ struct RayfishApp: App {
     @StateObject private var model = AppModel()
 
     init() {
+        Telemetry.apply()
         Rf.applyAppearance()
     }
 

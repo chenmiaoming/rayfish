@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- iOS: crash reporting, with an opt-out toggle and a Send diagnostics button in
+  the You tab, as on Android.
 - `just ios-run` builds, installs, and launches the iOS app on a connected iPhone.
 - An iOS app, the counterpart of the Android one: networks, invites and QR
   codes, pairing, file transfer, firewall rules, join and connect requests,
