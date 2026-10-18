@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		080FD8A1A58C68F98B78E82F /* IdentityKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21E6F711DADDCC3A6868F0DD /* IdentityKeychain.swift */; };
+		089FABC140FCD4A6912A6EFC /* Telemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35D7BDFC9C4C957648A57C3 /* Telemetry.swift */; };
 		0A70EB9A90223A35C4515B0E /* ChakraPetch-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DAE515FB1D088A2EDEC64EAF /* ChakraPetch-SemiBold.ttf */; };
 		0EE4B483378FEA62BB06A41C /* NetworkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0CE67690A500D0A9F453EF /* NetworkDetailView.swift */; };
 		1317CED293FD296660DF6D62 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D1CB076E7E355518C78C3FE /* NetworkExtension.framework */; };
@@ -19,6 +20,7 @@
 		447896AC04BD5534B575D87C /* SendFilesSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC13CDAC751E2B306E7F1096 /* SendFilesSheet.swift */; };
 		4C62621009FB6E8BC6220E95 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4697C6E505B5E6961EBCA597 /* AppGroup.swift */; };
 		517485C7A3159A439B0CA00C /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8853920C086231394A47F4E /* Protocol.swift */; };
+		5BE7A7A78F920B903B6A207F /* ProviderReply.swift in Sources */ = {isa = PBXBuildFile; fileRef = B385F23AEBAA4BEAD576101F /* ProviderReply.swift */; };
 		73345803EE12AF7B4BE6CC8D /* ChakraPetch-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1C5CD7CCAA517105B84127D7 /* ChakraPetch-Bold.ttf */; };
 		797BD9BCA78CE61A4DADA531 /* ray_mobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 191F972E06E65E72D5272695 /* ray_mobile.swift */; };
 		7E98F5AD5043F7D2A49CEF19 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4697C6E505B5E6961EBCA597 /* AppGroup.swift */; };
@@ -29,9 +31,12 @@
 		A42733C3675EDCEC4536CB99 /* ray_mobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 191F972E06E65E72D5272695 /* ray_mobile.swift */; };
 		A724B58C9A973B2FF41D6FE4 /* PressStart2P-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 4D5C1724BEB8C8DACF18DF10 /* PressStart2P-Regular.ttf */; };
 		A7BF524E822B9FDE651A9476 /* QRViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 417C9CF54A9DAF78E58E5E6A /* QRViews.swift */; };
+		AA163FD2F5EA1A234F25E35A /* Telemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35D7BDFC9C4C957648A57C3 /* Telemetry.swift */; };
 		AE6DCB47E27A6A7FFEBB1393 /* IBMPlexMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B6740B866AD744A73D20C505 /* IBMPlexMono-Regular.ttf */; };
 		B0513B50F349CC5490DF42BB /* NodeHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3140C30CD4A55D1274DD40F5 /* NodeHost.swift */; };
+		BD0D4FCCF4027D44D0628347 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 8B295E69DEB45BE8F1545963 /* Sentry */; };
 		BD73401F63F4205C12351271 /* RayfishTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 32459AD4AF3C4E66999DAC51 /* RayfishTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C9DB73C4269ED2298ABAA078 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = B556FC7D0EA1B2643AF5079B /* Sentry */; };
 		CC218C48C572A49EA4258487 /* ChakraPetch-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = B7A823F76CDEEF7D18D9DE5F /* ChakraPetch-OFL.txt */; };
 		CCF5577C4D14E6C81B961A48 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D9811626EAF807B442F325 /* Theme.swift */; };
 		D1DAD4DF0D9F1B71525FBF36 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EA6E6748C8715BF45A6683B1 /* Assets.xcassets */; };
@@ -98,6 +103,7 @@
 		978A71130B1D5769098177D6 /* Tunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tunnel.swift; sourceTree = "<group>"; };
 		A0B8FC3DFFB2558FAE315338 /* ray_mobileFFI.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ray_mobileFFI.h; sourceTree = "<group>"; };
 		A8853920C086231394A47F4E /* Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocol.swift; sourceTree = "<group>"; };
+		B385F23AEBAA4BEAD576101F /* ProviderReply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderReply.swift; sourceTree = "<group>"; };
 		B6740B866AD744A73D20C505 /* IBMPlexMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Regular.ttf"; sourceTree = "<group>"; };
 		B7A823F76CDEEF7D18D9DE5F /* ChakraPetch-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "ChakraPetch-OFL.txt"; sourceTree = "<group>"; };
 		D197B20BBFB76277D50D3BEF /* PressStart2P-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "PressStart2P-OFL.txt"; sourceTree = "<group>"; };
@@ -106,27 +112,47 @@
 		EA6E6748C8715BF45A6683B1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		EBE2041689161DB5B3D3D1C4 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		EC13CDAC751E2B306E7F1096 /* SendFilesSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFilesSheet.swift; sourceTree = "<group>"; };
+		F35D7BDFC9C4C957648A57C3 /* Telemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Telemetry.swift; sourceTree = "<group>"; };
 		F84513862593E54A7901FFA3 /* ChakraPetch-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ChakraPetch-Regular.ttf"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		1F296514FB611F11757D2805 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BD0D4FCCF4027D44D0628347 /* Sentry in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		24A055432E2955BB904D64D7 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				1317CED293FD296660DF6D62 /* NetworkExtension.framework in Frameworks */,
+				C9DB73C4269ED2298ABAA078 /* Sentry in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		0D3FB0E7263DAB769886540C /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				B385F23AEBAA4BEAD576101F /* ProviderReply.swift */,
+			);
+			name = Shared;
+			path = ../macos/Shared;
+			sourceTree = "<group>";
+		};
 		11E0AC53D66C8C095F76DC57 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
 				4697C6E505B5E6961EBCA597 /* AppGroup.swift */,
 				3140C30CD4A55D1274DD40F5 /* NodeHost.swift */,
 				A8853920C086231394A47F4E /* Protocol.swift */,
+				F35D7BDFC9C4C957648A57C3 /* Telemetry.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -218,6 +244,7 @@
 				58C2B0BC6D37097CFC55B597 /* Rayfish */,
 				5AC8A58ACDB66E92E7256E69 /* RayfishTunnel */,
 				11E0AC53D66C8C095F76DC57 /* Shared */,
+				0D3FB0E7263DAB769886540C /* Shared */,
 				7C10C520A12E1A19A7E12797 /* UITests */,
 				A31FA911699CA282A2174F30 /* Frameworks */,
 				5189EF84F1DD2ED99BD8FC64 /* Products */,
@@ -233,6 +260,7 @@
 			buildPhases = (
 				D76FB9A2773706815890D604 /* Sources */,
 				F32F4FD569FADCA723AEDB17 /* Resources */,
+				1F296514FB611F11757D2805 /* Frameworks */,
 				D642F0AB4D355105428EF1B7 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
@@ -242,6 +270,7 @@
 			);
 			name = Rayfish;
 			packageProductDependencies = (
+				8B295E69DEB45BE8F1545963 /* Sentry */,
 			);
 			productName = Rayfish;
 			productReference = 3D56C418C2CCB66CC3EEA18D /* Rayfish.app */;
@@ -261,6 +290,7 @@
 			);
 			name = RayfishTunnel;
 			packageProductDependencies = (
+				B556FC7D0EA1B2643AF5079B /* Sentry */,
 			);
 			productName = RayfishTunnel;
 			productReference = 32459AD4AF3C4E66999DAC51 /* RayfishTunnel.appex */;
@@ -317,6 +347,9 @@
 			);
 			mainGroup = E4870274DCC4E9944C9F835B;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A08AFA1A3EB911FB9C6CD707 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5189EF84F1DD2ED99BD8FC64 /* Products */;
 			projectDirPath = "";
@@ -387,6 +420,7 @@
 				B0513B50F349CC5490DF42BB /* NodeHost.swift in Sources */,
 				91B4587CE1FF4B3550574512 /* PacketTunnelProvider.swift in Sources */,
 				517485C7A3159A439B0CA00C /* Protocol.swift in Sources */,
+				AA163FD2F5EA1A234F25E35A /* Telemetry.swift in Sources */,
 				A42733C3675EDCEC4536CB99 /* ray_mobile.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -403,9 +437,11 @@
 				F199620C7EFAE51FC1F4FC79 /* NetworksView.swift in Sources */,
 				EF0292170C83B58F206B1A04 /* NodeHost.swift in Sources */,
 				32A0405A0F9597DCDA37CEC8 /* Protocol.swift in Sources */,
+				5BE7A7A78F920B903B6A207F /* ProviderReply.swift in Sources */,
 				A7BF524E822B9FDE651A9476 /* QRViews.swift in Sources */,
 				3B5AA30F5F29EED42895B875 /* RayfishApp.swift in Sources */,
 				447896AC04BD5534B575D87C /* SendFilesSheet.swift in Sources */,
+				089FABC140FCD4A6912A6EFC /* Telemetry.swift in Sources */,
 				CCF5577C4D14E6C81B961A48 /* Theme.swift in Sources */,
 				F0645050383165BCFBA9C32E /* Tunnel.swift in Sources */,
 				97D0A34D64D3EE8276AB9F17 /* WelcomeView.swift in Sources */,
@@ -500,6 +536,8 @@
 					"-fmodule-map-file=$(SRCROOT)/Generated/ray_mobileFFI.modulemap",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				RAYFISH_GIT_SHA = "";
+				RAYFISH_SENTRY_DSN = "https://3ace3eb4551a022cfd59fabe5b9f9c7e@o4511671603625984.ingest.de.sentry.io/4511671605198928";
 				RUST_LIB_iphoneos = "$(SRCROOT)/../target/aarch64-apple-ios/release/libray_mobile.a";
 				RUST_LIB_iphonesimulator = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release/libray_mobile.a";
 				SDKROOT = iphoneos;
@@ -685,6 +723,8 @@
 					"-fmodule-map-file=$(SRCROOT)/Generated/ray_mobileFFI.modulemap",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				RAYFISH_GIT_SHA = "";
+				RAYFISH_SENTRY_DSN = "https://3ace3eb4551a022cfd59fabe5b9f9c7e@o4511671603625984.ingest.de.sentry.io/4511671605198928";
 				RUST_LIB_iphoneos = "$(SRCROOT)/../target/aarch64-apple-ios/release/libray_mobile.a";
 				RUST_LIB_iphonesimulator = "$(SRCROOT)/../target/aarch64-apple-ios-sim/release/libray_mobile.a";
 				SDKROOT = iphoneos;
@@ -761,6 +801,30 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A08AFA1A3EB911FB9C6CD707 /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/getsentry/sentry-cocoa";
+			requirement = {
+				kind = exactVersion;
+				version = 9.29.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8B295E69DEB45BE8F1545963 /* Sentry */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A08AFA1A3EB911FB9C6CD707 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
+			productName = Sentry;
+		};
+		B556FC7D0EA1B2643AF5079B /* Sentry */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A08AFA1A3EB911FB9C6CD707 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
+			productName = Sentry;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = DFE261A68F972C6B9DD57288 /* Project object */;
 }

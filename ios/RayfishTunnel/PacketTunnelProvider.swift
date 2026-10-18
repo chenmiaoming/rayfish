@@ -16,13 +16,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         RayfishLog.tunnel.info("Starting tunnel build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown", privacy: .public)")
+        Telemetry.apply()
         queue.async { [self] in
             let host: NodeHost
             do {
                 host = NodeHost(directory: try AppGroup.stateDirectory())
+            } catch {
+                RayfishLog.tunnel.error("Shared storage unavailable: \(error.localizedDescription, privacy: .public)")
+                completionHandler(error)
+                return
+            }
+            do {
                 try host.start()
             } catch {
                 RayfishLog.tunnel.error("Node start failed: \(error.localizedDescription, privacy: .public)")
+                Telemetry.captureStartFailure(error, node: host.node)
                 completionHandler(error)
                 return
             }
@@ -48,6 +56,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     host.onReceived = { [notifier] name in notifier.received(name) }
                     watchFiles(host)
                     watchPath()
+                    // A toggle changed while starting went to the app's own node.
+                    Telemetry.apply()
                     RayfishLog.tunnel.info("Tunnel is ready")
                     completionHandler(nil)
                 }

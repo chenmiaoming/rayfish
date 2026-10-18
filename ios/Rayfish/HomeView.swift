@@ -174,7 +174,7 @@ struct RequestRow: View {
 }
 
 struct TransferRow: View {
-    var transfer: TransferModel
+    var transfer: Transfer
     var onCancel: () -> Void
 
     var body: some View {

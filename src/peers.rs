@@ -10,6 +10,7 @@ use iroh::EndpointId;
 use iroh::endpoint::{Connection, VarInt};
 use smol_str::SmolStr;
 
+use crate::AsyncMutex;
 use crate::audit::AuditLog;
 use crate::config::QuicEngine;
 use crate::forward::fq_codel::Sender as FqSender;
@@ -132,6 +133,11 @@ struct ActiveConnection {
     /// held open like an eager node so it never flaps.
     supports_idle_close: Arc<AtomicBool>,
     receive_mtu: Arc<AtomicU16>,
+    /// Held from snapshotting `out_handles` until the `NetworkHandles` stream
+    /// is open. The peer replaces its whole decode table per announcement, in
+    /// stream order, so an older snapshot must never open its stream after a
+    /// newer one.
+    announce: Arc<AsyncMutex<()>>,
 }
 
 impl ActiveConnection {
@@ -144,6 +150,7 @@ impl ActiveConnection {
             last_active: Arc::new(AtomicU64::new(now_ms())),
             supports_idle_close: Arc::new(AtomicBool::new(false)),
             receive_mtu: Arc::new(AtomicU16::new(crate::tun::MIN_TUN_MTU)),
+            announce: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -160,6 +167,13 @@ fn connection_selection_id(conn: &Connection) -> [u8; 32] {
     conn.export_keying_material(&mut id, b"EXPORTER-rayfish-mesh-selection-v1", b"")
         .expect("established TLS session exports a 32-byte connection ID");
     id
+}
+
+/// Where to send a `NetworkHandles` announcement. See
+/// [`PeerTable::announce_target`].
+pub(crate) struct AnnounceTarget {
+    pub(crate) conn: Connection,
+    pub(crate) lock: Arc<AsyncMutex<()>>,
 }
 
 /// Result of a routing lookup: the connection to send over, the peer identity,
@@ -672,6 +686,15 @@ impl PeerTable {
             .get(ip)
             .map(|e| e.out_handles.iter().map(|(n, h)| (n.clone(), *h)).collect())
             .unwrap_or_default()
+    }
+
+    /// The selected connection to `ip` and the lock that orders our handle
+    /// announcements on it.
+    pub(crate) fn announce_target(&self, ip: &Ipv6Addr) -> Option<AnnounceTarget> {
+        self.peers.get(ip).map(|e| AnnounceTarget {
+            conn: e.active.conn.clone(),
+            lock: Arc::clone(&e.active.announce),
+        })
     }
 
     /// The `u16` handle we stamp on datagrams to `ip` for `network`, if assigned.

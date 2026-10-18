@@ -920,6 +920,14 @@ public protocol NodeProtocol: AnyObject, Sendable {
      */
     func restoreIdentity(code: String, password: String, replaceExisting: Bool) throws  -> String
 
+    /**
+     * Name the device after its Settings name on first run, so pairing
+     * auto-joins all use one name. Folded into a hostname the way the desktop
+     * folds its OS hostname, or `phone` when nothing usable is left. No-op once
+     * a name is set.
+     */
+    func seedDefaultHostname(name: String) throws
+
     func sendFile(path: String, peer: String) throws
 
     /**
@@ -1593,6 +1601,19 @@ open func restoreIdentity(code: String, password: String, replaceExisting: Bool)
 })
 }
 
+    /**
+     * Name the device after its Settings name on first run, so pairing
+     * auto-joins all use one name. Folded into a hostname the way the desktop
+     * folds its OS hostname, or `phone` when nothing usable is left. No-op once
+     * a name is set.
+     */
+open func seedDefaultHostname(name: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_seed_default_hostname(self.uniffiClonePointer(),
+        FfiConverterString.lower(name),$0
+    )
+}
+}
+
 open func sendFile(path: String, peer: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
     uniffi_ray_mobile_fn_method_node_send_file(self.uniffiClonePointer(),
         FfiConverterString.lower(path),
@@ -1938,6 +1959,8 @@ extension FileOffer: Equatable, Hashable {
     }
 }
 
+extension FileOffer: Codable {}
+
 
 
 #if swift(>=5.8)
@@ -2043,6 +2066,8 @@ extension FirewallRuleInfo: Equatable, Hashable {
     }
 }
 
+extension FirewallRuleInfo: Codable {}
+
 
 
 #if swift(>=5.8)
@@ -2135,6 +2160,8 @@ extension FirewallStateInfo: Equatable, Hashable {
         hasher.combine(rules)
     }
 }
+
+extension FirewallStateInfo: Codable {}
 
 
 
@@ -2262,6 +2289,8 @@ extension HealthSnapshot: Equatable, Hashable {
     }
 }
 
+extension HealthSnapshot: Codable {}
+
 
 
 #if swift(>=5.8)
@@ -2369,6 +2398,8 @@ extension IdentityBackup: Equatable, Hashable {
     }
 }
 
+extension IdentityBackup: Codable {}
+
 
 
 #if swift(>=5.8)
@@ -2441,6 +2472,8 @@ extension InboundSettings: Equatable, Hashable {
         hasher.combine(blocked)
     }
 }
+
+extension InboundSettings: Codable {}
 
 
 
@@ -2533,6 +2566,8 @@ extension Invitation: Equatable, Hashable {
         hasher.combine(state)
     }
 }
+
+extension Invitation: Codable {}
 
 
 
@@ -2651,6 +2686,8 @@ extension NetworkDetail: Equatable, Hashable {
     }
 }
 
+extension NetworkDetail: Codable {}
+
 
 
 #if swift(>=5.8)
@@ -2733,6 +2770,8 @@ extension NetworkHealth: Equatable, Hashable {
         hasher.combine(connected)
     }
 }
+
+extension NetworkHealth: Codable {}
 
 
 
@@ -2824,6 +2863,8 @@ extension NetworkInfo: Equatable, Hashable {
         hasher.combine(pending)
     }
 }
+
+extension NetworkInfo: Codable {}
 
 
 
@@ -2922,6 +2963,8 @@ extension PeerInfo: Equatable, Hashable {
     }
 }
 
+extension PeerInfo: Codable {}
+
 
 
 #if swift(>=5.8)
@@ -3005,6 +3048,8 @@ extension PendingRequest: Equatable, Hashable {
         hasher.combine(waitingSecs)
     }
 }
+
+extension PendingRequest: Codable {}
 
 
 
@@ -3100,6 +3145,8 @@ extension QueuedSend: Equatable, Hashable {
         hasher.combine(size)
     }
 }
+
+extension QueuedSend: Codable {}
 
 
 
@@ -3216,6 +3263,8 @@ extension Status: Equatable, Hashable {
     }
 }
 
+extension Status: Codable {}
+
 
 
 #if swift(>=5.8)
@@ -3328,6 +3377,8 @@ extension Transfer: Equatable, Hashable {
         hasher.combine(state)
     }
 }
+
+extension Transfer: Codable {}
 
 
 
@@ -3452,6 +3503,8 @@ public func FfiConverterTypeInboundPolicy_lower(_ value: InboundPolicy) -> RustB
 
 extension InboundPolicy: Equatable, Hashable {}
 
+extension InboundPolicy: Codable {}
+
 
 
 
@@ -3529,6 +3582,8 @@ public func FfiConverterTypeInvitationState_lower(_ value: InvitationState) -> R
 
 extension InvitationState: Equatable, Hashable {}
 
+extension InvitationState: Codable {}
+
 
 
 
@@ -3604,6 +3659,8 @@ public func FfiConverterTypeLinkAction_lower(_ value: LinkAction) -> RustBuffer 
 
 
 extension LinkAction: Equatable, Hashable {}
+
+extension LinkAction: Codable {}
 
 
 
@@ -3701,6 +3758,8 @@ public func FfiConverterTypeNetworkConnState_lower(_ value: NetworkConnState) ->
 
 extension NetworkConnState: Equatable, Hashable {}
 
+extension NetworkConnState: Codable {}
+
 
 
 
@@ -3784,6 +3843,8 @@ public func FfiConverterTypePeerConnState_lower(_ value: PeerConnState) -> RustB
 
 extension PeerConnState: Equatable, Hashable {}
 
+extension PeerConnState: Codable {}
+
 
 
 
@@ -3857,6 +3918,8 @@ public func FfiConverterTypeQuicEngine_lower(_ value: QuicEngine) -> RustBuffer 
 
 extension QuicEngine: Equatable, Hashable {}
 
+extension QuicEngine: Codable {}
+
 
 
 
@@ -3897,10 +3960,9 @@ public enum RayError: Swift.Error {
     )
     /**
      * A backup code would not decode, or the password was wrong. The two are
-     * one case: the AEAD cannot tell them apart.
+     * one case: the AEAD cannot tell them apart, so neither can the message.
      */
-    case BadBackup(String
-    )
+    case BadBackup
     /**
      * [`Node::restore_identity`] found an identity already on the device and
      * was not told to replace it. Carries the existing public key so the UI can
@@ -3944,9 +4006,7 @@ public struct FfiConverterTypeRayError: FfiConverterRustBuffer {
         case 5: return .Network(
             try FfiConverterString.read(from: &buf)
             )
-        case 6: return .BadBackup(
-            try FfiConverterString.read(from: &buf)
-            )
+        case 6: return .BadBackup
         case 7: return .IdentityExists(
             try FfiConverterString.read(from: &buf)
             )
@@ -3987,9 +4047,8 @@ public struct FfiConverterTypeRayError: FfiConverterRustBuffer {
             FfiConverterString.write(v1, into: &buf)
 
 
-        case let .BadBackup(v1):
+        case .BadBackup:
             writeInt(&buf, Int32(6))
-            FfiConverterString.write(v1, into: &buf)
 
 
         case let .IdentityExists(v1):
@@ -4021,6 +4080,8 @@ public func FfiConverterTypeRayError_lower(_ value: RayError) -> RustBuffer {
 
 
 extension RayError: Equatable, Hashable {}
+
+extension RayError: Codable {}
 
 
 
@@ -4117,6 +4178,8 @@ public func FfiConverterTypeTransferState_lower(_ value: TransferState) -> RustB
 
 
 extension TransferState: Equatable, Hashable {}
+
+extension TransferState: Codable {}
 
 
 
@@ -4513,6 +4576,18 @@ fileprivate struct FfiConverterSequenceTypeTransfer: FfiConverterRustBuffer {
         return seq
     }
 }
+/**
+ * The error in words, from its `Display`. The generated bindings describe an
+ * error by its variant and fields (`v1=...` in Kotlin, the case name in
+ * Swift), which is not something to show a person.
+ */
+public func errorMessage(error: RayError) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_ray_mobile_fn_func_error_message(
+        FfiConverterTypeRayError_lower(error),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -4528,6 +4603,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_ray_mobile_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_ray_mobile_checksum_func_error_message() != 1071) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_filewatch_cancel() != 10590) {
         return InitializationResult.apiChecksumMismatch
@@ -4650,6 +4728,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_restore_identity() != 5366) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_mobile_checksum_method_node_seed_default_hostname() != 45226) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_send_file() != 40644) {

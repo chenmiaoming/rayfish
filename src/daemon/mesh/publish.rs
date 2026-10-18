@@ -3,6 +3,8 @@
 //! Also holds the thin `Daemon` direct-connection (`ray connect`) handlers that
 //! delegate to `ConnectService`.
 
+use iroh_dns::pkarr::SignedPacket;
+
 use super::super::*;
 
 /// Renew records with enough margin for scheduler/network delay that a healthy
@@ -225,8 +227,13 @@ pub(crate) fn spawn_network_publisher(
                     registry.schedule_destruction(&network_name, packet);
                     break;
                 }
+                // Decide and sign under the commit lock, publish after releasing
+                // it. The relay round trip can take seconds, and admissions and
+                // reconverges on this network queue on the same lock. Signing
+                // under it keeps record timestamps in commit order, so the relay
+                // never keeps an older generation over a newer one.
                 let commit = Arc::clone(&state.read().unwrap().snapshot_commit);
-                let _commit = commit.lock().await;
+                let commit_guard = commit.lock().await;
                 if token.is_cancelled() {
                     break;
                 }
@@ -240,6 +247,7 @@ pub(crate) fn spawn_network_publisher(
                     }
                 }
 
+                let mut prepared = None;
                 if persistence_ready
                     && let Some(hash) = configured_group_hash(&network_name)
                     && attempt_is_due(hash, last_publish, retry, Instant::now())
@@ -253,33 +261,35 @@ pub(crate) fn spawn_network_publisher(
                         seed_peers.push(endpoint_id);
                         seed_peers.sort();
                         seed_peers.dedup();
-
-                        match dht::publish_network(&client, &net_secret_key, &hash, &seed_peers)
-                            .await
-                        {
-                            Ok(_) => {
-                                if mark_group_hash_published(&network_name, hash) {
-                                    tracing::info!(
-                                        peers = seed_peers.len(),
-                                        "published network record"
-                                    );
-                                    last_publish = Some((hash, Instant::now()));
-                                    retry = None;
-                                } else {
-                                    retry = Some((
-                                        hash,
-                                        Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL,
-                                    ));
-                                }
-                            }
+                        match dht::encode_network_record(&net_secret_key, &hash, &seed_peers) {
+                            Ok(packet) => prepared = Some((hash, packet, seed_peers.len())),
                             Err(e) => {
-                                tracing::warn!(error = %e, "failed to publish network record");
+                                tracing::warn!(error = %e, "failed to build network record");
                                 retry =
                                     Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
                             }
                         }
                     } else {
                         retry = Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
+                    }
+                }
+                drop(commit_guard);
+
+                if let Some((hash, packet, seed_count)) = prepared {
+                    match publish_signed_record(&client, &commit, &network_name, hash, &packet)
+                        .await
+                    {
+                        Ok(true) => {
+                            tracing::info!(peers = seed_count, "published network record");
+                            last_publish = Some((hash, Instant::now()));
+                            retry = None;
+                        }
+                        outcome => {
+                            if let Err(e) = outcome {
+                                tracing::warn!(error = %e, "failed to publish network record");
+                            }
+                            retry = Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
+                        }
                     }
                 }
             }
@@ -423,6 +433,23 @@ pub(crate) async fn persist_group_hash_locked(
         }
     }
     write_group_hash_pointer(state, network, hash, published)
+}
+
+/// Publish a record signed under `commit`, then mark its generation published
+/// if it is still the recovery pointer. No lock is held across the relay call.
+/// The mark takes `commit` again because it compares against the pointer, and
+/// a commit may have moved it while the publish was in flight. `Ok(false)`
+/// means it did, and a newer record is owed.
+pub(crate) async fn publish_signed_record(
+    client: &PkarrRelayClient,
+    commit: &AsyncMutex<()>,
+    network: &str,
+    hash: blake3::Hash,
+    packet: &SignedPacket,
+) -> Result<bool> {
+    dht::publish_record(client, packet).await?;
+    let _commit = commit.lock().await;
+    Ok(mark_group_hash_published(network, hash))
 }
 
 pub(crate) fn mark_group_hash_published(network: &str, hash: blake3::Hash) -> bool {

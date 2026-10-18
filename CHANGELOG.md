@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- iOS: crash reporting, with an opt-out toggle and a Send diagnostics button in
+  the You tab, as on Android.
 - `just ios-run` builds, installs, and launches the iOS app on a connected iPhone.
 - An iOS app, the counterpart of the Android one: networks, invites and QR
   codes, pairing, file transfer, firewall rules, join and connect requests,
@@ -35,8 +37,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   blocked. Android also shows your identity and can connect to a peer by it.
   On macOS a new invitation posts a notification you can join or decline from.
 
+- `ray rename <network> <new-name>` renames a network on this machine only. Its
+  hosts then resolve as `<host>.<new-name>.ray`, and its firewall rules, SSH
+  access, exit-node settings and outstanding invites follow the new name. Other
+  members keep their own name for it. A live network briefly reconnects under
+  the new name.
+
 ### Changed
 
+- Android and iOS: a new install takes its mesh name from the device name in
+  Settings, so `Alice's Pixel` joins as `alice-pixel`. iOS shares only
+  `iPhone` until Apple grants the app the device name entitlement. A possessive `'s` is
+  dropped from system hostnames everywhere, so `Alice's MacBook` becomes
+  `alice-macbook` instead of `alice-s-macbook`.
+- The `nightly` pre-release no longer includes the Android APK. Apps ship only
+  with versioned releases; `ray update --nightly` still updates the CLI and
+  daemon.
 - Linux: the file-transfer and membership store moved from
   `/etc/rayfish/blobs` to `/var/lib/rayfish/blobs`. An existing store is moved
   on first start.
@@ -67,8 +83,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   device. A device paired again keeps the new pairing when a message about the
   earlier one arrives late. A primary on an older release gets the earlier
   one-shot request.
+- Android: error messages say what went wrong instead of showing `v1=...` or
+  nothing.
 - After pairing, a new device joins all of its networks at once instead of
-  waiting for each join to finish before starting the next.
+  waiting for each join to finish before starting the next. The device it
+  paired with now admits those joins side by side too, so pairing with many
+  shared networks takes about as long as joining one.
+- Someone who joins a network seconds after it was created is no longer
+  dropped from it right away. A background check could mistake the new network
+  for one that failed to start and start it a second time, and the second copy
+  then published the roster from before the join.
 - Android: receiving or sending a file no longer crashes the app when Android
   15 or later has used up the daily background transfer time; the transfer is
   marked failed instead.

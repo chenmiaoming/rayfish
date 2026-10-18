@@ -283,7 +283,6 @@ pub(crate) async fn reconverge_and_apply(
     network_name: &str,
     state: &SharedNetworkState,
     my_identity: EndpointId,
-    alpn: &[u8],
     device_cert: &Option<control::DeviceCert>,
 ) {
     let MeshCtx {
@@ -337,16 +336,7 @@ pub(crate) async fn reconverge_and_apply(
             spawn_self_unpair(registry, network_name, cert.clone());
             return;
         }
-        drain_pending_rename(
-            endpoint,
-            &roster,
-            alpn,
-            network_name,
-            my_identity,
-            device_cert,
-            registry,
-        )
-        .await;
+        drain_pending_rename(&roster, network_name, my_identity, device_cert, registry).await;
         // Re-sync the exit-offer flag on this path too. An offer broadcast can
         // miss entirely (activation at boot races the first peer connections;
         // every coordinator offline), and a missed offer never changes the blob,
@@ -454,16 +444,7 @@ pub(crate) async fn reconverge_and_apply(
     attach_rejoined_peers(peers, device_user_map, &roster, network_name, my_identity).await;
     // If a local rename is still unconfirmed by this just-applied blob, keep
     // delivering it to the coordinator set until it lands.
-    drain_pending_rename(
-        endpoint,
-        &roster,
-        alpn,
-        network_name,
-        my_identity,
-        device_cert,
-        registry,
-    )
-    .await;
+    drain_pending_rename(&roster, network_name, my_identity, device_cert, registry).await;
     // Re-advertise the exit offer if the fresh roster disagrees with what we
     // actually offer. This is the retry that makes the offer survive a missed
     // broadcast: reconverges run exactly when a connection (re)forms (the
