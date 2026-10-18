@@ -39,6 +39,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Android and iOS: a new install takes its mesh name from the device name in
+  Settings, so `Alice's iPhone` joins as `alice-iphone`. A possessive `'s` is
+  dropped from system hostnames everywhere, so `Alice's MacBook` becomes
+  `alice-macbook` instead of `alice-s-macbook`.
 - The `nightly` pre-release no longer includes the Android APK. Apps ship only
   with versioned releases; `ray update --nightly` still updates the CLI and
   daemon.

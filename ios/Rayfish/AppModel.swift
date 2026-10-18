@@ -62,11 +62,12 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
-    /// Name the device after its model on first run, so pairing auto-joins all
-    /// use one name. iOS only shares the user's own device name with an entitlement.
+    /// Name the device after the one set in Settings on first run, so pairing
+    /// auto-joins all use one name: `Alice's iPhone` becomes `alice-iphone`.
+    /// Without the user-assigned-device-name entitlement iOS answers `iPhone`.
     private func seedDeviceName() async {
         let node = tunnel.local.node
-        let model = UIDevice.current.model
+        let model = UIDevice.current.name
         await Task.detached { try? node.seedDefaultHostname(model: model) }.value
     }
 

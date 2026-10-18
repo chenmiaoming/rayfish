@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
@@ -254,11 +256,15 @@ object NodeHolder {
         return id
     }
 
-    /** Seed the device's default hostname from the Android model on first run,
-     * so pairing auto-joins all use one consistent name. Idempotent: no-op once
-     * a name is set. Runs on the caller's (IO) context; touches config only. */
+    /** Seed the device's default hostname from the name set in Settings on
+     * first run (`Alice's Pixel` becomes `alice-pixel`), falling back to the
+     * model, so pairing auto-joins all use one consistent name. Idempotent:
+     * no-op once a name is set. Runs on the caller's (IO) context; touches
+     * config only. */
     fun seedDeviceName(context: Context) {
-        runCatching { get(context).seedDefaultHostname(android.os.Build.MODEL ?: "") }
+        val name = Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
+            ?.takeIf { it.isNotBlank() } ?: Build.MODEL.orEmpty()
+        runCatching { get(context).seedDefaultHostname(name) }
     }
 
     /**

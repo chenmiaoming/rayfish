@@ -210,7 +210,7 @@ struct YouView: View {
         defer { savingKeychain = false }
         do {
             let node = model.tunnel.local.node
-            let name = snapshot.deviceName.isEmpty ? UIDevice.current.model : snapshot.deviceName
+            let name = snapshot.deviceName.isEmpty ? UIDevice.current.name : snapshot.deviceName
             try await Task.detached { try IdentityKeychain.save(node: node, deviceName: name) }.value
             await reloadKeychain()
             model.toast = "Saved to iCloud Keychain"

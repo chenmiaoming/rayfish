@@ -71,12 +71,27 @@ fn raw_system_hostname() -> Option<String> {
 ///
 /// An OS hostname is allowed to be things a mesh hostname is not: uppercase, a
 /// full FQDN, or (on macOS) a sentence with spaces and an apostrophe in it. So
-/// only the first label is kept, it is lowercased, and every other character
-/// becomes a hyphen: `Alice's MacBook.local` -> `alice-s-macbook`.
+/// only the first label is kept, it is lowercased, a possessive `'s` is dropped,
+/// and every other character becomes a hyphen: `Alice's MacBook.local` ->
+/// `alice-macbook`.
 pub fn mesh_form(raw: &str) -> Option<String> {
     let label = raw.split('.').next().unwrap_or(raw).to_ascii_lowercase();
     let mut name = String::with_capacity(label.len());
-    for c in label.chars() {
+    let mut chars = label.chars();
+    while let Some(c) = chars.next() {
+        // Phones and Macs name themselves `Alice's iPhone`, often with a curly
+        // apostrophe. The `s` would otherwise survive as `alice-s-iphone`.
+        if matches!(c, '\'' | '\u{2019}') {
+            let mut ahead = chars.clone();
+            if ahead.next() == Some('s')
+                && ahead
+                    .next()
+                    .is_none_or(|next| !next.is_ascii_alphanumeric())
+            {
+                chars.next();
+                continue;
+            }
+        }
         match c.is_ascii_lowercase() || c.is_ascii_digit() {
             true => name.push(c),
             // Runs collapse, or `My  Box` would come out as `my--box`.
@@ -162,7 +177,16 @@ mod tests {
         // macOS lets a hostname be a sentence.
         assert_eq!(
             mesh_form("Alice's MacBook Pro.local"),
-            Some("alice-s-macbook-pro".to_string())
+            Some("alice-macbook-pro".to_string())
+        );
+        assert_eq!(
+            mesh_form("Alice\u{2019}s iPhone"),
+            Some("alice-iphone".to_string())
+        );
+        assert_eq!(mesh_form("Chris'"), Some("chris".to_string()));
+        assert_eq!(
+            mesh_form("Rock'sand box"),
+            Some("rock-sand-box".to_string())
         );
         // Runs of junk collapse to one hyphen, and the edges are trimmed.
         assert_eq!(mesh_form("__my  box__"), Some("my-box".to_string()));
