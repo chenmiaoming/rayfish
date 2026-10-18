@@ -35,6 +35,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   blocked. Android also shows your identity and can connect to a peer by it.
   On macOS a new invitation posts a notification you can join or decline from.
 
+- `ray rename <network> <new-name>` renames a network on this machine only. Its
+  hosts then resolve as `<host>.<new-name>.ray`, and its firewall rules, SSH
+  access, exit-node settings and outstanding invites follow the new name. Other
+  members keep their own name for it. A live network briefly reconnects under
+  the new name.
+
 ### Changed
 
 - Linux: the file-transfer and membership store moved from
