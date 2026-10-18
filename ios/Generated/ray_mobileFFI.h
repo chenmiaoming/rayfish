@@ -301,6 +301,11 @@ void*_Nonnull uniffi_ray_mobile_fn_constructor_node_new(RustBuffer config_dir, R
 void uniffi_ray_mobile_fn_method_node_accept_file_offer(void*_Nonnull ptr, uint64_t id, RustBuffer output_dir, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_ACCEPT_INVITATION
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_ACCEPT_INVITATION
+void uniffi_ray_mobile_fn_method_node_accept_invitation(void*_Nonnull ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_ACCEPT_JOIN_REQUEST
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_ACCEPT_JOIN_REQUEST
 void uniffi_ray_mobile_fn_method_node_accept_join_request(void*_Nonnull ptr, RustBuffer network, RustBuffer short_id, RustCallStatus *_Nonnull out_status
@@ -316,6 +321,16 @@ void uniffi_ray_mobile_fn_method_node_approve_connect_request(void*_Nonnull ptr,
 RustBuffer uniffi_ray_mobile_fn_method_node_backup_identity(void*_Nonnull ptr, RustBuffer password, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_BLOCK_CONNECT_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_BLOCK_CONNECT_REQUEST
+void uniffi_ray_mobile_fn_method_node_block_connect_request(void*_Nonnull ptr, RustBuffer short_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_BLOCK_PEER
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_BLOCK_PEER
+void uniffi_ray_mobile_fn_method_node_block_peer(void*_Nonnull ptr, RustBuffer peer, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_CANCEL_SEND
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_CANCEL_SEND
 void uniffi_ray_mobile_fn_method_node_cancel_send(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
@@ -326,9 +341,19 @@ void uniffi_ray_mobile_fn_method_node_cancel_send(void*_Nonnull ptr, uint64_t id
 void uniffi_ray_mobile_fn_method_node_cancel_transfer(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_CONNECT_PEER
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_CONNECT_PEER
+RustBuffer uniffi_ray_mobile_fn_method_node_connect_peer(void*_Nonnull ptr, RustBuffer peer, RustBuffer hostname, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_CREATE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_CREATE
 RustBuffer uniffi_ray_mobile_fn_method_node_create(void*_Nonnull ptr, RustBuffer name, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_DECLINE_INVITATION
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_DECLINE_INVITATION
+void uniffi_ray_mobile_fn_method_node_decline_invitation(void*_Nonnull ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_DEFAULT_HOSTNAME
@@ -381,6 +406,11 @@ int8_t uniffi_ray_mobile_fn_method_node_has_identity(void*_Nonnull ptr, RustCall
 RustBuffer uniffi_ray_mobile_fn_method_node_health_snapshot(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_INBOUND_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_INBOUND_SETTINGS
+RustBuffer uniffi_ray_mobile_fn_method_node_inbound_settings(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_INVITE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_INVITE
 RustBuffer uniffi_ray_mobile_fn_method_node_invite(void*_Nonnull ptr, RustBuffer network, RustCallStatus *_Nonnull out_status
@@ -409,6 +439,11 @@ RustBuffer uniffi_ray_mobile_fn_method_node_list_connect_requests(void*_Nonnull 
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_LIST_FILE_OFFERS
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_LIST_FILE_OFFERS
 RustBuffer uniffi_ray_mobile_fn_method_node_list_file_offers(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_LIST_INVITATIONS
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_LIST_INVITATIONS
+RustBuffer uniffi_ray_mobile_fn_method_node_list_invitations(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_LIST_JOIN_REQUESTS
@@ -466,6 +501,11 @@ RustBuffer uniffi_ray_mobile_fn_method_node_restore_identity(void*_Nonnull ptr, 
 void uniffi_ray_mobile_fn_method_node_send_file(void*_Nonnull ptr, RustBuffer path, RustBuffer peer, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEND_INVITE
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEND_INVITE
+RustBuffer uniffi_ray_mobile_fn_method_node_send_invite(void*_Nonnull ptr, RustBuffer network, RustBuffer recipient, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SET_DEFAULT_HOSTNAME
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SET_DEFAULT_HOSTNAME
 void uniffi_ray_mobile_fn_method_node_set_default_hostname(void*_Nonnull ptr, RustBuffer name, RustCallStatus *_Nonnull out_status
@@ -479,6 +519,11 @@ void uniffi_ray_mobile_fn_method_node_set_dns_upstreams(void*_Nonnull ptr, RustB
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SET_HOSTNAME
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SET_HOSTNAME
 void uniffi_ray_mobile_fn_method_node_set_hostname(void*_Nonnull ptr, RustBuffer network, RustBuffer hostname, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SET_INBOUND_POLICY
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SET_INBOUND_POLICY
+void uniffi_ray_mobile_fn_method_node_set_inbound_policy(void*_Nonnull ptr, RustBuffer policy, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SET_QUIC_ENGINE
@@ -509,6 +554,11 @@ void uniffi_ray_mobile_fn_method_node_stop(void*_Nonnull ptr, RustCallStatus *_N
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SUBMIT_CODE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SUBMIT_CODE
 RustBuffer uniffi_ray_mobile_fn_method_node_submit_code(void*_Nonnull ptr, RustBuffer input, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_UNBLOCK_PEER
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_UNBLOCK_PEER
+void uniffi_ray_mobile_fn_method_node_unblock_peer(void*_Nonnull ptr, RustBuffer peer, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_UNPAIR
@@ -833,6 +883,12 @@ uint16_t uniffi_ray_mobile_checksum_method_node_accept_file_offer(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_ACCEPT_INVITATION
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_ACCEPT_INVITATION
+uint16_t uniffi_ray_mobile_checksum_method_node_accept_invitation(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_ACCEPT_JOIN_REQUEST
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_ACCEPT_JOIN_REQUEST
 uint16_t uniffi_ray_mobile_checksum_method_node_accept_join_request(void
@@ -851,6 +907,18 @@ uint16_t uniffi_ray_mobile_checksum_method_node_backup_identity(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_BLOCK_CONNECT_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_BLOCK_CONNECT_REQUEST
+uint16_t uniffi_ray_mobile_checksum_method_node_block_connect_request(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_BLOCK_PEER
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_BLOCK_PEER
+uint16_t uniffi_ray_mobile_checksum_method_node_block_peer(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_CANCEL_SEND
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_CANCEL_SEND
 uint16_t uniffi_ray_mobile_checksum_method_node_cancel_send(void
@@ -863,9 +931,21 @@ uint16_t uniffi_ray_mobile_checksum_method_node_cancel_transfer(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_CONNECT_PEER
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_CONNECT_PEER
+uint16_t uniffi_ray_mobile_checksum_method_node_connect_peer(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_CREATE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_CREATE
 uint16_t uniffi_ray_mobile_checksum_method_node_create(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_DECLINE_INVITATION
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_DECLINE_INVITATION
+uint16_t uniffi_ray_mobile_checksum_method_node_decline_invitation(void
 
 );
 #endif
@@ -929,6 +1009,12 @@ uint16_t uniffi_ray_mobile_checksum_method_node_health_snapshot(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_INBOUND_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_INBOUND_SETTINGS
+uint16_t uniffi_ray_mobile_checksum_method_node_inbound_settings(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_INVITE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_INVITE
 uint16_t uniffi_ray_mobile_checksum_method_node_invite(void
@@ -962,6 +1048,12 @@ uint16_t uniffi_ray_mobile_checksum_method_node_list_connect_requests(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_LIST_FILE_OFFERS
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_LIST_FILE_OFFERS
 uint16_t uniffi_ray_mobile_checksum_method_node_list_file_offers(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_LIST_INVITATIONS
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_LIST_INVITATIONS
+uint16_t uniffi_ray_mobile_checksum_method_node_list_invitations(void
 
 );
 #endif
@@ -1031,6 +1123,12 @@ uint16_t uniffi_ray_mobile_checksum_method_node_send_file(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SEND_INVITE
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SEND_INVITE
+uint16_t uniffi_ray_mobile_checksum_method_node_send_invite(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SET_DEFAULT_HOSTNAME
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SET_DEFAULT_HOSTNAME
 uint16_t uniffi_ray_mobile_checksum_method_node_set_default_hostname(void
@@ -1046,6 +1144,12 @@ uint16_t uniffi_ray_mobile_checksum_method_node_set_dns_upstreams(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SET_HOSTNAME
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SET_HOSTNAME
 uint16_t uniffi_ray_mobile_checksum_method_node_set_hostname(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SET_INBOUND_POLICY
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SET_INBOUND_POLICY
+uint16_t uniffi_ray_mobile_checksum_method_node_set_inbound_policy(void
 
 );
 #endif
@@ -1082,6 +1186,12 @@ uint16_t uniffi_ray_mobile_checksum_method_node_stop(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SUBMIT_CODE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_SUBMIT_CODE
 uint16_t uniffi_ray_mobile_checksum_method_node_submit_code(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_UNBLOCK_PEER
+#define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_CHECKSUM_METHOD_NODE_UNBLOCK_PEER
+uint16_t uniffi_ray_mobile_checksum_method_node_unblock_peer(void
 
 );
 #endif

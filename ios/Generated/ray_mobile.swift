@@ -668,6 +668,11 @@ public protocol NodeProtocol: AnyObject, Sendable {
     func acceptFileOffer(id: UInt64, outputDir: String) throws
 
     /**
+     * Join the network an invitation names.
+     */
+    func acceptInvitation(id: String) throws
+
+    /**
      * Approve a pending join request on a network we coordinate.
      */
     func acceptJoinRequest(network: String, shortId: String) throws
@@ -690,6 +695,16 @@ public protocol NodeProtocol: AnyObject, Sendable {
     func backupIdentity(password: String) throws  -> IdentityBackup
 
     /**
+     * Decline an incoming connect request and block the requester.
+     */
+    func blockConnectRequest(shortId: String) throws
+
+    /**
+     * Block `peer` (an identity, or a hostname this node knows).
+     */
+    func blockPeer(peer: String) throws
+
+    /**
      * Call off a queued send, by the id from [`Node::list_queued_sends`].
      * Fails if the offer has already been delivered, since there is nothing
      * left on this side to withdraw.
@@ -702,10 +717,18 @@ public protocol NodeProtocol: AnyObject, Sendable {
     func cancelTransfer(id: UInt64) throws
 
     /**
+     * Ask the user behind `peer` (an identity) for a direct connection. They
+     * must approve it before a private network is created.
+     */
+    func connectPeer(peer: String, hostname: String?) throws  -> String
+
+    /**
      * Create a new network (default CLOSED membership) and register this node as
      * its coordinator. `name` is optional; the core generates one if absent.
      */
     func create(name: String?) throws  -> NetworkInfo
+
+    func declineInvitation(id: String) throws
 
     /**
      * The device's default hostname (seeds every join, incl. pairing
@@ -771,6 +794,11 @@ public protocol NodeProtocol: AnyObject, Sendable {
     func healthSnapshot()  -> HealthSnapshot
 
     /**
+     * Who may send connect requests and invitations, and who is blocked.
+     */
+    func inboundSettings() throws  -> InboundSettings
+
+    /**
      * Mint a single-use invite code for `network` (default 7d TTL), to share.
      */
     func invite(network: String) throws  -> String
@@ -803,6 +831,11 @@ public protocol NodeProtocol: AnyObject, Sendable {
      * Incoming file offers waiting to be accepted or declined.
      */
     func listFileOffers() throws  -> [FileOffer]
+
+    /**
+     * Invitations coordinators delivered to this node, newest state included.
+     */
+    func listInvitations() throws  -> [Invitation]
 
     /**
      * Join requests awaiting approval on a network we coordinate.
@@ -890,6 +923,12 @@ public protocol NodeProtocol: AnyObject, Sendable {
     func sendFile(path: String, peer: String) throws
 
     /**
+     * Deliver an invite for `network` to `recipient`'s identity. An offline
+     * recipient is not an error: the node retries until the invite expires.
+     */
+    func sendInvite(network: String, recipient: String) throws  -> String
+
+    /**
      * Set the device's default hostname. Validated with the core's hostname
      * rules; rejected names leave the stored value untouched. Config-only;
      * safe before `start`.
@@ -914,6 +953,8 @@ public protocol NodeProtocol: AnyObject, Sendable {
      * Set this device's hostname on `network`. Validated by the core.
      */
     func setHostname(network: String, hostname: String) throws
+
+    func setInboundPolicy(policy: InboundPolicy) throws
 
     /**
      * Save the engine selection. Restart the node to apply it.
@@ -962,6 +1003,8 @@ public protocol NodeProtocol: AnyObject, Sendable {
      * `join`, which still handles both a full invite and a bare room id.
      */
     func submitCode(input: String) throws  -> LinkAction
+
+    func unblockPeer(peer: String) throws
 
     /**
      * Unpair this device from its primary: leave every network it joined under
@@ -1087,6 +1130,16 @@ open func acceptFileOffer(id: UInt64, outputDir: String)throws   {try rustCallWi
 }
 
     /**
+     * Join the network an invitation names.
+     */
+open func acceptInvitation(id: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_accept_invitation(self.uniffiClonePointer(),
+        FfiConverterString.lower(id),$0
+    )
+}
+}
+
+    /**
      * Approve a pending join request on a network we coordinate.
      */
 open func acceptJoinRequest(network: String, shortId: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
@@ -1126,6 +1179,26 @@ open func backupIdentity(password: String)throws  -> IdentityBackup  {
 }
 
     /**
+     * Decline an incoming connect request and block the requester.
+     */
+open func blockConnectRequest(shortId: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_block_connect_request(self.uniffiClonePointer(),
+        FfiConverterString.lower(shortId),$0
+    )
+}
+}
+
+    /**
+     * Block `peer` (an identity, or a hostname this node knows).
+     */
+open func blockPeer(peer: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_block_peer(self.uniffiClonePointer(),
+        FfiConverterString.lower(peer),$0
+    )
+}
+}
+
+    /**
      * Call off a queued send, by the id from [`Node::list_queued_sends`].
      * Fails if the offer has already been delivered, since there is nothing
      * left on this side to withdraw.
@@ -1148,6 +1221,19 @@ open func cancelTransfer(id: UInt64)throws   {try rustCallWithError(FfiConverter
 }
 
     /**
+     * Ask the user behind `peer` (an identity) for a direct connection. They
+     * must approve it before a private network is created.
+     */
+open func connectPeer(peer: String, hostname: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_connect_peer(self.uniffiClonePointer(),
+        FfiConverterString.lower(peer),
+        FfiConverterOptionString.lower(hostname),$0
+    )
+})
+}
+
+    /**
      * Create a new network (default CLOSED membership) and register this node as
      * its coordinator. `name` is optional; the core generates one if absent.
      */
@@ -1157,6 +1243,13 @@ open func create(name: String?)throws  -> NetworkInfo  {
         FfiConverterOptionString.lower(name),$0
     )
 })
+}
+
+open func declineInvitation(id: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_decline_invitation(self.uniffiClonePointer(),
+        FfiConverterString.lower(id),$0
+    )
+}
 }
 
     /**
@@ -1279,6 +1372,16 @@ open func healthSnapshot() -> HealthSnapshot  {
 }
 
     /**
+     * Who may send connect requests and invitations, and who is blocked.
+     */
+open func inboundSettings()throws  -> InboundSettings  {
+    return try  FfiConverterTypeInboundSettings_lift(try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_inbound_settings(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
      * Mint a single-use invite code for `network` (default 7d TTL), to share.
      */
 open func invite(network: String)throws  -> String  {
@@ -1340,6 +1443,16 @@ open func listConnectRequests()throws  -> [PendingRequest]  {
 open func listFileOffers()throws  -> [FileOffer]  {
     return try  FfiConverterSequenceTypeFileOffer.lift(try rustCallWithError(FfiConverterTypeRayError_lift) {
     uniffi_ray_mobile_fn_method_node_list_file_offers(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Invitations coordinators delivered to this node, newest state included.
+     */
+open func listInvitations()throws  -> [Invitation]  {
+    return try  FfiConverterSequenceTypeInvitation.lift(try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_list_invitations(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -1489,6 +1602,19 @@ open func sendFile(path: String, peer: String)throws   {try rustCallWithError(Ff
 }
 
     /**
+     * Deliver an invite for `network` to `recipient`'s identity. An offline
+     * recipient is not an error: the node retries until the invite expires.
+     */
+open func sendInvite(network: String, recipient: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_send_invite(self.uniffiClonePointer(),
+        FfiConverterString.lower(network),
+        FfiConverterString.lower(recipient),$0
+    )
+})
+}
+
+    /**
      * Set the device's default hostname. Validated with the core's hostname
      * rules; rejected names leave the stored value untouched. Config-only;
      * safe before `start`.
@@ -1526,6 +1652,13 @@ open func setHostname(network: String, hostname: String)throws   {try rustCallWi
     uniffi_ray_mobile_fn_method_node_set_hostname(self.uniffiClonePointer(),
         FfiConverterString.lower(network),
         FfiConverterString.lower(hostname),$0
+    )
+}
+}
+
+open func setInboundPolicy(policy: InboundPolicy)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_set_inbound_policy(self.uniffiClonePointer(),
+        FfiConverterTypeInboundPolicy_lower(policy),$0
     )
 }
 }
@@ -1605,6 +1738,13 @@ open func submitCode(input: String)throws  -> LinkAction  {
         FfiConverterString.lower(input),$0
     )
 })
+}
+
+open func unblockPeer(peer: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+    uniffi_ray_mobile_fn_method_node_unblock_peer(self.uniffiClonePointer(),
+        FfiConverterString.lower(peer),$0
+    )
+}
 }
 
     /**
@@ -2266,6 +2406,177 @@ public func FfiConverterTypeIdentityBackup_lower(_ value: IdentityBackup) -> Rus
 
 
 /**
+ * The inbound policy and the identities refused outright.
+ */
+public struct InboundSettings {
+    public var policy: InboundPolicy
+    public var blocked: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(policy: InboundPolicy, blocked: [String]) {
+        self.policy = policy
+        self.blocked = blocked
+    }
+}
+
+#if compiler(>=6)
+extension InboundSettings: Sendable {}
+#endif
+
+
+extension InboundSettings: Equatable, Hashable {
+    public static func ==(lhs: InboundSettings, rhs: InboundSettings) -> Bool {
+        if lhs.policy != rhs.policy {
+            return false
+        }
+        if lhs.blocked != rhs.blocked {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(policy)
+        hasher.combine(blocked)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeInboundSettings: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InboundSettings {
+        return
+            try InboundSettings(
+                policy: FfiConverterTypeInboundPolicy.read(from: &buf),
+                blocked: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: InboundSettings, into buf: inout [UInt8]) {
+        FfiConverterTypeInboundPolicy.write(value.policy, into: &buf)
+        FfiConverterSequenceString.write(value.blocked, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInboundSettings_lift(_ buf: RustBuffer) throws -> InboundSettings {
+    return try FfiConverterTypeInboundSettings.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInboundSettings_lower(_ value: InboundSettings) -> RustBuffer {
+    return FfiConverterTypeInboundSettings.lower(value)
+}
+
+
+/**
+ * An invitation a coordinator delivered to this node. The code stays in the
+ * node: accepting by `id` is all the app needs.
+ */
+public struct Invitation {
+    public var id: String
+    public var network: String
+    public var coordinator: String
+    public var receivedSecs: UInt64
+    public var state: InvitationState
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, network: String, coordinator: String, receivedSecs: UInt64, state: InvitationState) {
+        self.id = id
+        self.network = network
+        self.coordinator = coordinator
+        self.receivedSecs = receivedSecs
+        self.state = state
+    }
+}
+
+#if compiler(>=6)
+extension Invitation: Sendable {}
+#endif
+
+
+extension Invitation: Equatable, Hashable {
+    public static func ==(lhs: Invitation, rhs: Invitation) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.network != rhs.network {
+            return false
+        }
+        if lhs.coordinator != rhs.coordinator {
+            return false
+        }
+        if lhs.receivedSecs != rhs.receivedSecs {
+            return false
+        }
+        if lhs.state != rhs.state {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(network)
+        hasher.combine(coordinator)
+        hasher.combine(receivedSecs)
+        hasher.combine(state)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeInvitation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Invitation {
+        return
+            try Invitation(
+                id: FfiConverterString.read(from: &buf),
+                network: FfiConverterString.read(from: &buf),
+                coordinator: FfiConverterString.read(from: &buf),
+                receivedSecs: FfiConverterUInt64.read(from: &buf),
+                state: FfiConverterTypeInvitationState.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Invitation, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.network, into: &buf)
+        FfiConverterString.write(value.coordinator, into: &buf)
+        FfiConverterUInt64.write(value.receivedSecs, into: &buf)
+        FfiConverterTypeInvitationState.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInvitation_lift(_ buf: RustBuffer) throws -> Invitation {
+    return try FfiConverterTypeInvitation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInvitation_lower(_ value: Invitation) -> RustBuffer {
+    return FfiConverterTypeInvitation.lower(value)
+}
+
+
+/**
  * One network this node belongs to, with its peers.
  */
 public struct NetworkDetail {
@@ -2840,16 +3151,26 @@ public struct Status {
     public var peers: [PeerInfo]
     public var networks: [NetworkDetail]
     public var pendingNetworks: [String]
+    /**
+     * The user identity peers connect to and invite: the primary device's
+     * endpoint. `None` while the node is stopped.
+     */
+    public var identity: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(running: Bool, nodeId: String, ipv6: String, peers: [PeerInfo], networks: [NetworkDetail], pendingNetworks: [String]) {
+    public init(running: Bool, nodeId: String, ipv6: String, peers: [PeerInfo], networks: [NetworkDetail], pendingNetworks: [String],
+        /**
+         * The user identity peers connect to and invite: the primary device's
+         * endpoint. `None` while the node is stopped.
+         */identity: String?) {
         self.running = running
         self.nodeId = nodeId
         self.ipv6 = ipv6
         self.peers = peers
         self.networks = networks
         self.pendingNetworks = pendingNetworks
+        self.identity = identity
     }
 }
 
@@ -2878,6 +3199,9 @@ extension Status: Equatable, Hashable {
         if lhs.pendingNetworks != rhs.pendingNetworks {
             return false
         }
+        if lhs.identity != rhs.identity {
+            return false
+        }
         return true
     }
 
@@ -2888,6 +3212,7 @@ extension Status: Equatable, Hashable {
         hasher.combine(peers)
         hasher.combine(networks)
         hasher.combine(pendingNetworks)
+        hasher.combine(identity)
     }
 }
 
@@ -2905,7 +3230,8 @@ public struct FfiConverterTypeStatus: FfiConverterRustBuffer {
                 ipv6: FfiConverterString.read(from: &buf),
                 peers: FfiConverterSequenceTypePeerInfo.read(from: &buf),
                 networks: FfiConverterSequenceTypeNetworkDetail.read(from: &buf),
-                pendingNetworks: FfiConverterSequenceString.read(from: &buf)
+                pendingNetworks: FfiConverterSequenceString.read(from: &buf),
+                identity: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -2916,6 +3242,7 @@ public struct FfiConverterTypeStatus: FfiConverterRustBuffer {
         FfiConverterSequenceTypePeerInfo.write(value.peers, into: &buf)
         FfiConverterSequenceTypeNetworkDetail.write(value.networks, into: &buf)
         FfiConverterSequenceString.write(value.pendingNetworks, into: &buf)
+        FfiConverterOptionString.write(value.identity, into: &buf)
     }
 }
 
@@ -3046,6 +3373,166 @@ public func FfiConverterTypeTransfer_lift(_ buf: RustBuffer) throws -> Transfer 
 public func FfiConverterTypeTransfer_lower(_ value: Transfer) -> RustBuffer {
     return FfiConverterTypeTransfer.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Which strangers may send connect requests and invitations.
+ */
+
+public enum InboundPolicy {
+
+    case anyone
+    /**
+     * Only peers that share a network with this node.
+     */
+    case known
+    case nobody
+}
+
+
+#if compiler(>=6)
+extension InboundPolicy: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeInboundPolicy: FfiConverterRustBuffer {
+    typealias SwiftType = InboundPolicy
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InboundPolicy {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .anyone
+
+        case 2: return .known
+
+        case 3: return .nobody
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: InboundPolicy, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .anyone:
+            writeInt(&buf, Int32(1))
+
+
+        case .known:
+            writeInt(&buf, Int32(2))
+
+
+        case .nobody:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInboundPolicy_lift(_ buf: RustBuffer) throws -> InboundPolicy {
+    return try FfiConverterTypeInboundPolicy.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInboundPolicy_lower(_ value: InboundPolicy) -> RustBuffer {
+    return FfiConverterTypeInboundPolicy.lower(value)
+}
+
+
+extension InboundPolicy: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum InvitationState {
+
+    case pending
+    case accepted
+    case declined
+}
+
+
+#if compiler(>=6)
+extension InvitationState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeInvitationState: FfiConverterRustBuffer {
+    typealias SwiftType = InvitationState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InvitationState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .pending
+
+        case 2: return .accepted
+
+        case 3: return .declined
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: InvitationState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .pending:
+            writeInt(&buf, Int32(1))
+
+
+        case .accepted:
+            writeInt(&buf, Int32(2))
+
+
+        case .declined:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInvitationState_lift(_ buf: RustBuffer) throws -> InvitationState {
+    return try FfiConverterTypeInvitationState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInvitationState_lower(_ value: InvitationState) -> RustBuffer {
+    return FfiConverterTypeInvitationState.lower(value)
+}
+
+
+extension InvitationState: Equatable, Hashable {}
+
+
+
+
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -3855,6 +4342,31 @@ fileprivate struct FfiConverterSequenceTypeFirewallRuleInfo: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeInvitation: FfiConverterRustBuffer {
+    typealias SwiftType = [Invitation]
+
+    public static func write(_ value: [Invitation], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeInvitation.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Invitation] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Invitation]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeInvitation.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeNetworkDetail: FfiConverterRustBuffer {
     typealias SwiftType = [NetworkDetail]
 
@@ -4023,6 +4535,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ray_mobile_checksum_method_node_accept_file_offer() != 16165) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ray_mobile_checksum_method_node_accept_invitation() != 55975) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ray_mobile_checksum_method_node_accept_join_request() != 20263) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4032,13 +4547,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ray_mobile_checksum_method_node_backup_identity() != 31710) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ray_mobile_checksum_method_node_block_connect_request() != 9935) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_mobile_checksum_method_node_block_peer() != 39904) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ray_mobile_checksum_method_node_cancel_send() != 49789) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_cancel_transfer() != 46122) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ray_mobile_checksum_method_node_connect_peer() != 42900) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ray_mobile_checksum_method_node_create() != 50208) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_mobile_checksum_method_node_decline_invitation() != 24280) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_default_hostname() != 59357) {
@@ -4071,6 +4598,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ray_mobile_checksum_method_node_health_snapshot() != 25816) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ray_mobile_checksum_method_node_inbound_settings() != 9793) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ray_mobile_checksum_method_node_invite() != 59156) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4087,6 +4617,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_list_file_offers() != 4122) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_mobile_checksum_method_node_list_invitations() != 39352) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_list_join_requests() != 56409) {
@@ -4122,6 +4655,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ray_mobile_checksum_method_node_send_file() != 40644) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ray_mobile_checksum_method_node_send_invite() != 31280) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ray_mobile_checksum_method_node_set_default_hostname() != 40200) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4129,6 +4665,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_set_hostname() != 56819) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_mobile_checksum_method_node_set_inbound_policy() != 2409) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_set_quic_engine() != 39138) {
@@ -4147,6 +4686,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_submit_code() != 26371) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_mobile_checksum_method_node_unblock_peer() != 7433) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_unpair() != 28871) {

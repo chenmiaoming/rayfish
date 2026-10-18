@@ -123,10 +123,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash tests/e2e.sh connect run
 
+      - name: "E2E: invites"
+        if: ${{ !cancelled() }}
+        run: bash tests/e2e.sh invites run
+
       - name: Teardown remaining E2E containers
         if: always()
         run: |
-          for s in closed-net firewall connect; do
+          for s in closed-net firewall connect invites; do
             bash tests/e2e.sh "$s" teardown || true
           done
           docker network rm rayfish-e2e 2>/dev/null || true
@@ -134,7 +138,8 @@ jobs:
           if all_containers="$(docker ps -a --format '{{.Names}}')"; then
             for c in rayfish-closednet-a rayfish-closednet-b rayfish-closednet-c \
                      rayfish-fw-a rayfish-fw-b rayfish-fw-c \
-                     rayfish-connect-a rayfish-connect-b; do
+                     rayfish-connect-a rayfish-connect-b \
+                     rayfish-invites-a rayfish-invites-b rayfish-invites-c; do
               if echo "$all_containers" | grep -qxF "$c"; then
                 echo "::error::Container $c remains after fallback teardown" >&2
                 leaked=1
