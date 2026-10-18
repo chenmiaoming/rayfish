@@ -1358,8 +1358,10 @@ mod tests {
             "second reconcile entered while the first transaction was live"
         );
         drop(first);
+        // The waiter can queue behind other tests' daemons, which take this
+        // lock for every DNS update and hold it while PowerShell runs.
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            tokio::time::timeout(std::time::Duration::from_secs(30), waiter)
                 .await
                 .unwrap()
                 .unwrap()
