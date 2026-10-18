@@ -21,14 +21,14 @@ use crate::membership::ExitFamilies;
 use std::future::Future;
 #[cfg(not(target_os = "android"))]
 use std::io::Error as IoError;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::mem::{size_of, zeroed};
 #[cfg(target_os = "linux")]
 use std::net::IpAddr;
 
 #[cfg(not(target_os = "android"))]
 use std::net::Ipv6Addr;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
@@ -55,17 +55,19 @@ use bytes::BytesMut;
 use futures::SinkExt;
 #[cfg(not(target_os = "android"))]
 use futures::StreamExt;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use libc::{
     AF_SYSTEM, CTLIOCGINFO, F_DUPFD_CLOEXEC, c_char, ctl_info, fcntl, getpeername, ioctl, sockaddr,
     sockaddr_ctl, socklen_t,
 };
+#[cfg(not(target_os = "android"))]
+use tun_rs::AsyncDevice;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tun_rs::DeviceBuilder;
 #[cfg(target_os = "linux")]
 use tun_rs::async_framed::DeviceFramedWrite;
 #[cfg(not(target_os = "android"))]
 use tun_rs::async_framed::{BytesCodec, DeviceFramedRead};
-#[cfg(not(target_os = "android"))]
-use tun_rs::{AsyncDevice, DeviceBuilder};
 
 /// Read side of a packet interface. Returns one owned IP packet. Abstracts the
 /// concrete TUN device so the forwarding loop can run over any packet source:
@@ -161,10 +163,10 @@ pub const MIN_TUN_MTU: u16 = 1280;
 /// keep 1500 until their packet interfaces are moved together.
 #[cfg(target_os = "linux")]
 const PREFERRED_TUN_MTU: u16 = MIN_TUN_MTU;
-#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "ios")))]
 const PREFERRED_TUN_MTU: u16 = TUN_MTU;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn configure_mtu(preferred: u16, mut set: impl FnMut(u16) -> Result<(), IoError>) -> Result<u16> {
     match set(preferred) {
         Ok(()) => Ok(preferred),
@@ -222,7 +224,7 @@ enum MacTunWriter {
 ///
 /// No IPv4 is assigned at all. `100.64.0.0/10` belongs to whatever other VPN
 /// shares the host, and the overlay carries no IPv4 to put there.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn create(v6: Ipv6Addr) -> Result<(TunReader, TunWriter, String)> {
     // `ipv6(v6, 128)` assigns just our own address (a /128, no connected route).
     // `enable(true)` brings the link up at creation (as the old `.up()` did);
@@ -311,9 +313,13 @@ fn split_device(device: AsyncDevice, mtu: u16) -> (TunReader, TunWriter) {
 /// Opens the utun interface owned by `NEPacketTunnelProvider` without routing
 /// packets through Swift. The provider keeps its descriptor; Rayfish owns a
 /// duplicate that is closed when the attached data plane stops.
-#[cfg(target_os = "macos")]
+///
+/// Only macOS takes the batched `sendmsg_x`/`recvmsg_x` path: those are private
+/// symbols, and App Store review rejects iOS apps that look them up.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn open_packet_tunnel() -> Result<(TunReader, TunWriter)> {
     let fd = packet_tunnel_fd()?;
+    #[cfg(target_os = "macos")]
     if apple::is_available() {
         let (reader, writer) = apple::split(fd).context("enable batched packet tunnel I/O")?;
         return Ok((
@@ -332,7 +338,7 @@ pub fn open_packet_tunnel() -> Result<(TunReader, TunWriter)> {
     Ok(split_device(device, TUN_MTU))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn packet_tunnel_fd() -> Result<OwnedFd> {
     const MAX_FD: RawFd = 1024;
     const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
@@ -859,7 +865,7 @@ pub async fn route_self_loopback(_v6: Ipv6Addr) -> Result<()> {
 }
 
 /// Bring the TUN interface administratively up (used when activating the VPN).
-#[cfg(not(target_os = "android"))]
+#[cfg(not(embedded_tun))]
 pub async fn set_link_up(tun_name: &str) -> Result<()> {
     set_link_state(tun_name, true).await
 }
@@ -867,12 +873,12 @@ pub async fn set_link_up(tun_name: &str) -> Result<()> {
 /// Bring the TUN interface administratively down (standby). The underlying file
 /// descriptor stays open, so the device can be brought back up without
 /// recreating it.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(embedded_tun))]
 pub async fn set_link_down(tun_name: &str) -> Result<()> {
     set_link_state(tun_name, false).await
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(embedded_tun))]
 async fn set_link_state(tun_name: &str, up: bool) -> Result<()> {
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     {

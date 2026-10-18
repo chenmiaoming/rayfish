@@ -74,9 +74,9 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
 
     // Attach the real OS TUN device: create it, record its name, and spawn the
     // writer + `run_mesh` forwarding loop. On Android the packet interface is a
-    // `VpnService` fd attached later by `ray-mobile` via `attach_tun`, so this is
-    // skipped here.
-    #[cfg(not(target_os = "android"))]
+    // `VpnService` fd attached later by `ray-mobile` via `attach_tun`, and on iOS
+    // the NetworkExtension utun, so this is skipped there.
+    #[cfg(not(embedded_tun))]
     {
         let my_ipv6 = derive_ipv6(&daemon.transport.identity.local_identity());
         let (tun_reader, tun_writer, tun_name) = tun::create(my_ipv6)
@@ -680,7 +680,7 @@ async fn build_daemon_inner(
     // Prometheus metrics server. Its guard is kept alive by the Daemon (dropping it
     // stops the export); built here from the local handles so it can be a plain
     // owned field. `None` if it failed to bind.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let metrics_server = spawn_metrics_server(
         Arc::clone(&stats),
         peers.clone(),
@@ -691,7 +691,7 @@ async fn build_daemon_inner(
     // A phone has no Prometheus scraper and no way to reach one, and the server
     // brings a 60s per-peer sampling loop with it (`PeerMetrics::spawn_collector`):
     // a wakeup a minute, forever, for an endpoint nobody reads.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     let metrics_server: Option<MetricsServer> = None;
 
     let auto_update = app_config.auto_update;
@@ -752,8 +752,8 @@ async fn build_daemon_inner(
 /// Register rayfish counters, per-peer gauges, and iroh endpoint metrics, then
 /// start the Prometheus HTTP endpoint on `127.0.0.1:9090`. The returned guard
 /// must be kept alive for the process lifetime; `None` means metrics export is
-/// disabled. Not built on Android: see the call site.
-#[cfg(not(target_os = "android"))]
+/// disabled. Not built on Android or iOS: see the call site.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn spawn_metrics_server(
     stats: Arc<ForwardMetrics>,
     peers: PeerTable,

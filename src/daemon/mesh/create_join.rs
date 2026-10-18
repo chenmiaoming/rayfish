@@ -3,6 +3,7 @@
 
 use super::super::*;
 use futures::StreamExt;
+use tokio::sync::OwnedMutexGuard;
 
 /// Upper bound on a single proactive full-mesh dial in `dial_all_members`. An
 /// offline peer's `connect` fails on its own (fast when it has no fresh
@@ -647,19 +648,20 @@ impl NetworkRegistry {
         let mut last_err = anyhow::anyhow!("no coordinators tried");
         let mut pending = false;
         for coordinator_id in &order {
-            let dial_lock = self.mesh_dial_lock(*coordinator_id);
-            let _dial_guard = dial_lock.lock().await;
+            let dial_guard = self.mesh_dial_lock(*coordinator_id).lock_owned().await;
             // Reconnect + cleanup are daemon-wide now (the connection supervisor),
             // so no per-network reconnect task; readers report to the shared sender.
             let cancel = self.shutdown_token.child_token();
 
             let peer_ip = derive_ipv6(coordinator_id);
-            let conn = if let Some(conn) = self
+            // A registered connection is shared as is: release the gate so joins
+            // to the same peer (pairing queues one per network) run side by side.
+            let (conn, dial_guard) = if let Some(conn) = self
                 .peers
                 .conn_for_ip(&peer_ip)
                 .filter(|conn| conn.close_reason().is_none())
             {
-                conn
+                (conn, None)
             } else {
                 tracing::info!(coordinator = %coordinator_id.fmt_short(), "connecting to coordinator");
                 let Ok(dialed) = tokio::time::timeout(
@@ -677,7 +679,7 @@ impl NetworkRegistry {
                     continue;
                 };
                 match dialed {
-                    Ok(conn) => conn,
+                    Ok(conn) => (conn, Some(dial_guard)),
                     Err(e) => {
                         tracing::warn!(coordinator = %coordinator_id.fmt_short(), error = %e, "coordinator unreachable, trying next");
                         cancel.cancel();
@@ -688,7 +690,7 @@ impl NetworkRegistry {
             };
 
             match self
-                .run_join_handshake(ctx, data, conn, true, &cancel)
+                .run_join_handshake(ctx, data, conn, dial_guard, true, &cancel)
                 .await
             {
                 Ok(JoinResult::Joined {
@@ -809,23 +811,23 @@ impl NetworkRegistry {
             }));
         }
 
-        let dial_lock = self.mesh_dial_lock(coordinator_id);
-        let _dial_guard = dial_lock.lock().await;
+        let dial_guard = self.mesh_dial_lock(coordinator_id).lock_owned().await;
         let peer_ip = derive_ipv6(&coordinator_id);
         let connected = if let Some(conn) = self
             .peers
             .conn_for_ip(&peer_ip)
             .filter(|conn| conn.close_reason().is_none())
         {
-            Ok(conn)
+            Ok((conn, None))
         } else {
             tracing::info!(coordinator = %coordinator_id.fmt_short(), "connecting to coordinator");
             transport::connect_to_peer_with_alpn(&self.transport.endpoint, coordinator_id, ctx.alpn)
                 .await
+                .map(|conn| (conn, Some(dial_guard)))
         };
         let state = match connected {
-            Ok(conn) => match self
-                .run_join_handshake(ctx, data, conn, false, &cancel)
+            Ok((conn, dial_guard)) => match self
+                .run_join_handshake(ctx, data, conn, dial_guard, false, &cancel)
                 .await
             {
                 Ok(JoinResult::Joined {
@@ -1008,6 +1010,7 @@ impl NetworkRegistry {
         ctx: &JoinContext<'_>,
         data: &crate::membership::GroupBlob,
         conn: iroh::endpoint::Connection,
+        dial_guard: Option<OwnedMutexGuard<()>>,
         initial: bool,
         cancel: &CancellationToken,
     ) -> Result<JoinResult> {
@@ -1026,6 +1029,7 @@ impl NetworkRegistry {
                 auto_accept_firewall: ctx.auto_accept_firewall,
                 auto_accept_files: ctx.auto_accept_files,
                 initial,
+                dial_guard,
             },
             cancel.clone(),
             Arc::clone(self),

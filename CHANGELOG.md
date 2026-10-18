@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `just ios-run` builds, installs, and launches the iOS app on a connected iPhone.
+- An iOS app, the counterpart of the Android one: networks, invites and QR
+  codes, pairing, file transfer, firewall rules, join and connect requests,
+  and identity backup and restore, including a backup in iCloud Keychain. It
+  runs Rayfish as a VPN through a packet tunnel extension.
 - `ray up --set KEY=VALUE` persists settings after startup, alongside controller
   enrollment. Repeat the flag for multiple settings; `--enable` is an alias and
   a bare key means `on`, for example `--enable v4-bridge --set dns=partial`.
@@ -49,6 +54,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- After pairing, a new device joins all of its networks at once instead of
+  waiting for each join to finish before starting the next.
 - Android: receiving or sending a file no longer crashes the app when Android
   15 or later has used up the daily background transfer time; the transfer is
   marked failed instead.
