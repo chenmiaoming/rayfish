@@ -5,7 +5,7 @@ import Sentry
 ///
 /// The app and the tunnel each run their own client. Both read the toggle from
 /// the app group: the tunnel at start, and again when the app forwards a
-/// change with `Command.setCrashReporting`.
+/// change with `Command.reloadTelemetry`.
 enum Telemetry {
     /// Start or stop the client to match the toggle.
     static func apply() {
@@ -47,9 +47,15 @@ enum Telemetry {
 
     /// A node that will not start leaves the device offline with nothing on
     /// screen saying why, so it is reported without waiting for the user.
-    /// At most once per half hour: every connect attempt retries the start.
+    /// At most once per half hour: every connect attempt retries the start, and
+    /// each retry is a new tunnel process, so the last report time is kept in
+    /// the app group.
     static func captureStartFailure(_ error: Error, node: Node) {
-        guard SentrySDK.isEnabled, failureThrottle.allow() else { return }
+        guard SentrySDK.isEnabled else { return }
+        let now = Date().timeIntervalSince1970
+        let key = "lastStartFailureReport"
+        guard now - AppGroup.defaults.double(forKey: key) >= 30 * 60 else { return }
+        AppGroup.defaults.set(now, forKey: key)
         let logs = node.logSnapshot()
         SentrySDK.capture(error: error) { scope in
             // The Swift error says the start failed; the core's log says why.
@@ -80,26 +86,7 @@ enum Telemetry {
                                        contentType: "text/plain"))
     }
 
-    private static let failureThrottle = Throttle(interval: 30 * 60)
-
     private static func info(_ key: String) -> String? {
         Bundle.main.object(forInfoDictionaryKey: key) as? String
-    }
-}
-
-private final class Throttle: @unchecked Sendable {
-    private let lock = NSLock()
-    private let interval: TimeInterval
-    private var last: Date?
-
-    init(interval: TimeInterval) { self.interval = interval }
-
-    func allow() -> Bool {
-        lock.withLock {
-            let now = Date()
-            if let last, now.timeIntervalSince(last) < interval { return false }
-            last = now
-            return true
-        }
     }
 }

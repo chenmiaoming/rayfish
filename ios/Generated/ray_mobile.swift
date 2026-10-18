@@ -921,12 +921,12 @@ public protocol NodeProtocol: AnyObject, Sendable {
     func restoreIdentity(code: String, password: String, replaceExisting: Bool) throws  -> String
 
     /**
-     * Name the device after its model on first run, so pairing auto-joins all
-     * use one name. Folded into a hostname the way the desktop folds its OS
-     * hostname, or `phone` when nothing usable is left. No-op once a name is
-     * set.
+     * Name the device after its Settings name on first run, so pairing
+     * auto-joins all use one name. Folded into a hostname the way the desktop
+     * folds its OS hostname, or `phone` when nothing usable is left. No-op once
+     * a name is set.
      */
-    func seedDefaultHostname(model: String) throws
+    func seedDefaultHostname(name: String) throws
 
     func sendFile(path: String, peer: String) throws
 
@@ -1602,14 +1602,14 @@ open func restoreIdentity(code: String, password: String, replaceExisting: Bool)
 }
 
     /**
-     * Name the device after its model on first run, so pairing auto-joins all
-     * use one name. Folded into a hostname the way the desktop folds its OS
-     * hostname, or `phone` when nothing usable is left. No-op once a name is
-     * set.
+     * Name the device after its Settings name on first run, so pairing
+     * auto-joins all use one name. Folded into a hostname the way the desktop
+     * folds its OS hostname, or `phone` when nothing usable is left. No-op once
+     * a name is set.
      */
-open func seedDefaultHostname(model: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
+open func seedDefaultHostname(name: String)throws   {try rustCallWithError(FfiConverterTypeRayError_lift) {
     uniffi_ray_mobile_fn_method_node_seed_default_hostname(self.uniffiClonePointer(),
-        FfiConverterString.lower(model),$0
+        FfiConverterString.lower(name),$0
     )
 }
 }
@@ -4730,7 +4730,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ray_mobile_checksum_method_node_restore_identity() != 5366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ray_mobile_checksum_method_node_seed_default_hostname() != 8750) {
+    if (uniffi_ray_mobile_checksum_method_node_seed_default_hostname() != 45226) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_mobile_checksum_method_node_send_file() != 40644) {

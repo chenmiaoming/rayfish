@@ -95,10 +95,9 @@ final class NodeHost: @unchecked Sendable {
             return Reply(code: try node.startPairing())
         case .unpair:
             try node.unpair()
-        case .setQuicEngine(let choice):
-            try node.setQuicEngine(engine: choice == .fqCodel ? .fqCodel : .standalone)
-        case .setCrashReporting(let on):
-            Preferences.crashReporting = on
+        case .setQuicEngine(let engine):
+            try node.setQuicEngine(engine: engine)
+        case .reloadTelemetry:
             Telemetry.apply()
         case .sendDiagnostics:
             guard Telemetry.sendDiagnostics(node: node) else { throw DiagnosticsError.unavailable }
@@ -115,7 +114,7 @@ final class NodeHost: @unchecked Sendable {
             ipv6: status.ipv6,
             deviceName: node.defaultHostname(),
             paired: node.isPaired(),
-            quicEngine: (try? node.quicEngine()) == .fqCodel ? .fqCodel : .standalone,
+            quicEngine: (try? node.quicEngine()) ?? .standalone,
             networks: status.networks,
             pendingNetworks: status.pendingNetworks
         )

@@ -67,8 +67,8 @@ final class AppModel: ObservableObject {
     /// Without the user-assigned-device-name entitlement iOS answers `iPhone`.
     private func seedDeviceName() async {
         let node = tunnel.local.node
-        let model = UIDevice.current.name
-        await Task.detached { try? node.seedDefaultHostname(model: model) }.value
+        let name = UIDevice.current.name
+        await Task.detached { try? node.seedDefaultHostname(name: name) }.value
     }
 
     func refresh() {

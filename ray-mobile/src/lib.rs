@@ -903,12 +903,12 @@ impl Node {
         Ok(())
     }
 
-    /// Name the device after its model on first run, so pairing auto-joins all
-    /// use one name. Folded into a hostname the way the desktop folds its OS
-    /// hostname, or `phone` when nothing usable is left. No-op once a name is
-    /// set.
-    pub fn seed_default_hostname(&self, model: String) -> Result<(), RayError> {
-        let name = hostname::mesh_form(&model).unwrap_or_else(|| "phone".to_string());
+    /// Name the device after its Settings name on first run, so pairing
+    /// auto-joins all use one name. Folded into a hostname the way the desktop
+    /// folds its OS hostname, or `phone` when nothing usable is left. No-op once
+    /// a name is set.
+    pub fn seed_default_hostname(&self, name: String) -> Result<(), RayError> {
+        let name = hostname::mesh_form(&name).unwrap_or_else(|| "phone".to_string());
         // One read-modify-write, so a rename landing at the same time wins.
         config::update_settings(|cfg| {
             if cfg.default_hostname.as_deref().is_none_or(str::is_empty) {

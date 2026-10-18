@@ -1233,7 +1233,7 @@ internal interface UniffiLib : Library {
 
     fun uniffi_ray_mobile_fn_method_node_seed_default_hostname(
         `ptr`: Pointer,
-        `model`: RustBuffer.ByValue,
+        `name`: RustBuffer.ByValue,
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
@@ -1704,7 +1704,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_ray_mobile_checksum_method_node_restore_identity() != 5366.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_ray_mobile_checksum_method_node_seed_default_hostname() != 8750.toShort()) {
+    if (lib.uniffi_ray_mobile_checksum_method_node_seed_default_hostname() != 45226.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_ray_mobile_checksum_method_node_send_file() != 40644.toShort()) {
@@ -2723,12 +2723,12 @@ public interface NodeInterface {
     ): kotlin.String
 
     /**
-     * Name the device after its model on first run, so pairing auto-joins all
-     * use one name. Folded into a hostname the way the desktop folds its OS
-     * hostname, or `phone` when nothing usable is left. No-op once a name is
-     * set.
+     * Name the device after its Settings name on first run, so pairing
+     * auto-joins all use one name. Folded into a hostname the way the desktop
+     * folds its OS hostname, or `phone` when nothing usable is left. No-op once
+     * a name is set.
      */
-    fun `seedDefaultHostname`(`model`: kotlin.String)
+    fun `seedDefaultHostname`(`name`: kotlin.String)
 
     fun `sendFile`(
         `path`: kotlin.String,
@@ -3567,16 +3567,16 @@ open class Node :
         )
 
     /**
-     * Name the device after its model on first run, so pairing auto-joins all
-     * use one name. Folded into a hostname the way the desktop folds its OS
-     * hostname, or `phone` when nothing usable is left. No-op once a name is
-     * set.
+     * Name the device after its Settings name on first run, so pairing
+     * auto-joins all use one name. Folded into a hostname the way the desktop
+     * folds its OS hostname, or `phone` when nothing usable is left. No-op once
+     * a name is set.
      */
     @Throws(RayException::class)
-    override fun `seedDefaultHostname`(`model`: kotlin.String) =
+    override fun `seedDefaultHostname`(`name`: kotlin.String) =
         callWithPointer {
             uniffiRustCallWithError(RayException) { _status ->
-                UniffiLib.INSTANCE.uniffi_ray_mobile_fn_method_node_seed_default_hostname(it, FfiConverterString.lower(`model`), _status)
+                UniffiLib.INSTANCE.uniffi_ray_mobile_fn_method_node_seed_default_hostname(it, FfiConverterString.lower(`name`), _status)
             }
         }
 

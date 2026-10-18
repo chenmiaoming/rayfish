@@ -498,7 +498,7 @@ RustBuffer uniffi_ray_mobile_fn_method_node_restore_identity(void*_Nonnull ptr, 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEED_DEFAULT_HOSTNAME
 #define UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEED_DEFAULT_HOSTNAME
-void uniffi_ray_mobile_fn_method_node_seed_default_hostname(void*_Nonnull ptr, RustBuffer model, RustCallStatus *_Nonnull out_status
+void uniffi_ray_mobile_fn_method_node_seed_default_hostname(void*_Nonnull ptr, RustBuffer name, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_MOBILE_FN_METHOD_NODE_SEND_FILE

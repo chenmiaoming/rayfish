@@ -133,8 +133,8 @@ struct YouView: View {
                             }
                         }
                     )) {
-                        Text("Standalone").tag(QuicEngineChoice.standalone)
-                        Text("FQ-CoDel").tag(QuicEngineChoice.fqCodel)
+                        Text("Standalone").tag(QuicEngine.standalone)
+                        Text("FQ-CoDel").tag(QuicEngine.fqCodel)
                     }
                 } label: {
                     Text("\(snapshot.quicEngine == .fqCodel ? "FQ-CoDel" : "Standalone") ✎")
@@ -152,7 +152,7 @@ struct YouView: View {
                 Preferences.crashReporting = on
                 Telemetry.apply()
                 // The tunnel runs its own client.
-                Task { _ = await model.perform(.setCrashReporting(on)) }
+                Task { _ = await model.perform(.reloadTelemetry) }
             }
             if crashReporting {
                 PillButton("Send diagnostics", outline: true) {

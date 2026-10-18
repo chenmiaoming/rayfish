@@ -25,8 +25,9 @@ enum Command: Codable, Equatable {
     case cancelTransfer(id: UInt64)
     case startPairing
     case unpair
-    case setQuicEngine(QuicEngineChoice)
-    case setCrashReporting(Bool)
+    case setQuicEngine(QuicEngine)
+    /// The crash reporting toggle changed in the app group; the tunnel follows.
+    case reloadTelemetry
     case sendDiagnostics
 
     /// How long the app waits for a reply. Joining, pairing and approving dial
@@ -37,10 +38,6 @@ enum Command: Codable, Equatable {
         default: 15
         }
     }
-}
-
-enum QuicEngineChoice: String, Codable {
-    case standalone, fqCodel
 }
 
 struct Reply: Codable {
@@ -60,7 +57,7 @@ struct Snapshot: Codable, Equatable {
     var ipv6 = ""
     var deviceName = ""
     var paired = false
-    var quicEngine = QuicEngineChoice.standalone
+    var quicEngine = QuicEngine.standalone
     var networks: [NetworkDetail] = []
     var pendingNetworks: [String] = []
     var offers: [FileOffer] = []
