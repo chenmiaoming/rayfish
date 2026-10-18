@@ -37,8 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `ray rename <network> <new-name>` renames a network on this machine only. Its
   hosts then resolve as `<host>.<new-name>.ray`, and its firewall rules, SSH
-  access and exit-node settings follow the new name. Other members keep their
-  own name for it. A live network briefly reconnects under the new name.
+  access, exit-node settings and outstanding invites follow the new name. Other
+  members keep their own name for it. A live network briefly reconnects under
+  the new name.
 
 ### Changed
 

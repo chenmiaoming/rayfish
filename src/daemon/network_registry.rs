@@ -865,10 +865,10 @@ impl NetworkRegistry {
     /// the new name instead ([`Self::follow_rename`]); the daemon rebuilds its
     /// SSH allow-lists itself.
     ///
-    /// The config moves under a saved intent ([`config::rename_network`]), which
-    /// is cleared only once the firewall rules are saved under the new name as
-    /// well, so a rename a crash interrupts is finished at the next start
-    /// ([`finish_interrupted_rename`]).
+    /// The config and the invite ledger move under a saved intent
+    /// ([`config::rename_network`]), which is cleared only once the firewall
+    /// rules are saved under the new name as well, so a rename a crash
+    /// interrupts is finished at the next start ([`finish_interrupted_rename`]).
     pub(crate) async fn rename_network(self: &Arc<Self>, from: &str, to: &str) -> IpcMessage {
         if !crate::hostname::is_valid_hostname(to) {
             return ipc_err(format!(
@@ -912,9 +912,23 @@ impl NetworkRegistry {
                 "network '{from}' is still being restored; try again once it is up"
             ));
         }
+        // The network's invite ledger moves with the name. Its invites are
+        // redeemed and delivered under its invite lock, so hold that across the
+        // move: a write already under way would otherwise land under the old
+        // name, where nothing reads it.
+        let invite_lock = self
+            .networks
+            .get(from)
+            .map(|handle| Arc::clone(&handle.invite_lock));
         self.teardown_network_runtime_closing(from, forward::IDLE_CODE, b"rename")
             .await;
-        let renamed = config::rename_network(from, to);
+        let renamed = {
+            let _invites = match &invite_lock {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
+            config::rename_network(from, to)
+        };
         self.restoring.remove(from);
         let net = match renamed {
             Ok(Some(net)) => net,

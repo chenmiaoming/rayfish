@@ -282,7 +282,8 @@ async fn rename_restarts_a_live_network_under_its_new_name() {
 
 /// What restarting a network does not rebuild moves to its new name: the exit
 /// policy a gateway forwards by, a full tunnel's exit selection, the SSH
-/// allow-lists, and the peers pruned from the network.
+/// allow-lists, the peers pruned from the network, and its invite ledger, so an
+/// invite handed out before the rename is still redeemed after it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn rename_moves_live_state_filed_under_the_name() {
@@ -324,6 +325,10 @@ async fn rename_moves_live_state_filed_under_the_name() {
         .pruned_peers
         .insert(("home".to_string(), user));
     assert!(daemon.registry.exit_server.allows("home", &user));
+    let code = match daemon.invite_create("home", 3600, None, false).await {
+        IpcMessage::InviteCreated { code, .. } => code,
+        other => panic!("{other:?}"),
+    };
 
     let rename = IpcMessage::RenameNetwork {
         network: "home".to_string(),
@@ -361,6 +366,13 @@ async fn rename_moves_live_state_filed_under_the_name() {
             .pruned_peers
             .contains(&("home".to_string(), user))
     );
+    // A joiner's invite is redeemed from the ledger under the network's name.
+    assert!(!crate::invite::invite_path("home").unwrap().exists());
+    let secret = crate::invite::decode_invite_code(&code).unwrap().secret;
+    crate::invite::InviteStore::load("lab")
+        .unwrap()
+        .redeem(&secret, SecretKey::generate().public())
+        .unwrap();
     daemon.shutdown_and_close().await;
 }
 

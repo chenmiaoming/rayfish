@@ -1991,9 +1991,11 @@ pub struct RenameIntent {
 const RENAME_INTENT_FILE: &str = "rename-intent.toml";
 
 /// Save a network's config under a new local name: `networks/<from>.toml`
-/// becomes `networks/<to>.toml`, and the name inside it follows. Returns the
-/// renamed config, or `None` when no network is saved as `from`, and refuses a
-/// `to` that is taken.
+/// becomes `networks/<to>.toml`, the name inside it follows, and so does the
+/// network's invite ledger (`invites/<from>.toml`), without which its
+/// single-use invites could no longer be redeemed, listed or revoked. Returns
+/// the renamed config, or `None` when no network is saved as `from`, and
+/// refuses a `to` that is taken.
 ///
 /// The move and the rewrite after it are two steps, and between them the file
 /// lists the network under a name it cannot be loaded by, so neither name
@@ -2066,8 +2068,8 @@ fn load_rename_intent(dir: &Path) -> Result<Option<RenameIntent>> {
 }
 
 /// Complete the config half of a saved rename: move the network's file if it
-/// has not moved yet, then rewrite the name inside it if that is still the old
-/// one. Safe to repeat. Returns the renamed config, or `None` when there is
+/// has not moved yet, then its invite ledger, then rewrite the name inside it if
+/// that is still the old one. Safe to repeat. Returns the renamed config, or `None` when there is
 /// nothing to rename: the network is gone, or another file was saved under the
 /// new name by hand, which the daemon itself never does while the intent stands.
 pub fn finish_rename(intent: &RenameIntent) -> Result<Option<NetworkConfig>> {
@@ -2101,6 +2103,15 @@ fn finish_rename_unlocked(dir: &Path, intent: &RenameIntent) -> Result<Option<Ne
     let Some(mut net) = load_network_unlocked(dir, to)? else {
         return Ok(None);
     };
+    // Moved over any ledger left under the new name by a network saved there
+    // before, whose invites no longer name a network here.
+    let ledger = crate::invite::ledger_path_in(dir, from);
+    if ledger.exists() {
+        let moved = crate::invite::ledger_path_in(dir, to);
+        std::fs::rename(&ledger, &moved)
+            .with_context(|| format!("moving network {from:?}'s invites to {to:?}"))?;
+        sync_dir(moved.parent().context("invite ledger has no directory")?)?;
+    }
     if net.name != *to {
         anyhow::ensure!(
             net.name == *from,
@@ -2783,7 +2794,8 @@ name = "test"
     }
 
     /// A rename moves the whole config, keys and node-local settings included,
-    /// and leaves nothing saved under the old name.
+    /// and the network's invite ledger, over one an earlier network left under
+    /// the new name, and leaves nothing saved under the old name.
     #[test]
     fn rename_moves_a_network_to_its_new_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2791,9 +2803,19 @@ name = "test"
         let mut home = net("homelab");
         home.aliases.insert("alice".into(), "id-alice".into());
         save_network_unlocked(dir, &home).unwrap();
+        let ledger = crate::invite::ledger_path_in(dir, "homelab");
+        std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        std::fs::write(&ledger, "# homelab's invites\n").unwrap();
+        let left = crate::invite::ledger_path_in(dir, "lab");
+        std::fs::write(&left, "# invites of a network once saved as lab\n").unwrap();
 
         let renamed = rename_network_in(dir, "homelab", "lab").unwrap().unwrap();
         assert!(load_network_unlocked(dir, "homelab").unwrap().is_none());
+        assert!(!ledger.exists());
+        assert_eq!(
+            std::fs::read_to_string(&left).unwrap(),
+            "# homelab's invites\n"
+        );
         let lab = load_network_unlocked(dir, "lab").unwrap().unwrap();
         let expected = NetworkConfig {
             name: "lab".into(),
@@ -2827,7 +2849,8 @@ name = "test"
 
     /// A crash part-way through a rename leaves one of three states, and the
     /// saved intent finishes each. Between the move and the rewrite, the network
-    /// is listed under a name that cannot load it, so nothing could restore it.
+    /// is listed under a name that cannot load it, so nothing could restore it,
+    /// and its invite ledger is still under the old name.
     #[test]
     fn an_interrupted_rename_is_finished_from_its_intent() {
         let intent = RenameIntent {
@@ -2839,6 +2862,9 @@ name = "test"
             let dir = tmp.path();
             let home = net("homelab");
             save_network_unlocked(dir, &home).unwrap();
+            let ledger = crate::invite::ledger_path_in(dir, "homelab");
+            std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+            std::fs::write(&ledger, "# homelab's invites\n").unwrap();
             write_atomic(
                 &dir.join(RENAME_INTENT_FILE),
                 &::toml::to_string(&intent).unwrap(),
@@ -2861,6 +2887,12 @@ name = "test"
 
             let lab = finish_rename_in(dir, &intent).unwrap().unwrap();
             assert_eq!(lab.name, "lab", "{crash}");
+            assert!(!ledger.exists(), "{crash}");
+            assert_eq!(
+                std::fs::read_to_string(crate::invite::ledger_path_in(dir, "lab")).unwrap(),
+                "# homelab's invites\n",
+                "{crash}"
+            );
             let listed = load_in(dir).unwrap().networks;
             assert_eq!(listed.len(), 1, "{crash}");
             assert_eq!(listed[0].name, "lab", "{crash}");
