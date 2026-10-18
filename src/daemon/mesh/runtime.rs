@@ -311,7 +311,12 @@ impl NetworkRegistry {
         })?;
         anyhow::ensure!(updated.is_some(), "network is no longer saved");
         let restored_record = self
-            .publish_group_hash(name, &net_secret_key, last_group_hash)
+            .publish_group_hash(
+                name,
+                &net_secret_key,
+                last_group_hash,
+                &net_state.snapshot_commit,
+            )
             .await;
 
         let cancel = self.shutdown_token.child_token();

@@ -113,7 +113,7 @@ pub(crate) struct NetworkRegistry {
     /// Shares outbound mesh dials per peer. Pairing joins several networks at
     /// once; checking the peer table alone would let every join dial before any
     /// of them has installed the shared connection.
-    pub(crate) mesh_dialer: MeshDialer,
+    mesh_dialer: MeshDialer,
     /// The per-peer connection driver, so the registry can (re-)register a
     /// network's accept handler (coordinator promotion) or unregister it on
     /// teardown directly.
@@ -1017,7 +1017,12 @@ impl NetworkRegistry {
         )
         .await;
         let initial_record = self
-            .publish_group_hash(&name, &net_secret_key, last_group_hash)
+            .publish_group_hash(
+                &name,
+                &net_secret_key,
+                last_group_hash,
+                &net_state.snapshot_commit,
+            )
             .await;
 
         let cancel = self.shutdown_token.child_token();
@@ -1156,26 +1161,31 @@ impl NetworkRegistry {
         Ok(snap.hash)
     }
 
+    /// Sign and publish the record for `blob_hash`, then mark it published.
+    /// Returns the record's bytes once both happened.
     pub(crate) async fn publish_group_hash(
         &self,
         network: &str,
         net_secret_key: &SecretKey,
         blob_hash: blake3::Hash,
+        commit: &AsyncMutex<()>,
     ) -> Option<Vec<u8>> {
-        let Ok(pkarr_client) =
+        let client =
             dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-        else {
-            return None;
-        };
-        match dht::publish_network(
-            &pkarr_client,
+                .ok()?;
+        let packet = match dht::encode_network_record(
             net_secret_key,
             &blob_hash,
             &[self.transport.endpoint.id()],
-        )
-        .await
-        {
-            Ok(packet) => mark_group_hash_published(network, blob_hash).then_some(packet),
+        ) {
+            Ok(packet) => packet,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build network record");
+                return None;
+            }
+        };
+        match publish_signed_record(&client, commit, network, blob_hash, &packet).await {
+            Ok(marked) => marked.then(|| packet.as_bytes().to_vec()),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to publish network record");
                 None

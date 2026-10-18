@@ -325,7 +325,6 @@ pub(crate) async fn join_mesh_shared(
     .await;
     drop(dial_claim);
     connect_to_roster_peers(
-        ep,
         &members,
         network_name,
         net_pubkey,
@@ -522,7 +521,6 @@ pub(crate) async fn send_mesh_hello(
 /// logged and skipped, as is a peer whose hello exchange fails.
 #[allow(clippy::too_many_arguments)]
 async fn connect_to_roster_peers(
-    ep: &Endpoint,
     members: &[crate::membership::Member],
     network_name: &str,
     net_pubkey: EndpointId,
@@ -539,11 +537,7 @@ async fn connect_to_roster_peers(
         }
         // Another network may be establishing this same peer right now; its
         // dial is shared rather than repeated, and this hello rides it.
-        match registry
-            .mesh_dialer
-            .connect(ep, &ctx.peers, member.identity)
-            .await
-        {
+        match registry.connect_mesh_peer(member.identity).await {
             Ok(DialedPeer { conn, claim }) => {
                 if let Err(error) = send_mesh_hello(
                     &conn,

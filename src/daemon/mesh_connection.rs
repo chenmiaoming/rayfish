@@ -62,50 +62,25 @@ impl NackGate {
 ///
 /// Each key gets one worker task that drains its own queue in arrival order.
 /// Nothing is locked while an item runs, so a slow item delays only the items
-/// queued behind it under the same key.
-struct SerialLanes<K, T> {
-    lanes: HashMap<K, mpsc::UnboundedSender<T>>,
+/// queued behind it under the same key. A lane holds at most
+/// [`Self::LANE_DEPTH`] items; a push to a full lane waits, which holds the
+/// caller back the way handling each item inline did.
+struct SerialLanes<K, T, R> {
+    lanes: HashMap<K, mpsc::Sender<T>>,
     workers: JoinSet<()>,
+    /// Handles one item; each lane's worker keeps its own clone.
+    run: R,
 }
 
-impl<K, T> SerialLanes<K, T>
-where
-    K: Eq + Hash,
-    T: Send + 'static,
-{
-    fn new() -> Self {
+impl<K, T, R> SerialLanes<K, T, R> {
+    const LANE_DEPTH: usize = 4;
+
+    fn new(run: R) -> Self {
         Self {
             lanes: HashMap::new(),
             workers: JoinSet::new(),
+            run,
         }
-    }
-
-    /// Queue `item` behind the earlier items under `key`. `run` handles one
-    /// item; each new lane's worker keeps its own clone of it.
-    fn push<R, Fut>(&mut self, key: K, item: T, run: &R)
-    where
-        R: Fn(T) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let item = match self.lanes.get(&key) {
-            Some(lane) => match lane.send(item) {
-                Ok(()) => return,
-                // The lane's worker is gone (a handler panicked). Start a new
-                // one rather than dropping this network's frames for good.
-                Err(mpsc::error::SendError(item)) => item,
-            },
-            None => item,
-        };
-        let (lane, mut queue) = mpsc::unbounded_channel();
-        // The receiver is alive in this scope, so the send cannot fail.
-        let _ = lane.send(item);
-        let run = run.clone();
-        self.workers.spawn(async move {
-            while let Some(item) = queue.recv().await {
-                run(item).await;
-            }
-        });
-        self.lanes.insert(key, lane);
     }
 
     /// Stop taking items and wait until every queued one has run.
@@ -119,6 +94,47 @@ where
         self.lanes.clear();
         self.workers.detach_all();
     }
+}
+
+impl<K, T, R, Fut> SerialLanes<K, T, R>
+where
+    K: Eq + Hash,
+    T: Send + 'static,
+    R: Fn(T) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    /// Queue `item` behind the earlier items under `key`.
+    async fn push(&mut self, key: K, item: T) {
+        let item = match self.lanes.get(&key) {
+            Some(lane) => match lane.send(item).await {
+                Ok(()) => return,
+                // The lane's worker is gone (a handler panicked). Start a new
+                // one rather than dropping this key's items for good.
+                Err(mpsc::error::SendError(item)) => item,
+            },
+            None => item,
+        };
+        let (lane, mut queue) = mpsc::channel(Self::LANE_DEPTH);
+        // The receiver is alive and the channel empty, so the send cannot fail.
+        let _ = lane.try_send(item);
+        let run = self.run.clone();
+        self.workers.spawn(async move {
+            while let Some(item) = queue.recv().await {
+                run(item).await;
+            }
+        });
+        self.lanes.insert(key, lane);
+    }
+}
+
+/// Wait for the queued frames to run, then whether any of them registered the
+/// peer, so a registration just before the connection drops is not missed.
+async fn drain_lanes<R>(
+    lanes: SerialLanes<EndpointId, LaneFrame, R>,
+    registered_rx: &mut mpsc::UnboundedReceiver<()>,
+) -> bool {
+    lanes.finish().await;
+    registered_rx.try_recv().is_ok()
 }
 
 /// One network-scoped control frame, queued on its network's lane.
@@ -205,8 +221,7 @@ impl MeshConnection {
         //   drained, so a frame that registers the peer just before the
         //   connection drops still gets its disconnect reported.
         let (registered_tx, mut registered_rx) = mpsc::unbounded_channel::<()>();
-        let mut lanes: SerialLanes<EndpointId, LaneFrame> = SerialLanes::new();
-        let run_frame = {
+        let mut lanes = SerialLanes::new({
             let conn = self.conn.clone();
             let peers = self.ctx.peers.clone();
             let peer_id = self.peer_id;
@@ -256,7 +271,7 @@ impl MeshConnection {
                     announce_network_handles(&peers, &conn, peer_ip).await;
                 }
             }
-        };
+        });
 
         loop {
             // On-demand idle teardown. Armed only when we run on-demand *and* the
@@ -327,8 +342,7 @@ impl MeshConnection {
                     self.conn.close(VarInt::from_u32(forward::IDLE_CODE), b"idle");
                     reader.abort();
                     self.ctx.stats.record_idle_teardown();
-                    lanes.finish().await;
-                    registered |= registered_rx.try_recv().is_ok();
+                    registered |= drain_lanes(lanes, &mut registered_rx).await;
                     // We close, so our own loop only ever sees `LocallyClosed`, never
                     // our IDLE_CODE. Report `Idle` explicitly so the supervisor removes
                     // the peer and does not reconnect, matching the remote (which does
@@ -345,8 +359,7 @@ impl MeshConnection {
                 // Connection closed. Tear down the reader and report the drop.
                 Err(e) => {
                     reader.abort();
-                    lanes.finish().await;
-                    registered |= registered_rx.try_recv().is_ok();
+                    registered |= drain_lanes(lanes, &mut registered_rx).await;
                     if registered {
                         self.report_disconnect(close_reason(&e)).await;
                     }
@@ -377,8 +390,7 @@ impl MeshConnection {
                     self.conn
                         .close(VarInt::from_u32(forward::ABUSE_CODE), b"control flood");
                     reader.abort();
-                    lanes.finish().await;
-                    registered |= registered_rx.try_recv().is_ok();
+                    registered |= drain_lanes(lanes, &mut registered_rx).await;
                     // A flood close is not a graceful leave, so the supervisor
                     // treats it as a transient drop and reconnects.
                     if registered {
@@ -479,15 +491,16 @@ impl MeshConnection {
                 continue;
             };
             drop(recv); // one message per stream; the reply rides `send`
-            lanes.push(
-                net_pubkey,
-                LaneFrame {
-                    handler,
-                    send,
-                    msg: frame.msg,
-                },
-                &run_frame,
-            );
+            lanes
+                .push(
+                    net_pubkey,
+                    LaneFrame {
+                        handler,
+                        send,
+                        msg: frame.msg,
+                    },
+                )
+                .await;
         }
     }
 
@@ -621,10 +634,10 @@ mod tests {
                 }
             }
         };
-        let mut lanes = SerialLanes::new();
-        lanes.push("a", ("a1", true), &run);
-        lanes.push("a", ("a2", false), &run);
-        lanes.push("b", ("b1", false), &run);
+        let mut lanes = SerialLanes::new(run);
+        lanes.push("a", ("a1", true)).await;
+        lanes.push("a", ("a2", false)).await;
+        lanes.push("b", ("b1", false)).await;
 
         async fn next(log: &mut mpsc::UnboundedReceiver<&'static str>) -> &'static str {
             tokio::time::timeout(Duration::from_secs(2), log.recv())

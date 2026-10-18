@@ -263,7 +263,7 @@ pub(crate) use mesh_connection::MeshConnection;
 
 // Shared outbound mesh dials, one in flight per peer.
 mod mesh_dialer;
-pub(crate) use mesh_dialer::{DialClaim, DialedPeer, MeshDialer};
+pub(crate) use mesh_dialer::{DialClaim, DialedPeer, MESH_DIAL_TIMEOUT, MeshDialer};
 
 // The service that owns the set of active networks (M5 migration seam).
 mod network_registry;

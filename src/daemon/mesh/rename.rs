@@ -48,7 +48,6 @@ pub(crate) fn outgoing_hostname(network_name: &str) -> Option<String> {
 /// reads the hello regardless of which side first established the mesh link.
 /// Runs only while a rename is in flight, so steady state does no extra dialing.
 pub(crate) async fn drain_pending_rename(
-    endpoint: &Endpoint,
     roster: &[Member],
     network_name: &str,
     my_identity: EndpointId,
@@ -85,11 +84,7 @@ pub(crate) async fn drain_pending_rename(
 
     for m in coordinators {
         // A dial to this coordinator already in flight is shared, not repeated.
-        let connected = registry
-            .mesh_dialer
-            .connect(endpoint, &registry.peers, m.identity)
-            .await;
-        match connected {
+        match registry.connect_mesh_peer(m.identity).await {
             Ok(DialedPeer { conn, .. }) => {
                 if let Ok((mut send, _recv)) = conn.open_bi().await {
                     let _ = control::send_msg(

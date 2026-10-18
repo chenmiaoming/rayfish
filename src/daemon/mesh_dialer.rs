@@ -123,6 +123,9 @@ impl MeshDialer {
     /// it failed or its connection closed, in which case a fresh one replaces
     /// it. The map guard is released before anything awaits.
     fn inflight_dial(&self, peer: EndpointId) -> Arc<InflightDial> {
+        // Drop the entries nobody holds any more, so the map tracks dials in
+        // use rather than every peer this daemon has ever dialed.
+        self.inflight.retain(|_, dial| dial.strong_count() > 0);
         let mut slot = self.inflight.entry(peer).or_default();
         if let Some(dial) = slot.upgrade().filter(|dial| !dial.is_spent()) {
             return dial;
@@ -136,9 +139,9 @@ impl MeshDialer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::RelayMode;
     use iroh::address_lookup::memory::MemoryLookup;
     use iroh::endpoint::presets;
+    use iroh::{RelayMode, SecretKey};
 
     async fn mesh_endpoint(lookup: MemoryLookup) -> Endpoint {
         Endpoint::builder(presets::N0)
@@ -201,6 +204,16 @@ mod tests {
         );
         client.close().await;
         server.close().await;
+    }
+
+    /// A dial nobody holds is dropped from the map on the next lookup.
+    #[test]
+    fn released_dials_are_pruned() {
+        let id = |seed| SecretKey::from_bytes(&[seed; 32]).public();
+        let dialer = MeshDialer::default();
+        drop(dialer.inflight_dial(id(1)));
+        let _held = dialer.inflight_dial(id(2));
+        assert_eq!(dialer.inflight.len(), 1);
     }
 
     /// A registered connection wins over dialing, and carries no claim.
