@@ -7,13 +7,6 @@
 
 use super::super::*;
 
-/// Maximum time one supervisor dial attempt may take, covering the (shared)
-/// transport dial plus each network's hello and registration, so a stalled
-/// attempt cannot hold up the reconnect loop or an on-demand dial for long.
-/// The transport dial alone is bounded by [`MESH_DIAL_TIMEOUT`]; this is the
-/// budget for the whole attempt, so it is never shorter than that.
-const PEER_DIAL_ATTEMPT_TIMEOUT: Duration = MESH_DIAL_TIMEOUT;
-
 struct NetworkToNullify {
     name: String,
     state: SharedNetworkState,
@@ -393,7 +386,7 @@ impl NetworkRegistry {
         targets: &[DialTarget],
     ) -> bool {
         match tokio::time::timeout(
-            PEER_DIAL_ATTEMPT_TIMEOUT,
+            MESH_DIAL_TIMEOUT,
             self.dial_peer_once_inner(peer_id, targets),
         )
         .await
@@ -403,7 +396,7 @@ impl NetworkRegistry {
                 self.reachability.note_fail(peer_id);
                 tracing::debug!(
                     peer = %peer_id.fmt_short(),
-                    timeout_secs = PEER_DIAL_ATTEMPT_TIMEOUT.as_secs(),
+                    timeout_secs = MESH_DIAL_TIMEOUT.as_secs(),
                     "mesh dial timed out"
                 );
                 false

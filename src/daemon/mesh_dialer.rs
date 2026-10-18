@@ -153,15 +153,21 @@ mod tests {
             .expect("bind a loopback endpoint")
     }
 
+    /// A client endpoint that can find the server by id alone, and the server.
+    async fn client_and_server() -> (Endpoint, Endpoint) {
+        let lookup = MemoryLookup::new();
+        let server = mesh_endpoint(MemoryLookup::new()).await;
+        let client = mesh_endpoint(lookup.clone()).await;
+        lookup.add_endpoint_info(server.addr());
+        (client, server)
+    }
+
     /// Every caller that asks while a dial is in flight gets that dial's
     /// connection, so the peer sees one connection and the callers can each run
     /// their own handshake on it at the same time.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_callers_share_one_dial() {
-        let lookup = MemoryLookup::new();
-        let server = mesh_endpoint(MemoryLookup::new()).await;
-        let client = mesh_endpoint(lookup.clone()).await;
-        lookup.add_endpoint_info(server.addr());
+        let (client, server) = client_and_server().await;
         let accepted = tokio::spawn({
             let server = server.clone();
             async move {
@@ -219,10 +225,7 @@ mod tests {
     /// A registered connection wins over dialing, and carries no claim.
     #[tokio::test]
     async fn registered_connection_is_reused_without_a_dial() {
-        let lookup = MemoryLookup::new();
-        let server = mesh_endpoint(MemoryLookup::new()).await;
-        let client = mesh_endpoint(lookup.clone()).await;
-        lookup.add_endpoint_info(server.addr());
+        let (client, server) = client_and_server().await;
         let alpn = transport::mesh_alpn();
         let (conn, _incoming) = tokio::join!(client.connect(server.addr(), &alpn), async {
             server

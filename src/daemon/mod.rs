@@ -4108,6 +4108,59 @@ mod accept_handler_tests {
         }
     }
 
+    /// One network the coordinator in [`serve_coordinator`] accepts frames for.
+    struct ServedNetwork {
+        key: EndpointId,
+        name: &'static str,
+        state: SharedNetworkState,
+    }
+
+    /// Accept one mesh connection on `coord_ep` and drive its demux, with a
+    /// coordinator handler for each of `networks` backed by `registry`.
+    fn serve_coordinator(
+        coord_ep: &Endpoint,
+        blob_store: &FsStore,
+        registry: &Arc<NetworkRegistry>,
+        networks: Vec<ServedNetwork>,
+    ) -> tokio::task::JoinHandle<()> {
+        let coord_id = coord_ep.id();
+        let mesh_ctx = || {
+            sample_mesh_ctx(
+                IrohIdentityProvider::new(coord_id),
+                blob_store.clone(),
+                Arc::clone(registry),
+            )
+        };
+        let connmgr = Arc::new(ConnectionManager::new());
+        connmgr.set_mesh_dispatch(MeshDispatch {
+            ctx: mesh_ctx(),
+            token: CancellationToken::new(),
+            on_peer_connected: Arc::new(|_| {}),
+        });
+        for network in networks {
+            connmgr.register(
+                network.key,
+                AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
+                    ctx: mesh_ctx(),
+                    network_name: network.name.to_string(),
+                    state: network.state,
+                    dht_notify: None,
+                    invite_lock: Arc::new(AsyncMutex::new(())),
+                })),
+            );
+        }
+        let coord_ep = coord_ep.clone();
+        tokio::spawn(async move {
+            let conn = coord_ep
+                .accept()
+                .await
+                .expect("incoming")
+                .await
+                .expect("accept connection");
+            connmgr.drive_mesh_connection(conn, false).await;
+        })
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn exit_offer_over_the_wire_reaches_the_coordinator_roster() {
@@ -4182,48 +4235,18 @@ mod accept_handler_tests {
             },
         );
 
-        // Connection manager wired with the coordinator accept handler + dispatch,
-        // both pointing at the same registry the frame must mutate.
-        let connmgr = Arc::new(ConnectionManager::new());
-        connmgr.set_mesh_dispatch(MeshDispatch {
-            ctx: sample_mesh_ctx(
-                IrohIdentityProvider::new(coord_id),
-                blob_store.clone(),
-                Arc::clone(&registry),
-            ),
-            token: CancellationToken::new(),
-            on_peer_connected: Arc::new(|_| {}),
-        });
-        connmgr.register(
-            net_pubkey,
-            AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
-                ctx: sample_mesh_ctx(
-                    IrohIdentityProvider::new(coord_id),
-                    blob_store.clone(),
-                    Arc::clone(&registry),
-                ),
-                network_name: "test-net".to_string(),
-                state: Arc::clone(&state),
-                dht_notify: None,
-                invite_lock: Arc::new(AsyncMutex::new(())),
-            })),
-        );
-
         // Coordinator accepts and drives the demux; member dials.
         let coord_addr = coord_ep.addr();
-        let accept = {
-            let coord_ep = coord_ep.clone();
-            let cm = Arc::clone(&connmgr);
-            tokio::spawn(async move {
-                let conn = coord_ep
-                    .accept()
-                    .await
-                    .expect("incoming")
-                    .await
-                    .expect("accept connection");
-                cm.drive_mesh_connection(conn, false).await;
-            })
-        };
+        let accept = serve_coordinator(
+            &coord_ep,
+            &blob_store,
+            &registry,
+            vec![ServedNetwork {
+                key: net_pubkey,
+                name: "test-net",
+                state: Arc::clone(&state),
+            }],
+        );
         let conn = member_ep
             .connect(coord_addr, &alpn)
             .await
@@ -4354,43 +4377,16 @@ mod accept_handler_tests {
                 incompatible: None,
             },
         );
-        let connmgr = Arc::new(ConnectionManager::new());
-        connmgr.set_mesh_dispatch(MeshDispatch {
-            ctx: sample_mesh_ctx(
-                IrohIdentityProvider::new(coord_id),
-                coord_blobs.clone(),
-                Arc::clone(&coord_reg),
-            ),
-            token: CancellationToken::new(),
-            on_peer_connected: Arc::new(|_| {}),
-        });
-        connmgr.register(
-            net_pubkey,
-            AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
-                ctx: sample_mesh_ctx(
-                    IrohIdentityProvider::new(coord_id),
-                    coord_blobs.clone(),
-                    Arc::clone(&coord_reg),
-                ),
-                network_name: "test-net".to_string(),
+        let accept = serve_coordinator(
+            &coord_ep,
+            &coord_blobs,
+            &coord_reg,
+            vec![ServedNetwork {
+                key: net_pubkey,
+                name: "test-net",
                 state: Arc::clone(&coord_state),
-                dht_notify: None,
-                invite_lock: Arc::new(AsyncMutex::new(())),
-            })),
+            }],
         );
-        let accept = {
-            let coord_ep = coord_ep.clone();
-            let cm = Arc::clone(&connmgr);
-            tokio::spawn(async move {
-                let conn = coord_ep
-                    .accept()
-                    .await
-                    .expect("incoming")
-                    .await
-                    .expect("accept connection");
-                cm.drive_mesh_connection(conn, false).await;
-            })
-        };
 
         // --- Member side: offers an exit, holds a retained connection to coord. ---
         let member_tmp = tempfile::tempdir().unwrap();
@@ -4501,48 +4497,23 @@ mod accept_handler_tests {
             s.network_name = Some("net-b".to_string());
         }
 
-        let connmgr = Arc::new(ConnectionManager::new());
-        connmgr.set_mesh_dispatch(MeshDispatch {
-            ctx: sample_mesh_ctx(
-                IrohIdentityProvider::new(coord_id),
-                blob_store.clone(),
-                Arc::clone(&registry),
-            ),
-            token: CancellationToken::new(),
-            on_peer_connected: Arc::new(|_| {}),
-        });
-        for (net, name, state) in [
-            (net_a, "net-a", Arc::clone(&state_a)),
-            (net_b, "net-b", Arc::clone(&state_b)),
-        ] {
-            connmgr.register(
-                net,
-                AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
-                    ctx: sample_mesh_ctx(
-                        IrohIdentityProvider::new(coord_id),
-                        blob_store.clone(),
-                        Arc::clone(&registry),
-                    ),
-                    network_name: name.to_string(),
-                    state,
-                    dht_notify: None,
-                    invite_lock: Arc::new(AsyncMutex::new(())),
-                })),
-            );
-        }
-        let accept = {
-            let coord_ep = coord_ep.clone();
-            let cm = Arc::clone(&connmgr);
-            tokio::spawn(async move {
-                let conn = coord_ep
-                    .accept()
-                    .await
-                    .expect("incoming")
-                    .await
-                    .expect("accept connection");
-                cm.drive_mesh_connection(conn, false).await;
-            })
-        };
+        let accept = serve_coordinator(
+            &coord_ep,
+            &blob_store,
+            &registry,
+            vec![
+                ServedNetwork {
+                    key: net_a,
+                    name: "net-a",
+                    state: Arc::clone(&state_a),
+                },
+                ServedNetwork {
+                    key: net_b,
+                    name: "net-b",
+                    state: Arc::clone(&state_b),
+                },
+            ],
+        );
         let conn = member_ep
             .connect(coord_ep.addr(), &alpn)
             .await

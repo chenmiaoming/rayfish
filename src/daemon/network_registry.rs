@@ -14,6 +14,7 @@
 use super::*;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use futures::future::BoxFuture;
+use iroh_dns::pkarr::SignedPacket;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -1170,9 +1171,6 @@ impl NetworkRegistry {
         blob_hash: blake3::Hash,
         commit: &AsyncMutex<()>,
     ) -> Option<Vec<u8>> {
-        let client =
-            dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-                .ok()?;
         let packet = match dht::encode_network_record(
             net_secret_key,
             &blob_hash,
@@ -1184,11 +1182,35 @@ impl NetworkRegistry {
                 return None;
             }
         };
-        match publish_signed_record(&client, commit, network, blob_hash, &packet).await {
-            Ok(marked) => marked.then(|| packet.as_bytes().to_vec()),
+        self.publish_signed_group_record(network, blob_hash, &packet, commit)
+            .await
+            .then(|| packet.as_bytes().to_vec())
+    }
+
+    /// Publish a record already signed under `commit` and mark it published.
+    /// Returns whether both happened; failures are logged here.
+    pub(crate) async fn publish_signed_group_record(
+        &self,
+        network: &str,
+        hash: blake3::Hash,
+        packet: &SignedPacket,
+        commit: &AsyncMutex<()>,
+    ) -> bool {
+        let client = match dht::create_pkarr_client(
+            &self.transport.endpoint,
+            &self.transport.pkarr_relay_url,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build pkarr client for network record");
+                return false;
+            }
+        };
+        match publish_signed_record(&client, commit, network, hash, packet).await {
+            Ok(marked) => marked,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to publish network record");
-                None
+                false
             }
         }
     }

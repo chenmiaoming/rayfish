@@ -284,11 +284,10 @@ pub(crate) fn spawn_network_publisher(
                             last_publish = Some((hash, Instant::now()));
                             retry = None;
                         }
-                        Ok(false) => {
-                            retry = Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to publish network record");
+                        outcome => {
+                            if let Err(e) = outcome {
+                                tracing::warn!(error = %e, "failed to publish network record");
+                            }
                             retry = Some((hash, Instant::now() + RECORD_PUBLISH_RETRY_INTERVAL));
                         }
                     }

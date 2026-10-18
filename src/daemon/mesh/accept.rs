@@ -9,8 +9,6 @@
 
 use std::fmt;
 
-use iroh_dns::pkarr::SignedPacket;
-
 use crate::daemon;
 
 use super::super::*;
@@ -1116,7 +1114,17 @@ impl CoordinatorAcceptState {
         });
         drop(commit_guard);
         let published = match &signed {
-            Some((hash, packet)) => self.publish_admitted_record(*hash, packet).await,
+            Some((hash, packet)) => {
+                self.ctx
+                    .registry
+                    .publish_signed_group_record(
+                        &self.network_name,
+                        *hash,
+                        packet,
+                        &snapshot_commit,
+                    )
+                    .await
+            }
             None => false,
         };
         if !published {
@@ -1138,28 +1146,6 @@ impl CoordinatorAcceptState {
         AdmissionCommit::Committed {
             direct_record,
             direct_record_published,
-        }
-    }
-
-    /// Publish the record [`Self::commit_admission`] signed for `hash`, and
-    /// mark it published. Returns whether both happened.
-    async fn publish_admitted_record(&self, hash: blake3::Hash, packet: &SignedPacket) -> bool {
-        let transport = &self.ctx.registry.transport;
-        let client = match dht::create_pkarr_client(&transport.endpoint, &transport.pkarr_relay_url)
-        {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to build pkarr client for admission record");
-                return false;
-            }
-        };
-        let commit = Arc::clone(&self.state.read().unwrap().snapshot_commit);
-        match publish_signed_record(&client, &commit, &self.network_name, hash, packet).await {
-            Ok(marked) => marked,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to publish network record");
-                false
-            }
         }
     }
 
