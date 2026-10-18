@@ -261,6 +261,10 @@ pub(crate) use connection_manager::{ConnectionManager, MeshDispatch};
 mod mesh_connection;
 pub(crate) use mesh_connection::MeshConnection;
 
+// Shared outbound mesh dials, one in flight per peer.
+mod mesh_dialer;
+pub(crate) use mesh_dialer::{DialClaim, DialedPeer, MESH_DIAL_TIMEOUT, MeshDialer};
+
 // The service that owns the set of active networks (M5 migration seam).
 mod network_registry;
 pub(crate) use network_registry::{
@@ -401,23 +405,44 @@ pub(crate) async fn announce_network_handles(
     conn: &Connection,
     peer_ip: Ipv6Addr,
 ) {
+    announce_handles_with(peers, conn, peer_ip, |name| {
+        config::load_network(name)
+            .ok()
+            .flatten()
+            .and_then(|n| n.network_public_key)
+    })
+    .await;
+}
+
+/// [`announce_network_handles`] with the network key lookup passed in.
+async fn announce_handles_with(
+    peers: &PeerTable,
+    conn: &Connection,
+    peer_ip: Ipv6Addr,
+    network_key: impl Fn(&str) -> Option<EndpointId>,
+) {
+    let Some(target) = peers.announce_target(&peer_ip) else {
+        return;
+    };
     // A simultaneous inbound and outbound handshake may have selected a
     // different physical connection while this caller was registering its
     // network. Announce on the selected link, which is where data will flow.
-    let selected = peers
-        .conn_for_ip(&peer_ip)
-        .filter(|candidate| candidate.close_reason().is_none())
-        .unwrap_or_else(|| conn.clone());
+    let selected = if target.conn.close_reason().is_none() {
+        target.conn
+    } else {
+        conn.clone()
+    };
+    // Concurrent callers (one per network lane, joins, the coordinator) each
+    // send a full snapshot, and the peer keeps whichever stream it accepts
+    // last. Take the snapshot and open the stream under one lock so a later
+    // snapshot always goes out last.
+    let _ordered = target.lock.lock().await;
     let entries: Vec<control::NetworkHandle> = peers
         .outbound_handles(&peer_ip)
         .into_iter()
         .filter_map(|(name, handle)| {
-            let pubkey = config::load_network(&name)
-                .ok()
-                .flatten()
-                .and_then(|n| n.network_public_key)?;
             Some(control::NetworkHandle {
-                network: pubkey,
+                network: network_key(&name)?,
                 handle,
             })
         })
@@ -4106,6 +4131,59 @@ mod accept_handler_tests {
         }
     }
 
+    /// One network the coordinator in [`serve_coordinator`] accepts frames for.
+    struct ServedNetwork {
+        key: EndpointId,
+        name: &'static str,
+        state: SharedNetworkState,
+    }
+
+    /// Accept one mesh connection on `coord_ep` and drive its demux, with a
+    /// coordinator handler for each of `networks` backed by `registry`.
+    fn serve_coordinator(
+        coord_ep: &Endpoint,
+        blob_store: &FsStore,
+        registry: &Arc<NetworkRegistry>,
+        networks: Vec<ServedNetwork>,
+    ) -> tokio::task::JoinHandle<()> {
+        let coord_id = coord_ep.id();
+        let mesh_ctx = || {
+            sample_mesh_ctx(
+                IrohIdentityProvider::new(coord_id),
+                blob_store.clone(),
+                Arc::clone(registry),
+            )
+        };
+        let connmgr = Arc::new(ConnectionManager::new());
+        connmgr.set_mesh_dispatch(MeshDispatch {
+            ctx: mesh_ctx(),
+            token: CancellationToken::new(),
+            on_peer_connected: Arc::new(|_| {}),
+        });
+        for network in networks {
+            connmgr.register(
+                network.key,
+                AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
+                    ctx: mesh_ctx(),
+                    network_name: network.name.to_string(),
+                    state: network.state,
+                    dht_notify: None,
+                    invite_lock: Arc::new(AsyncMutex::new(())),
+                })),
+            );
+        }
+        let coord_ep = coord_ep.clone();
+        tokio::spawn(async move {
+            let conn = coord_ep
+                .accept()
+                .await
+                .expect("incoming")
+                .await
+                .expect("accept connection");
+            connmgr.drive_mesh_connection(conn, false).await;
+        })
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn exit_offer_over_the_wire_reaches_the_coordinator_roster() {
@@ -4180,48 +4258,18 @@ mod accept_handler_tests {
             },
         );
 
-        // Connection manager wired with the coordinator accept handler + dispatch,
-        // both pointing at the same registry the frame must mutate.
-        let connmgr = Arc::new(ConnectionManager::new());
-        connmgr.set_mesh_dispatch(MeshDispatch {
-            ctx: sample_mesh_ctx(
-                IrohIdentityProvider::new(coord_id),
-                blob_store.clone(),
-                Arc::clone(&registry),
-            ),
-            token: CancellationToken::new(),
-            on_peer_connected: Arc::new(|_| {}),
-        });
-        connmgr.register(
-            net_pubkey,
-            AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
-                ctx: sample_mesh_ctx(
-                    IrohIdentityProvider::new(coord_id),
-                    blob_store.clone(),
-                    Arc::clone(&registry),
-                ),
-                network_name: "test-net".to_string(),
-                state: Arc::clone(&state),
-                dht_notify: None,
-                invite_lock: Arc::new(AsyncMutex::new(())),
-            })),
-        );
-
         // Coordinator accepts and drives the demux; member dials.
         let coord_addr = coord_ep.addr();
-        let accept = {
-            let coord_ep = coord_ep.clone();
-            let cm = Arc::clone(&connmgr);
-            tokio::spawn(async move {
-                let conn = coord_ep
-                    .accept()
-                    .await
-                    .expect("incoming")
-                    .await
-                    .expect("accept connection");
-                cm.drive_mesh_connection(conn, false).await;
-            })
-        };
+        let accept = serve_coordinator(
+            &coord_ep,
+            &blob_store,
+            &registry,
+            vec![ServedNetwork {
+                key: net_pubkey,
+                name: "test-net",
+                state: Arc::clone(&state),
+            }],
+        );
         let conn = member_ep
             .connect(coord_addr, &alpn)
             .await
@@ -4352,43 +4400,16 @@ mod accept_handler_tests {
                 incompatible: None,
             },
         );
-        let connmgr = Arc::new(ConnectionManager::new());
-        connmgr.set_mesh_dispatch(MeshDispatch {
-            ctx: sample_mesh_ctx(
-                IrohIdentityProvider::new(coord_id),
-                coord_blobs.clone(),
-                Arc::clone(&coord_reg),
-            ),
-            token: CancellationToken::new(),
-            on_peer_connected: Arc::new(|_| {}),
-        });
-        connmgr.register(
-            net_pubkey,
-            AcceptHandler::Coordinator(Arc::new(CoordinatorAcceptState {
-                ctx: sample_mesh_ctx(
-                    IrohIdentityProvider::new(coord_id),
-                    coord_blobs.clone(),
-                    Arc::clone(&coord_reg),
-                ),
-                network_name: "test-net".to_string(),
+        let accept = serve_coordinator(
+            &coord_ep,
+            &coord_blobs,
+            &coord_reg,
+            vec![ServedNetwork {
+                key: net_pubkey,
+                name: "test-net",
                 state: Arc::clone(&coord_state),
-                dht_notify: None,
-                invite_lock: Arc::new(AsyncMutex::new(())),
-            })),
+            }],
         );
-        let accept = {
-            let coord_ep = coord_ep.clone();
-            let cm = Arc::clone(&connmgr);
-            tokio::spawn(async move {
-                let conn = coord_ep
-                    .accept()
-                    .await
-                    .expect("incoming")
-                    .await
-                    .expect("accept connection");
-                cm.drive_mesh_connection(conn, false).await;
-            })
-        };
 
         // --- Member side: offers an exit, holds a retained connection to coord. ---
         let member_tmp = tempfile::tempdir().unwrap();
@@ -4461,6 +4482,112 @@ mod accept_handler_tests {
             recorded,
             "sync_exit_offers did not get the offer recorded on the coordinator over the retained connection"
         );
+    }
+
+    /// Pairing sends one join per shared network over a single connection to
+    /// the primary. A frame that is slow on one network (here: waiting on that
+    /// network's snapshot commit) must not hold up another network's frame on
+    /// the same connection, and the slow one still completes afterwards.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn demux_handles_frames_for_different_networks_side_by_side() {
+        use iroh::address_lookup::memory::MemoryLookup;
+
+        let env = TestConfigDir::new();
+        let alpn = transport::mesh_alpn();
+        let coord_ep = loopback_endpoint_on(MemoryLookup::new(), vec![alpn.clone()]).await;
+        let member_ep = loopback_endpoint_on(MemoryLookup::new(), vec![alpn.clone()]).await;
+        let member_id = member_ep.id();
+        let coord_id = coord_ep.id();
+        let blob_store = FsStore::load(env.dir.path().join("blobs")).await.unwrap();
+        let registry = sample_registry(
+            coord_ep.clone(),
+            IrohIdentityProvider::new(coord_id),
+            blob_store.clone(),
+        );
+
+        // Network A seats the member, so its MeshHello is a reconnect that takes
+        // A's snapshot commit lock. On network B the member is a stranger, so its
+        // JoinRequest is queued for approval and answered with JoinPending.
+        let state_a = make_network_state();
+        let net_a = state_a.read().unwrap().network_public_key;
+        state_a.write().unwrap().members.add(seated(member_id));
+        let state_b = make_network_state();
+        let net_b = SecretKey::from_bytes(&[3u8; 32]).public();
+        {
+            let mut s = state_b.write().unwrap();
+            s.network_public_key = net_b;
+            s.network_name = Some("net-b".to_string());
+        }
+
+        let accept = serve_coordinator(
+            &coord_ep,
+            &blob_store,
+            &registry,
+            vec![
+                ServedNetwork {
+                    key: net_a,
+                    name: "net-a",
+                    state: Arc::clone(&state_a),
+                },
+                ServedNetwork {
+                    key: net_b,
+                    name: "net-b",
+                    state: Arc::clone(&state_b),
+                },
+            ],
+        );
+        let conn = member_ep
+            .connect(coord_ep.addr(), &alpn)
+            .await
+            .expect("member dials coordinator");
+
+        // Stall network A behind its commit lock, then send A's frame first.
+        let commit_a = Arc::clone(&state_a.read().unwrap().snapshot_commit);
+        let commit_guard = commit_a.lock().await;
+        let (mut send_a, mut recv_a) = conn.open_bi().await.unwrap();
+        control::send_msg(
+            &mut send_a,
+            Some(net_a),
+            &ControlMsg::MeshHello {
+                identity: member_id,
+                hostname: None,
+                device_cert: None,
+            },
+        )
+        .await
+        .unwrap();
+        let (mut send_b, mut recv_b) = conn.open_bi().await.unwrap();
+        control::send_msg(
+            &mut send_b,
+            Some(net_b),
+            &ControlMsg::JoinRequest {
+                invite_secret: None,
+                hostname: None,
+                device_cert: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let reply_b = tokio::time::timeout(Duration::from_secs(5), control::recv_msg(&mut recv_b))
+            .await
+            .expect("network B must be answered while network A is still busy")
+            .unwrap();
+        assert!(matches!(reply_b, ControlMsg::JoinPending), "{reply_b:?}");
+
+        drop(commit_guard);
+        let reply_a = tokio::time::timeout(Duration::from_secs(5), control::recv_msg(&mut recv_a))
+            .await
+            .expect("network A completes once its commit lock is free")
+            .unwrap();
+        assert!(matches!(reply_a, ControlMsg::Welcome { .. }), "{reply_a:?}");
+        drop(recv_a);
+
+        accept.abort();
+        coord_ep.close().await;
+        member_ep.close().await;
+        blob_store.shutdown().await.unwrap();
     }
 
     #[test]
@@ -5274,5 +5401,98 @@ mod headless_tests {
         );
 
         daemon.detach_tun();
+    }
+}
+
+#[cfg(test)]
+mod announce_order_tests {
+    use super::*;
+    use iroh::RelayMode;
+    use iroh::endpoint::presets;
+    use std::sync::mpsc as std_mpsc;
+
+    async fn mesh_endpoint() -> Endpoint {
+        Endpoint::builder(presets::N0)
+            .alpns(vec![transport::mesh_alpn()])
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint")
+    }
+
+    fn network_key(name: &str) -> Option<EndpointId> {
+        Some(SecretKey::from_bytes(&[name.as_bytes()[0]; 32]).public())
+    }
+
+    /// Two announces race: the first stalls after taking its snapshot, and the
+    /// second, taken after another network was shared, must still reach the
+    /// peer last. The peer keeps the last table it accepts, so the other order
+    /// would leave it unable to decode the new network.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_later_snapshot_is_announced_last() {
+        let client = mesh_endpoint().await;
+        let server = mesh_endpoint().await;
+        let alpn = transport::mesh_alpn();
+        let (conn, accepted) = tokio::join!(client.connect(server.addr(), &alpn), async {
+            server
+                .accept()
+                .await
+                .expect("incoming")
+                .await
+                .expect("accept")
+        });
+        let conn = conn.expect("dial");
+        let peer_ip = derive_ipv6(&server.id());
+        let peers = PeerTable::new();
+        peers.add(peer_ip, conn.clone(), server.id(), "a");
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let (release_tx, release_rx) = std_mpsc::channel::<()>();
+        let first = tokio::spawn({
+            let peers = peers.clone();
+            let conn = conn.clone();
+            async move {
+                announce_handles_with(&peers, &conn, peer_ip, move |name| {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.recv();
+                    network_key(name)
+                })
+                .await;
+            }
+        });
+        entered_rx
+            .recv()
+            .await
+            .expect("the first announce resolves");
+        peers.attach_network(&peer_ip, "b");
+        let second = tokio::spawn({
+            let peers = peers.clone();
+            let conn = conn.clone();
+            async move { announce_handles_with(&peers, &conn, peer_ip, network_key).await }
+        });
+        // Give the second announce the chance to overtake, then let the first go.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        release_tx.send(()).expect("the first announce is waiting");
+        first.await.expect("first announce");
+        second.await.expect("second announce");
+
+        let mut tables = Vec::new();
+        for _ in 0..2 {
+            let (_send, mut recv) =
+                tokio::time::timeout(Duration::from_secs(2), accepted.accept_bi())
+                    .await
+                    .expect("an announcement arrives")
+                    .expect("accept stream");
+            match control::recv_frame(&mut recv).await.expect("read frame") {
+                control::FrameRead::Frame(frame) => match frame.msg {
+                    ControlMsg::NetworkHandles { entries, .. } => tables.push(entries.len()),
+                    _ => panic!("expected NetworkHandles"),
+                },
+                control::FrameRead::Unknown { .. } => panic!("unknown frame"),
+            }
+        }
+        assert_eq!(tables, vec![1, 2], "the newer snapshot must arrive last");
+        client.close().await;
+        server.close().await;
     }
 }

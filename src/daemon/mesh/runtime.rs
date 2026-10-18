@@ -2,6 +2,7 @@
 //! connect-all, activate/deactivate (data plane), teardown, leave. Split out of `daemon/mod.rs`.
 
 use super::super::*;
+use dashmap::mapref::entry::Entry;
 // The desktop-gated `start_ssh` binds SSH listeners on concrete IPs, and the
 // macOS exit-node helpers below match on underlay addresses. macOS without the
 // desktop feature (the ray-mobile host build) still needs the import.
@@ -292,6 +293,12 @@ impl NetworkRegistry {
         };
 
         let last_group_hash = self.seal_group_snapshot(&mut net_state).await?;
+        // Another path may have registered this network while the roster was
+        // resolving. Its state is the live one, so neither rewrite its config
+        // nor sign a record of ours.
+        if self.networks.contains_key(name) {
+            return Ok(ipc_err(format!("network '{name}' already active")));
+        }
         let restored_hash_was_published = source_published && last_group_hash == source_hash;
 
         // Replace only the blob-derived projection on the latest saved config.
@@ -311,7 +318,12 @@ impl NetworkRegistry {
         })?;
         anyhow::ensure!(updated.is_some(), "network is no longer saved");
         let restored_record = self
-            .publish_group_hash(name, &net_secret_key, last_group_hash)
+            .publish_group_hash(
+                name,
+                &net_secret_key,
+                last_group_hash,
+                &net_state.snapshot_commit,
+            )
             .await;
 
         let cancel = self.shutdown_token.child_token();
@@ -328,6 +340,39 @@ impl NetworkRegistry {
             &cancel,
             restored_record.as_ref().map(|_| last_group_hash),
         );
+
+        // Register the network from its restored local state before dialing
+        // peers, so `ray status` / IPC sees it the instant the local restore
+        // finishes. `dial_all_members` awaits a handshake per peer; when it gated
+        // this insert, a freshly (re)started daemon answered `status` with "no
+        // active networks" until every dial resolved.
+        //
+        // Never replace a handle another path registered meanwhile: the old
+        // handle's tasks would keep running on a second state for the same
+        // network, and its publisher would sign that state's roster over the
+        // live one's.
+        let handle = NetworkHandle {
+            name: name.to_string(),
+            network_key: net_public_key,
+            role: NetworkRole::Coordinator,
+            state: Arc::clone(&state),
+            dht_notify: Some(Arc::clone(&dht_notify)),
+            cancel: cancel.clone(),
+            tasks,
+            invite_lock: Arc::clone(&invite_lock),
+            // A coordinator holds the network key and publishes a version this
+            // build supports, including the rollout compatibility version.
+            incompatible: None,
+        };
+        match self.networks.entry(name.to_string()) {
+            Entry::Occupied(_) => {
+                cancel.cancel();
+                return Ok(ipc_err(format!("network '{name}' already active")));
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(handle);
+            }
+        }
 
         self.register_coordinator_handler(
             &ctx,
@@ -376,25 +421,6 @@ impl NetworkRegistry {
         // any member that has since been idle-closed, before the first reconverge
         // (self excluded).
         self.seed_route_map(name, &members_to_dial);
-        // Register the network from its restored local state before dialing
-        // peers, so `ray status` / IPC sees it the instant the local restore
-        // finishes. `dial_all_members` awaits a handshake per peer; when it gated
-        // this insert, a freshly (re)started daemon answered `status` with "no
-        // active networks" until every dial resolved.
-        let handle = NetworkHandle {
-            name: name.to_string(),
-            network_key: net_public_key,
-            role: NetworkRole::Coordinator,
-            state,
-            dht_notify: Some(dht_notify),
-            cancel: cancel.clone(),
-            tasks,
-            invite_lock,
-            // A coordinator holds the network key and publishes a version this
-            // build supports, including the rollout compatibility version.
-            incompatible: None,
-        };
-        self.networks.insert(name.to_string(), handle);
         self.refresh_search_domains().await;
 
         // Full mesh: proactively dial every known member in the background so a
@@ -934,11 +960,8 @@ impl NetworkRegistry {
             tracing::warn!(network = %net.name, "no network public key in config, skipping restore");
             return None;
         };
-        if !self.restoring.insert(net.name.clone()) {
-            return None;
-        }
+        let claim = self.claim_registration(&net.name)?;
         let me = Arc::clone(self);
-        let guard = net.name.clone();
         let saved = SavedMemberNetwork {
             name: net.name.clone(),
             net_pubkey,
@@ -950,7 +973,7 @@ impl NetworkRegistry {
         };
         Some(tokio::spawn(async move {
             Arc::clone(&me).restore_member_network(saved).await;
-            me.restoring.remove(&guard);
+            drop(claim);
         }))
     }
 
@@ -962,9 +985,7 @@ impl NetworkRegistry {
         self: &Arc<Self>,
         net: &config::NetworkConfig,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        if !self.restoring.insert(net.name.clone()) {
-            return None;
-        }
+        let claim = self.claim_registration(&net.name)?;
         let me = Arc::clone(self);
         let name = net.name.clone();
         let mode = net.group_mode;
@@ -981,7 +1002,7 @@ impl NetworkRegistry {
                 }
                 _ => {}
             }
-            me.restoring.remove(&name);
+            drop(claim);
         }))
     }
 

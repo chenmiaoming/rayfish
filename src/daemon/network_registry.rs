@@ -14,6 +14,7 @@
 use super::*;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use futures::future::BoxFuture;
+use iroh_dns::pkarr::SignedPacket;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -154,11 +155,10 @@ pub(crate) struct NetworkRegistry {
     pub(crate) transport: Arc<Transport>,
     /// Live peer routing table, for severing / notifying peers on roster change.
     pub(crate) peers: PeerTable,
-    /// Serializes outbound mesh handshakes to one peer until the first caller
-    /// registers its connection. Pairing can join several networks at once;
-    /// checking the peer table without this gate lets every join dial before any
+    /// Shares outbound mesh dials per peer. Pairing joins several networks at
+    /// once; checking the peer table alone would let every join dial before any
     /// of them has installed the shared connection.
-    mesh_dial_locks: DashMap<EndpointId, Arc<AsyncMutex<()>>>,
+    mesh_dialer: MeshDialer,
     /// The per-peer connection driver, so the registry can (re-)register a
     /// network's accept handler (coordinator promotion) or unregister it on
     /// teardown directly.
@@ -234,9 +234,11 @@ pub(crate) struct NetworkRegistry {
     /// fires while the data plane is down (boot, standby) from withdrawing an
     /// offer that `activate()` is about to re-advertise.
     pub(crate) exit_sync_enabled: AtomicBool,
-    /// Networks whose restore is already running, so a sweep never starts a
-    /// second one for the same network. Removed when the restore finishes,
-    /// however it finishes.
+    /// Networks that a create or restore is bringing up right now, each held by
+    /// a [`RegistrationClaim`]. A sweep skips them: a create saves the config
+    /// before its handle is registered, and a restore started in that gap would
+    /// run a second coordinator state for the same network. See
+    /// [`NetworkRegistry::claim_registration`].
     pub(crate) restoring: Arc<DashSet<String>>,
     /// Why each saved-but-unregistered network's last restore attempt failed,
     /// keyed by network name. `ray status` reports it beside the network so a
@@ -292,6 +294,19 @@ fn peer_selector_for_network<'a>(network: &str, selector: &'a str) -> Option<&'a
 /// testable without a running daemon, which is the part worth pinning down: the
 /// sweep runs on a timer and on peer traffic, so starting a duplicate restore
 /// (or skipping a genuinely dead network) is the failure mode that matters.
+/// A network name held in [`NetworkRegistry::restoring`] while one path brings
+/// that network up. Dropping it releases the name, however that path ends.
+pub(crate) struct RegistrationClaim {
+    claims: Arc<DashSet<String>>,
+    name: String,
+}
+
+impl Drop for RegistrationClaim {
+    fn drop(&mut self) {
+        self.claims.remove(&self.name);
+    }
+}
+
 pub(crate) fn missing_networks(
     saved: &[config::NetworkConfig],
     is_live: impl Fn(&str) -> bool,
@@ -341,7 +356,7 @@ impl NetworkRegistry {
             networks,
             transport,
             peers,
-            mesh_dial_locks: DashMap::new(),
+            mesh_dialer: MeshDialer::default(),
             conn,
             dns,
             tun_name,
@@ -370,12 +385,23 @@ impl NetworkRegistry {
         }
     }
 
-    pub(crate) fn mesh_dial_lock(&self, peer: EndpointId) -> Arc<AsyncMutex<()>> {
-        let entry = self
-            .mesh_dial_locks
-            .entry(peer)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())));
-        Arc::clone(entry.value())
+    /// Claim `name` for the one create or restore that may register it, or
+    /// `None` while another holds it.
+    pub(crate) fn claim_registration(&self, name: &str) -> Option<RegistrationClaim> {
+        self.restoring
+            .insert(name.to_string())
+            .then(|| RegistrationClaim {
+                claims: Arc::clone(&self.restoring),
+                name: name.to_string(),
+            })
+    }
+
+    /// A live mesh connection to `peer`, registered or freshly dialed, sharing
+    /// any dial to it already in flight. See [`MeshDialer`].
+    pub(crate) async fn connect_mesh_peer(&self, peer: EndpointId) -> Result<DialedPeer> {
+        self.mesh_dialer
+            .connect(&self.transport.endpoint, &self.peers, peer)
+            .await
     }
 
     /// Resolve a destination mesh IP to a roster member the on-demand forwarding
@@ -907,11 +933,11 @@ impl NetworkRegistry {
         // Holding the restore guard keeps the supervisor from restoring the old
         // name while the network moves. A restore already under way would bring
         // the network up under the old name after the move, so wait for it.
-        if !self.restoring.insert(from.to_string()) {
+        let Some(claim) = self.claim_registration(from) else {
             return ipc_err(format!(
                 "network '{from}' is still being restored; try again once it is up"
             ));
-        }
+        };
         // The network's invite ledger moves with the name. Its invites are
         // redeemed and delivered under its invite lock, so hold that across the
         // move: a write already under way would otherwise land under the old
@@ -929,7 +955,7 @@ impl NetworkRegistry {
             };
             config::rename_network(from, to)
         };
-        self.restoring.remove(from);
+        drop(claim);
         let net = match renamed {
             Ok(Some(net)) => net,
             // Left meanwhile, so there is nothing to bring back.
@@ -1171,6 +1197,14 @@ impl NetworkRegistry {
             }
             None => self.unclaimed_network_name(&network_name::generate_name(), None)?,
         };
+        // Held until the handle is registered. The config is saved first and the
+        // record publish in between can take seconds; a restore sweep in that
+        // gap would see a saved network that is not live and restore a second
+        // coordinator state for it, whose publisher then republishes its stale
+        // roster over every admission this one makes.
+        let Some(_registration) = self.claim_registration(&name) else {
+            return Ok(ipc_err(format!("network '{name}' is already being set up")));
+        };
 
         let net_secret_key = SecretKey::generate();
         let net_public_key = net_secret_key.public();
@@ -1242,7 +1276,12 @@ impl NetworkRegistry {
         )
         .await;
         let initial_record = self
-            .publish_group_hash(&name, &net_secret_key, last_group_hash)
+            .publish_group_hash(
+                &name,
+                &net_secret_key,
+                last_group_hash,
+                &net_state.snapshot_commit,
+            )
             .await;
 
         let cancel = self.shutdown_token.child_token();
@@ -1381,29 +1420,55 @@ impl NetworkRegistry {
         Ok(snap.hash)
     }
 
+    /// Sign and publish the record for `blob_hash`, then mark it published.
+    /// Returns the record's bytes once both happened.
     pub(crate) async fn publish_group_hash(
         &self,
         network: &str,
         net_secret_key: &SecretKey,
         blob_hash: blake3::Hash,
+        commit: &AsyncMutex<()>,
     ) -> Option<Vec<u8>> {
-        let Ok(pkarr_client) =
-            dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-        else {
-            return None;
-        };
-        match dht::publish_network(
-            &pkarr_client,
+        let packet = match dht::encode_network_record(
             net_secret_key,
             &blob_hash,
             &[self.transport.endpoint.id()],
-        )
-        .await
-        {
-            Ok(packet) => mark_group_hash_published(network, blob_hash).then_some(packet),
+        ) {
+            Ok(packet) => packet,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build network record");
+                return None;
+            }
+        };
+        self.publish_signed_group_record(network, blob_hash, &packet, commit)
+            .await
+            .then(|| packet.as_bytes().to_vec())
+    }
+
+    /// Publish a record already signed under `commit` and mark it published.
+    /// Returns whether both happened; failures are logged here.
+    pub(crate) async fn publish_signed_group_record(
+        &self,
+        network: &str,
+        hash: blake3::Hash,
+        packet: &SignedPacket,
+        commit: &AsyncMutex<()>,
+    ) -> bool {
+        let client = match dht::create_pkarr_client(
+            &self.transport.endpoint,
+            &self.transport.pkarr_relay_url,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to build pkarr client for network record");
+                return false;
+            }
+        };
+        match publish_signed_record(&client, commit, network, hash, packet).await {
+            Ok(marked) => marked,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to publish network record");
-                None
+                false
             }
         }
     }
