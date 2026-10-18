@@ -26,7 +26,9 @@ use super::{TAG_LEN, tag_datagram};
 use crate::stats::DropReason;
 
 mod autotune;
+mod pending;
 use autotune::{Budget, Controller, Events};
+use pending::Pending;
 
 pub(super) const MAX_PACKET: usize = crate::tun::TUN_MTU as usize;
 const HEADER: usize = TAG_LEN + 1 + 8 + 2 + 2;
@@ -34,7 +36,7 @@ const MAX_FRAGMENTS: usize = 16;
 const MAX_PENDING: usize = 64;
 pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
 // Includes the packet buffer, coverage bitmap and allowance for map metadata.
-const ASSEMBLY_COST: usize = MAX_PACKET + 512;
+const ASSEMBLY_COST: usize = MAX_PACKET + 576;
 const GLOBAL_BUDGET: usize = 8 * 1024 * 1024;
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -91,7 +93,7 @@ pub(super) fn encode(handle: u16, packet: &[u8], max: usize) -> Option<Encoded> 
     Some(Encoded::Fragments(parts))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct AssemblyKey {
     handle: u16,
     id: u64,
@@ -167,7 +169,7 @@ struct Assembly {
 /// validates the network handle. Both per-connection and process-wide limits
 /// apply; dropping a reader releases all its reservations.
 pub(super) struct Reassembler {
-    pending: HashMap<AssemblyKey, Assembly>,
+    pending: Pending<Assembly>,
     budget: Arc<Budget>,
     evicted: usize,
     control: Controller,
@@ -179,7 +181,7 @@ impl Default for Reassembler {
         static BUDGET: OnceLock<Arc<Budget>> = OnceLock::new();
         Self::with_budget(
             Arc::clone(BUDGET.get_or_init(|| Budget::new(GLOBAL_BUDGET))),
-            true,
+            false,
         )
     }
 }
@@ -187,7 +189,7 @@ impl Default for Reassembler {
 impl Reassembler {
     fn with_budget(budget: Arc<Budget>, autotune: bool) -> Self {
         Self {
-            pending: HashMap::new(),
+            pending: Pending::default(),
             budget,
             evicted: 0,
             control: Controller::new(Instant::now(), autotune),
@@ -197,16 +199,14 @@ impl Reassembler {
 
     pub(super) fn deadline(&self) -> Option<Instant> {
         self.pending
-            .values()
-            .map(|p| p.progress.deadline)
+            .deadline()
+            .into_iter()
             .chain(self.control.deadline())
             .min()
     }
 
     pub(super) fn expire(&mut self, now: Instant) -> usize {
-        let before = self.pending.len();
-        self.pending.retain(|_, p| now < p.progress.deadline);
-        let expired = before - self.pending.len();
+        let expired = self.pending.expire(now);
         self.events.expired += expired;
         self.autotune_tick(now);
         expired
@@ -266,10 +266,7 @@ impl Reassembler {
     }
 
     fn oldest(&self) -> Option<AssemblyKey> {
-        self.pending
-            .iter()
-            .min_by_key(|(key, part)| (part.progress.deadline, key.handle, key.id))
-            .map(|(&key, _)| key)
+        self.pending.oldest()
     }
 
     /// The datagram still includes its validated network handle. Whole packets
@@ -358,6 +355,7 @@ impl Reassembler {
                     progress: Progress::new(total, now + TIMEOUT),
                     permit,
                 },
+                now + TIMEOUT,
             );
         }
         let part = self.pending.get_mut(&key).unwrap();

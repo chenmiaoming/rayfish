@@ -23,7 +23,8 @@ use super::*;
 use crate::stats::ForwardMetrics;
 
 const MAX_PENDING: usize = 512;
-const SHADOW_COST: usize = 512;
+// Includes the live deadline index (no lazy history of completed packets).
+const SHADOW_COST: usize = 576;
 const SHADOW_RESERVATION: usize = MAX_PENDING * SHADOW_COST;
 const POLL: Duration = Duration::from_millis(250);
 const PRESSURE_WINDOW: Duration = Duration::from_millis(50);
@@ -97,13 +98,13 @@ impl Delivered {
 
 struct Observer {
     limit: usize,
-    pending: HashMap<AssemblyKey, Progress>,
+    pending: Pending<Progress>,
     delivered: Delivered,
 }
 
 impl Observer {
     fn expire(&mut self, now: Instant) {
-        self.pending.retain(|_, part| now < part.deadline);
+        self.pending.expire(now);
     }
 
     fn accept(&mut self, fragment: Fragment, now: Instant) {
@@ -125,8 +126,11 @@ impl Observer {
                 let oldest = self.oldest();
                 self.pending.remove(&oldest);
             }
-            self.pending
-                .insert(fragment.key, Progress::new(fragment.total, now + TIMEOUT));
+            self.pending.insert(
+                fragment.key,
+                Progress::new(fragment.total, now + TIMEOUT),
+                now + TIMEOUT,
+            );
         }
         let part = self.pending.get_mut(&fragment.key).unwrap();
         if part.total != fragment.total {
@@ -141,11 +145,7 @@ impl Observer {
     }
 
     fn oldest(&self) -> AssemblyKey {
-        self.pending
-            .iter()
-            .min_by_key(|(key, part)| (part.deadline, key.handle, key.id))
-            .map(|(&key, _)| key)
-            .expect("a full observer is nonempty")
+        self.pending.oldest().expect("a full observer is nonempty")
     }
 }
 
@@ -207,6 +207,21 @@ impl Controller {
 }
 
 impl Reassembler {
+    /// Observed once per reader batch/timer. Disabling releases observer permits
+    /// and active-reader accounting immediately, and drains to 64 on admission.
+    /// Existing assemblies keep their deadlines and are not bulk-purged.
+    pub(in crate::forward) fn set_autotune(&mut self, enabled: bool, now: Instant) {
+        if self.control.enabled == enabled {
+            return;
+        }
+        if self.control.active_until.is_some() {
+            self.budget.active.fetch_sub(1, Ordering::Relaxed);
+        }
+        let rolled_back = self.control.probe.is_some();
+        self.control = Controller::new(now, enabled);
+        self.events.rolled_back += usize::from(rolled_back);
+    }
+
     pub(super) fn touch_fragment(&mut self, now: Instant) {
         if !self.control.enabled {
             return;
@@ -246,7 +261,7 @@ impl Reassembler {
                 pending: self
                     .pending
                     .iter()
-                    .map(|(&key, part)| (key, part.progress.clone()))
+                    .map(|(&key, part)| (key, part.progress.clone(), part.progress.deadline))
                     .collect(),
                 delivered: Delivered::default(),
             },
@@ -469,6 +484,45 @@ mod tests {
         Reassembler::with_budget(Budget::new(GLOBAL_BUDGET), enabled)
     }
 
+    #[test]
+    fn disabling_releases_trial_and_keeps_pending_data_until_bounded_drain() {
+        let mut r = receiver(true);
+        let now = Instant::now();
+        for _ in 0..150 {
+            r.accept(frames()[0].clone(), now).unwrap();
+        }
+        let before = r.pending.len();
+        assert!(before > 64);
+        assert!(r.control.probe.is_some());
+        r.set_autotune(false, now);
+        assert!(r.control.probe.is_none());
+        assert_eq!(r.control.limit, 64);
+        assert_eq!(r.budget.observers.available_permits(), 2);
+        assert_eq!(r.budget.active.load(Ordering::Relaxed), 0);
+        assert_eq!(r.pending.len(), before);
+        assert_eq!(r.budget.used(), before * ASSEMBLY_COST);
+        for _ in 0..1000 {
+            r.accept(frames()[0].clone(), now).unwrap();
+        }
+        assert_eq!(r.pending.len(), 64);
+        assert!(r.control.probe.is_none());
+        assert_eq!(r.events.started, 1);
+        r.expire(now + TIMEOUT);
+        assert_eq!(r.budget.used(), 0);
+        r.set_autotune(true, now + TIMEOUT);
+        burst(&mut r, 65, now + TIMEOUT);
+        assert!(r.control.probe.is_some());
+    }
+
+    #[test]
+    fn default_requires_explicit_enablement() {
+        let mut r = Reassembler::default();
+        let now = Instant::now();
+        assert_eq!(burst(&mut r, 65, now), 0);
+        assert_eq!(r.control.limit, 64);
+        assert_eq!(r.events.started, 0);
+    }
+
     fn packet() -> Vec<u8> {
         let mut p = vec![0x42; MAX_PACKET];
         p[0] = 0x60;
@@ -655,7 +709,7 @@ mod tests {
         assert!(a.start_probe(now, false));
         assert!(b.start_probe(now, false));
         assert!(!c.start_probe(now, false));
-        assert_eq!(budget.used(), 512 * 1024);
+        assert_eq!(budget.used(), 2 * SHADOW_RESERVATION);
         drop(a);
         assert!(c.start_probe(now, false));
         drop(b);
@@ -745,7 +799,7 @@ mod tests {
         let mut r = receiver(false);
         let mut observer = Observer {
             limit: 64,
-            pending: HashMap::new(),
+            pending: Pending::default(),
             delivered: Delivered::default(),
         };
         let mut stream = Vec::new();
@@ -776,7 +830,7 @@ mod tests {
                 assert_eq!(observer.delivered.packets, r.events.completed as u64);
                 assert_eq!(observer.delivered.bytes, r.events.bytes as u64);
                 assert_eq!(observer.pending.len(), r.pending.len());
-                for (key, part) in &r.pending {
+                for (key, part) in r.pending.iter() {
                     let shadow = observer.pending.get(key).unwrap();
                     assert_eq!(shadow.covered, part.progress.covered);
                     assert_eq!(shadow.deadline, part.progress.deadline);
@@ -926,5 +980,47 @@ mod tests {
         }
         assert_eq!(r.events.completed, 1);
         assert_eq!(r.events.started, 1);
+    }
+
+    /// CPU-only profile with actual metrics, no sockets or TUN. Pre-generated
+    /// orphan heads keep each table full; logical time stays within one trial.
+    /// Run with `cargo test -q --release reassembly_capacity_cpu_profile -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual release-mode CPU profile, not a timing assertion"]
+    fn reassembly_capacity_cpu_profile() {
+        let heads: Vec<_> = (0..51_000).map(|_| frames()[0].clone()).collect();
+        for _ in 0..3 {
+            for (label, limit, enabled) in [
+                ("fixed64", 64, false),
+                ("fixed128", 128, false),
+                ("fixed256", 256, false),
+                ("fixed512", 512, false),
+                ("trial512", 64, true),
+            ] {
+                let mut r = receiver(enabled);
+                r.control.limit = limit;
+                let stats = ForwardMetrics::default();
+                let now = Instant::now();
+                for frame in &heads[..1000] {
+                    r.accept(frame.clone(), now).unwrap();
+                }
+                let start = std::time::Instant::now();
+                for (i, frame) in heads[1000..].iter().enumerate() {
+                    std::hint::black_box(
+                        r.accept(frame.clone(), now + Duration::from_micros(i as u64))
+                            .unwrap(),
+                    );
+                    if i % 32 == 0 {
+                        std::hint::black_box(r.deadline());
+                        r.record_metrics(&stats);
+                    }
+                }
+                println!(
+                    "{label}: {:.1} ns/head",
+                    start.elapsed().as_nanos() as f64 / 50_000.0
+                );
+                assert_eq!(r.pending.len(), r.control.limit);
+            }
+        }
     }
 }
