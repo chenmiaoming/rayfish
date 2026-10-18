@@ -81,7 +81,7 @@ macos-test:
 # Exercise concurrent provider messages, send failures, and request timeouts.
 macos-ipc-test:
     mkdir -p target/macos-tests
-    xcrun swiftc -parse-as-library macos/Shared/TunnelIPC.swift macos/Shared/ProviderMessage.swift macos/Tests/TunnelIPCTests.swift -o target/macos-tests/tunnel-ipc-tests
+    xcrun swiftc -parse-as-library macos/Shared/TunnelIPC.swift macos/Shared/ProviderReply.swift macos/Shared/ProviderMessage.swift macos/Tests/TunnelIPCTests.swift -o target/macos-tests/tunnel-ipc-tests
     target/macos-tests/tunnel-ipc-tests
 
 # Test live menu updates and closing the dashboard without touching the VPN.
@@ -93,7 +93,7 @@ macos-ui-test:
 # Check notification deduplication and tunnel ownership without the installed VPN.
 macos-notification-test:
     mkdir -p target/macos-tests
-    xcrun swiftc -parse-as-library macos/Shared/ProviderMessage.swift macos/Shared/TunnelIPC.swift macos/Rayfish/App/RayfishNotifications.swift macos/Tests/NotificationTests.swift -o target/macos-tests/notification-tests
+    xcrun swiftc -parse-as-library macos/Shared/ProviderMessage.swift macos/Shared/TunnelIPC.swift macos/Shared/ProviderReply.swift macos/Rayfish/App/RayfishNotifications.swift macos/Tests/NotificationTests.swift -o target/macos-tests/notification-tests
     target/macos-tests/notification-tests
 
 # Build a locally testable app with automatic Apple Development signing.

@@ -101,7 +101,9 @@ final class DeviceTunnel: Tunnel {
             return try await local.run(command)
         }
         let data = try JSONEncoder().encode(command)
-        let reply = try await ProviderMessage.send(data, timeout: command.timeout) { data, handler in
+        let reply = try await ProviderReply.send(
+            data, timeout: command.timeout, timedOut: TunnelError.timedOut, noResponse: TunnelError.noResponse
+        ) { data, handler in
             try session.sendProviderMessage(data, responseHandler: handler)
         }
         let decoded = try JSONDecoder().decode(Reply.self, from: reply)
@@ -182,59 +184,5 @@ final class SimulatorTunnel: Tunnel {
     private func set(_ next: TunnelState) {
         state = next
         onChange?()
-    }
-}
-
-enum ProviderMessage {
-    /// Send one provider message and wait for its reply, failing after `timeout`.
-    @MainActor
-    static func send(
-        _ data: Data,
-        timeout: TimeInterval,
-        using sendMessage: @MainActor (Data, @escaping (Data?) -> Void) throws -> Void
-    ) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            let pending = PendingReply(continuation)
-            let timer = DispatchWorkItem { pending.finish(.failure(TunnelError.timedOut)) }
-            pending.setTimer(timer)
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
-            do {
-                try sendMessage(data) { reply in
-                    pending.finish(reply.map { .success($0) } ?? .failure(TunnelError.noResponse))
-                }
-            } catch {
-                pending.finish(.failure(error))
-            }
-        }
-    }
-}
-
-/// Resumes once, with the reply or the timeout, and cancels the timeout so a
-/// fast reply does not leave it pending for the full wait.
-private final class PendingReply: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data, Error>?
-    private var timer: DispatchWorkItem?
-
-    init(_ continuation: CheckedContinuation<Data, Error>) {
-        self.continuation = continuation
-    }
-
-    func setTimer(_ timer: DispatchWorkItem) {
-        lock.withLock {
-            if continuation == nil { timer.cancel() } else { self.timer = timer }
-        }
-    }
-
-    func finish(_ result: Result<Data, Error>) {
-        let (continuation, timer) = lock.withLock {
-            defer {
-                self.continuation = nil
-                self.timer = nil
-            }
-            return (self.continuation, self.timer)
-        }
-        timer?.cancel()
-        continuation?.resume(with: result)
     }
 }

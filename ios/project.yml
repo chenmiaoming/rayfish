@@ -45,6 +45,7 @@ targets:
     sources:
       - path: Rayfish
       - path: Shared
+      - path: ../macos/Shared/ProviderReply.swift
       - path: Generated
     settings:
       base:
