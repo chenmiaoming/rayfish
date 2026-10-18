@@ -14,9 +14,10 @@
 //! `resolve` (reader side), on top of `configure` / `revert` (lifecycle).
 
 use super::*;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::net::IpAddr;
 use std::net::{Ipv6Addr, SocketAddr};
+use std::sync::PoisonError;
 
 /// First and last backoff step for the OS-DNS configuration retry loop.
 const DNS_CONFIG_RETRY_MIN: Duration = Duration::from_secs(5);
@@ -107,14 +108,26 @@ impl DnsService {
     /// spawn the re-assert watcher the platform's backend needs.
     /// Failures are non-fatal: pushed to `warnings` so `ray up` can surface them.
     pub(crate) async fn configure(self: &Arc<Self>, tun_name: &str, warnings: &mut Vec<String>) {
-        // Android's VpnService configures DNS and supplies the loopback proxy
-        // upstreams. Desktop backend detection is permanently unsupported there;
-        // retrying it only creates a timer and a misleading warning.
-        if cfg!(target_os = "android") {
+        // Android's VpnService and iOS NetworkExtension configure DNS. Desktop
+        // backend detection is permanently unsupported there; retrying it only
+        // creates a timer and a misleading warning.
+        if cfg!(embedded_tun) {
             return;
         }
         if !config::load().map(|c| c.dns_mode.enabled()).unwrap_or(true) {
             return;
+        }
+        // Already holding a backend (`ray config set dns on` while up): undo it
+        // first. Otherwise the stale-backup sweep below would read our own live
+        // file as a crash leftover, and the old backend's re-assert watcher
+        // would keep writing its render over the new one.
+        let held = self
+            .configurator
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        if held {
+            self.revert(tun_name).await;
         }
         // Configure system DNS to route .ray queries to our in-daemon resolver.
         dns_config::restore_stale_backups();
@@ -142,11 +155,10 @@ impl DnsService {
         c: Box<dyn dns_config::DnsConfigurator>,
         tun_name: &str,
     ) {
-        let captured = c.captured_upstreams();
         // Merge any user-configured DNS upstreams over the system-captured
         // set (replace drops the captured ones; augment tries custom first).
         let dns_override = config::load().map(|c| c.dns_upstreams).unwrap_or_default();
-        let upstreams = config::resolve_upstreams(&dns_override, captured);
+        let upstreams = config::resolve_upstreams(&dns_override, c.captured_upstreams());
         #[cfg(target_os = "linux")]
         let search_handle = c.search_handle();
         let fallbacks = c.fallback_upstreams();
@@ -178,7 +190,16 @@ impl DnsService {
         #[cfg(target_os = "linux")]
         if let Some(search) = search_handle {
             let rt = tokio_util::sync::CancellationToken::new();
-            *self.reassert_token.lock().unwrap() = Some(rt.clone());
+            // Cancel what this replaces, as the macOS branch below does: a token
+            // dropped from the cell uncancelled leaves its watcher running.
+            if let Some(old) = self
+                .reassert_token
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .replace(rt.clone())
+            {
+                old.cancel();
+            }
             // Weak: the watcher outlives nothing. A shutdown that never got to
             // `revert` should not be held open by a task waiting on a 30s tick.
             let me = Arc::downgrade(self);
@@ -259,6 +280,7 @@ impl DnsService {
             // Same merge the initial adopt does, so an operator's `dns-upstreams`
             // keeps its precedence instead of being overwritten by the capture.
             let dns_override = config::load().map(|c| c.dns_upstreams).unwrap_or_default();
+            let live = live.into_iter().map(IpAddr::V4).collect();
             let desired = config::resolve_upstreams(&dns_override, live);
 
             let mut answering = Vec::new();
@@ -663,7 +685,7 @@ mod tests {
 
         struct Backend {
             shared: Option<Ipv4Addr>,
-            fallbacks: Vec<Ipv4Addr>,
+            fallbacks: Vec<IpAddr>,
         }
         #[async_trait::async_trait]
         impl dns_config::DnsConfigurator for Backend {
@@ -679,22 +701,22 @@ mod tests {
             fn shared_resolver(&self) -> Option<Ipv4Addr> {
                 self.shared
             }
-            fn fallback_upstreams(&self) -> Vec<Ipv4Addr> {
+            fn fallback_upstreams(&self) -> Vec<IpAddr> {
                 self.fallbacks.clone()
             }
         }
         let theirs = Ipv4Addr::new(100, 100, 100, 100);
         let real = Ipv4Addr::new(192, 168, 1, 1);
         use dns_config::DnsConfigurator;
-        let defers = |shared, fallbacks: Vec<Ipv4Addr>| {
+        let defers = |shared, fallbacks: Vec<IpAddr>| {
             let b = Backend { shared, fallbacks };
             b.shared_resolver().is_some() && !b.fallback_upstreams().is_empty()
         };
 
-        assert!(defers(Some(theirs), vec![theirs]));
+        assert!(defers(Some(theirs), vec![IpAddr::V4(theirs)]));
         // No one to share with: ours is the only nameserver in the file, so
         // declining would take the host's DNS down.
-        assert!(!defers(None, vec![real]));
+        assert!(!defers(None, vec![IpAddr::V4(real)]));
         // Sharing, but nothing rendered behind us to fall through to.
         assert!(!defers(Some(theirs), vec![]));
     }

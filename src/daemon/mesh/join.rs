@@ -7,6 +7,7 @@
 //! `spawn_reconnect_loop` keeps a member's connection alive with backoff.
 
 use super::super::*;
+use tokio::sync::OwnedMutexGuard;
 
 /// Result of the initial join handshake against the coordinator.
 pub(crate) enum JoinResult {
@@ -123,6 +124,11 @@ pub(crate) struct JoinParams {
     /// Fresh join (send `JoinRequest` first) vs reconnect/restore (coordinator
     /// speaks first).
     pub(crate) initial: bool,
+    /// The peer's dial gate, held when this join dialed the connection itself.
+    /// Released once the connection is registered, so other joins to the same
+    /// peer reuse it instead of dialing their own, without waiting for this
+    /// join's roster dials.
+    pub(crate) dial_guard: Option<OwnedMutexGuard<()>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -164,6 +170,7 @@ pub(crate) async fn join_mesh_shared(
         auto_accept_firewall,
         auto_accept_files,
         initial,
+        dial_guard,
     } = params;
     let my_identity = identity.local_identity();
     let join_certificate_issuer = if initial
@@ -320,6 +327,7 @@ pub(crate) async fn join_mesh_shared(
         network_name,
     )
     .await;
+    drop(dial_guard);
     connect_to_roster_peers(
         ep,
         &members,

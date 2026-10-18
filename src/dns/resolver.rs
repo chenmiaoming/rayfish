@@ -115,8 +115,8 @@ impl Resolver {
     /// system capture found without having to re-detect the OS DNS backend.
     ///
     /// It exists for the IPv6-only client tunnel. The daemon forwards non-`.ray`
-    /// queries itself, and every upstream the desktop capture can produce is IPv4
-    /// (`DnsConfigurator::captured_upstreams`), while that tunnel carries IPv6
+    /// queries itself, and nearly every upstream the desktop capture produces is
+    /// IPv4 (`DnsConfigurator::captured_upstreams`), while that tunnel carries IPv6
     /// alone: left as they are, the exit node would see the traffic and none of
     /// the lookups that steered it. Pointing the forwarder at an IPv6 resolver
     /// puts the queries back inside the tunnel.
@@ -239,15 +239,23 @@ impl Resolver {
     }
 
     /// Answer a DNS query that arrived addressed to the magic IP via the TUN.
-    /// UDP only; TCP is dropped (no userspace TCP handler yet).
+    /// UDP only. TCP is refused with a reset: answering it would need a TCP
+    /// stack in the packet path, and a dropped SYN hangs the client for its
+    /// whole connect timeout.
     pub async fn handle_tun_query(
         &self,
         pkt: &[u8],
         info: &crate::firewall::PacketInfo,
         tun_tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
     ) {
+        if info.protocol == 6 {
+            if let Some(rst) = crate::reject::build_tcp_rst(pkt, info) {
+                let _ = tun_tx.send(rst).await;
+            }
+            return;
+        }
         if info.protocol != 17 {
-            return; // TCP/other: drop cleanly.
+            return; // other protocols: drop cleanly.
         }
         // UDP payload begins after the UDP header, which starts where the parser
         // found it (past IPv4 options or any IPv6 extension headers).
@@ -445,10 +453,13 @@ async fn probe_query(up: SocketAddr, query: &[u8]) -> bool {
 /// question times out, then the dotted fallback), but the whole set pays that
 /// once, not per entry. Order is preserved: callers treat the first as
 /// preferred.
-pub async fn live_upstreams(candidates: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
+pub async fn live_upstreams<A>(candidates: &[A]) -> Vec<A>
+where
+    A: Into<IpAddr> + Copy,
+{
     let probes = candidates
         .iter()
-        .map(|ip| async move { probe_upstream(SocketAddr::from((*ip, 53u16))).await });
+        .map(|ip| async move { probe_upstream(SocketAddr::from(((*ip).into(), 53u16))).await });
     let alive = futures::future::join_all(probes).await;
     candidates
         .iter()
@@ -694,8 +705,10 @@ mod tests {
             icmp_id: 0,
             transport_offset: 20,
         };
+        // An IPv4 segment cannot be reset from the v6-only resolver, so it gets
+        // nothing (an IPv6 SYN gets a reset, see `reject::build_tcp_rst`).
         r.handle_tun_query(&[0u8; 40], &info, &tx).await;
-        assert!(rx.try_recv().is_err(), "TCP must be dropped, no reply");
+        assert!(rx.try_recv().is_err(), "no reply to an IPv4 TCP segment");
     }
 
     #[tokio::test]
@@ -889,7 +902,7 @@ mod tests {
                 .await
                 .is_empty()
         );
-        assert!(live_upstreams(&[]).await.is_empty());
+        assert!(live_upstreams::<Ipv4Addr>(&[]).await.is_empty());
     }
 
     /// #111: with no upstream that answers, a forwarded query must come back

@@ -456,7 +456,7 @@ impl Daemon {
             mdns_enabled: self.mdns.enabled(),
             auto_update: self.auto_update,
             active: self.active.load(Ordering::SeqCst),
-            contact_id: Some(self.contact_public.to_string()),
+            identity: Some(self.registry.own_identity()),
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             networks: statuses,
             packets_rx: self.stats.packets_rx.get(),
@@ -1050,6 +1050,21 @@ const TS_LEN: usize = 27;
 /// each tick.
 const FOLLOW_POLL: Duration = Duration::from_millis(500);
 
+/// How long one log frame may take to reach the client. A client that stops
+/// reading would otherwise park its stream on a full socket for good.
+const LOG_SEND_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(30)
+};
+
+/// Send one frame of a log stream, giving up on a client that stopped reading.
+async fn send_log<S: Hangup>(framed: &mut ServedFramed<S>, message: IpcMessage) -> Result<()> {
+    tokio::time::timeout(LOG_SEND_TIMEOUT, ipc::send(framed, message))
+        .await
+        .context("timed out sending logs to a client that stopped reading")?
+}
+
 /// Serve app logs through the existing streaming IPC response for clients that
 /// are not the app's bundled CLI. Drop the child even when an idle client leaves.
 #[cfg(target_os = "macos")]
@@ -1063,7 +1078,7 @@ pub(crate) async fn stream_app_logs<S: Hangup>(
 
     let mut reader = match LogReader::start(since, follow) {
         Ok(reader) => reader,
-        Err(error) => return ipc::send(framed, ipc_err(format!("{error:#}"))).await,
+        Err(error) => return send_log(framed, ipc_err(format!("{error:#}"))).await,
     };
     let mut buffer = vec![0; LOG_CHUNK_BYTES];
     loop {
@@ -1084,7 +1099,7 @@ pub(crate) async fn stream_app_logs<S: Hangup>(
         let done = !matches!(message, IpcMessage::LogChunk { .. });
         tokio::select! {
             _ = token.cancelled() => return Ok(()),
-            result = ipc::send(framed, message) => result?,
+            result = send_log(framed, message) => result?,
         }
         if done {
             return Ok(());
@@ -1108,7 +1123,7 @@ pub(crate) async fn stream_logs<S: Hangup>(
     token: &CancellationToken,
 ) -> Result<()> {
     if !dir.is_dir() {
-        let _ = ipc::send(
+        let _ = send_log(
             framed,
             ipc_err(format!("no log directory at {}", dir.display())),
         )
@@ -1134,7 +1149,7 @@ pub(crate) async fn stream_logs<S: Hangup>(
     }
 
     if !follow {
-        return ipc::send(
+        return send_log(
             framed,
             IpcMessage::Ok {
                 message: "end of logs".to_string(),
@@ -1265,7 +1280,7 @@ async fn stream_file<S: Hangup>(
 /// Drain `buf` into `LogChunk` frames, none bigger than the frame cap allows.
 async fn send_chunks<S: Hangup>(framed: &mut ServedFramed<S>, buf: &mut Vec<u8>) -> Result<()> {
     for piece in buf.chunks(LOG_CHUNK_BYTES) {
-        ipc::send(
+        send_log(
             framed,
             IpcMessage::LogChunk {
                 data: piece.to_vec(),
@@ -1686,6 +1701,23 @@ mod log_stream_tests {
             .expect("follow outlived its client")
             .unwrap()
             .unwrap();
+    }
+
+    /// A client that asks for logs and then stops reading is dropped once a
+    /// frame stalls, rather than holding its stream slot for good.
+    #[tokio::test]
+    async fn a_client_that_stops_reading_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = line(Duration::from_secs(1), &"x".repeat(1000)).repeat(16 * 1024);
+        std::fs::write(today_log(dir.path()), &body).unwrap();
+
+        let (client, task) = serve(dir.path(), None, true).await;
+        let result = tokio::time::timeout(LOG_SEND_TIMEOUT * 5, task)
+            .await
+            .expect("the stream outlived the send timeout")
+            .unwrap();
+        assert!(result.is_err(), "a stalled send ends the stream");
+        drop(client);
     }
 
     #[tokio::test]

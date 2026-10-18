@@ -6,6 +6,7 @@
 //! - [`spawn_tun_writer`]: single task, writes incoming packets to the TUN device
 
 pub(crate) mod fq_codel;
+mod frag_verdicts;
 mod fragment;
 mod lazy_dial;
 #[cfg(test)]
@@ -16,6 +17,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -32,6 +34,7 @@ use crate::firewall::{self, Direction, SharedFirewall};
 use crate::membership::is_overlay_ip;
 use crate::peers::{DeviceUserMap, PeerRoute, PeerTable};
 use crate::stats::{DropReason, ForwardMetrics};
+use frag_verdicts::FragmentVerdicts;
 use lazy_dial::{LazyDialBuffers, MAX_IN_FLIGHT as LAZY_DIAL_MAX_IN_FLIGHT};
 #[cfg(test)]
 use lazy_dial::{
@@ -161,40 +164,61 @@ fn csum_replace2(check: u16, old: u16, new: u16) -> u16 {
     !(sum as u16)
 }
 
+/// What [`rewrite_ssh_port`] did with a packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SshRewrite {
+    /// Not an SSH NAT packet (or the NAT is off): forward it as it is.
+    Untouched,
+    Rewritten,
+    /// An SSH NAT packet too short to hold the TCP checksum. It must be
+    /// dropped: forwarded unrewritten, an inbound one would reach whatever
+    /// listens on the mesh port on the host itself, such as its own sshd.
+    Truncated,
+}
+
 /// Rewrite a TCP port in place for the SSH NAT, fixing the TCP checksum. When
 /// `inbound`, maps the configured mesh port to `listen_port`;
-/// otherwise maps source `listen_port` to the mesh port. Returns
-/// `true` if it rewrote. `info` is the already-parsed header, so the common case
-/// (no match) costs nothing.
-fn rewrite_ssh_port(pkt: &mut [u8], info: &firewall::PacketInfo, inbound: bool) -> bool {
-    let Some(nat) = ssh_nat() else { return false };
+/// otherwise maps source `listen_port` to the mesh port. `info` is the
+/// already-parsed header, so the common case (no match) costs nothing.
+fn rewrite_ssh_port(pkt: &mut [u8], info: &firewall::PacketInfo, inbound: bool) -> SshRewrite {
+    let Some(nat) = ssh_nat() else {
+        return SshRewrite::Untouched;
+    };
     if info.protocol != 6 {
-        return false; // TCP only
+        return SshRewrite::Untouched; // TCP only
     }
     // The parser already walked any IPv6 extension headers, so this is where
     // the TCP header really starts.
     let ihl = info.transport_offset;
-    if pkt.len() < ihl + 18 {
-        return false;
-    }
     let mesh_port = nat.mesh_port.load(Ordering::Relaxed);
     let (port_off, old, new) = if inbound {
         if !nat.is_ours(info.dst_ip) || info.dst_port != mesh_port {
-            return false;
+            return SshRewrite::Untouched;
         }
         (ihl + 2, mesh_port, nat.listen_port)
     } else {
         if !nat.is_ours(info.src_ip) || info.src_port != nat.listen_port {
-            return false;
+            return SshRewrite::Untouched;
         }
         (ihl, nat.listen_port, mesh_port)
     };
+    if pkt.len() < ihl + 18 {
+        return SshRewrite::Truncated;
+    }
     pkt[port_off..port_off + 2].copy_from_slice(&new.to_be_bytes());
     let ck_off = ihl + 16;
     let old_ck = u16::from_be_bytes([pkt[ck_off], pkt[ck_off + 1]]);
     let new_ck = csum_replace2(old_ck, old, new);
     pkt[ck_off..ck_off + 2].copy_from_slice(&new_ck.to_be_bytes());
-    true
+    SshRewrite::Rewritten
+}
+
+/// Whether a first IPv6 fragment is TCP to the mesh SSH port. Such fragments
+/// are refused, and with them the rest of their packet: SSH segments are sized
+/// to the path and never fragmented in practice, and a fragmented one is the
+/// shape an attempt to slip past the port rewrite would take.
+fn is_ssh_fragment(info: &firewall::PacketInfo, mesh_port: u16) -> bool {
+    info.protocol == 6 && info.dst_port == mesh_port
 }
 
 /// Decision returned by [`evaluate_inbound`] for a datagram received from a peer.
@@ -207,6 +231,10 @@ pub(crate) enum InboundDecision {
     DropFirewall(firewall::PacketInfo),
     /// Dropped: too large or not a parseable IP packet.
     DropMalformed,
+    /// Dropped: a later IPv6 fragment whose first fragment was not let through
+    /// (refused, or not seen yet). Counted as a firewall drop, never answered:
+    /// the first fragment already got any reject there was to send.
+    DropFragment,
     /// Dropped: the packet's source IP is not the sending peer's assigned mesh
     /// address. A peer may only source packets from its own mesh IP, so this
     /// blocks one peer from impersonating another's IP (ingress anti-spoofing).
@@ -229,11 +257,17 @@ struct InboundPeer<'a> {
 ///
 /// Non-IP / truncated / oversized packets are rejected (`DropMalformed`) rather
 /// than passed through: previously such packets bypassed the firewall entirely.
+///
+/// An IPv6 fragment is classified by its first fragment: that one meets every
+/// check a whole packet does, and the later ones of the same packet pass the
+/// firewall only if it did (see [`frag_verdicts`]). The address checks still
+/// run on every fragment.
 fn evaluate_inbound(
     packet: &[u8],
     firewall: &SharedFirewall,
     exit: &ExitContext,
     peer: InboundPeer<'_>,
+    fragments: &mut FragmentVerdicts,
 ) -> InboundDecision {
     let InboundPeer {
         identity: peer_id,
@@ -244,8 +278,12 @@ fn evaluate_inbound(
     if packet.len() > fragment::MAX_PACKET {
         return InboundDecision::DropMalformed;
     }
-    let Some(info) = firewall::parse_packet_info(packet) else {
-        return InboundDecision::DropMalformed;
+    let (info, ip_fragment) = match firewall::parse_packet_info(packet) {
+        Some(info) => (info, None),
+        None => match firewall::parse_ipv6_fragment(packet) {
+            Some(f) => (f.info, Some(f)),
+            None => return InboundDecision::DropMalformed,
+        },
     };
     // Ingress anti-spoofing: a peer may only inject packets sourced from its own
     // assigned mesh address. Anything else (e.g. one peer forging another's mesh
@@ -319,13 +357,29 @@ fn evaluate_inbound(
             InboundDecision::DropExit
         };
     }
-    if firewall
-        .evaluate_packet(Direction::In, &info, peer_id, shares_network)
-        .is_deny()
-    {
-        return InboundDecision::DropFirewall(info);
+    match ip_fragment {
+        // A later fragment has no ports to judge; its first fragment decided.
+        Some(f) if !f.first => {
+            if fragments.admits(&f.key, tokio::time::Instant::now()) {
+                InboundDecision::Accept(info)
+            } else {
+                InboundDecision::DropFragment
+            }
+        }
+        Some(f) if is_ssh_fragment(&f.info, ssh_port()) => InboundDecision::DropFragment,
+        whole_or_first => {
+            if firewall
+                .evaluate_packet(Direction::In, &info, peer_id, shares_network)
+                .is_deny()
+            {
+                return InboundDecision::DropFirewall(info);
+            }
+            if let Some(f) = whole_or_first {
+                fragments.allow(f.key, tokio::time::Instant::now());
+            }
+            InboundDecision::Accept(info)
+        }
     }
-    InboundDecision::Accept(info)
 }
 
 /// Application close code a peer sends when it deliberately leaves a network
@@ -520,6 +574,7 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
             stats: &stats,
             tun_tx: &tun_tx,
         };
+        let mut ip_fragments = FragmentVerdicts::default();
         loop {
             let pkt = tokio::select! {
                 _ = token.cancelled() => return Ok(()),
@@ -547,11 +602,20 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
                 continue;
             }
             tracing::trace!(len = n, first_byte = pkt[0], "TUN read");
+            // Router solicitations and MLD reports from the kernel's own IPv6
+            // stack. Not traffic, and not a drop worth counting.
+            if firewall::is_link_scoped_v6(&pkt) {
+                continue;
+            }
             let Some(info) = firewall::parse_packet_info(&pkt) else {
-                // Not IP, truncated, a fragment, or IPv6 with an extension-header
-                // chain the parser refuses to walk. Counted rather than merely
-                // logged: a UDP send past the TUN MTU arrives here as kernel-made
-                // fragments, and a silent drop reads as the link going quiet.
+                // A UDP send past the TUN MTU arrives as kernel-made fragments.
+                if let Some(f) = firewall::parse_ipv6_fragment(&pkt) {
+                    send_fragment(&ctx, &exit_client, &mut ip_fragments, f, pkt).await;
+                    continue;
+                }
+                // Not IP, truncated, or IPv6 with an extension-header chain the
+                // parser refuses to walk. Counted rather than merely logged: a
+                // silent drop reads as the link going quiet.
                 tracing::debug!(len = n, "outbound packet not classifiable, dropping");
                 stats.record_drop(DropReason::Malformed);
                 continue;
@@ -705,6 +769,41 @@ async fn flush_or_drop(
     }
 }
 
+/// Sends one outbound IPv6 fragment. The first is judged like a whole packet
+/// and decides for the rest of its packet (see [`frag_verdicts`]). Fragments
+/// need a live route: they are not buffered behind an on-demand dial, since
+/// the first packets of a flow are not fragments in practice.
+async fn send_fragment(
+    ctx: &SendCtx<'_>,
+    exit: &ExitClient,
+    verdicts: &mut FragmentVerdicts,
+    fragment: firewall::Ipv6Fragment,
+    pkt: Bytes,
+) {
+    let Some(route) = resolve_send_route(ctx.peers, exit, fragment.info.dst_ip) else {
+        ctx.stats.record_drop(DropReason::NoPeer);
+        return;
+    };
+    let now = tokio::time::Instant::now();
+    if fragment.first {
+        if send_routed(ctx, &route, &fragment.info, pkt, Admission::Firewall).await {
+            verdicts.allow(fragment.key, now);
+        }
+    } else if verdicts.admits(&fragment.key, now) {
+        send_routed(ctx, &route, &fragment.info, pkt, Admission::Admitted).await;
+    } else {
+        ctx.stats.record_drop(DropReason::Firewall);
+    }
+}
+
+/// Whether an outbound packet still has to pass the firewall.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Firewall,
+    /// A later IPv6 fragment whose first fragment already passed.
+    Admitted,
+}
+
 /// Forwarding state for outbound admission, membership checks, counters, and
 /// injecting reject or PMTU replies into the TUN.
 pub(crate) struct SendCtx<'a> {
@@ -723,16 +822,18 @@ async fn prepare_datagrams(
     route: &PeerRoute,
     info: &firewall::PacketInfo,
     pkt: Bytes,
+    admission: Admission,
 ) -> Option<fragment::Encoded> {
     let n = pkt.len();
     // Reachability is "we share a network", enforced by connection existence. The
     // per-host firewall is the fine-grained gate.
-    if ctx
-        .firewall
-        .evaluate_packet(Direction::Out, info, &route.endpoint_id, |network| {
-            ctx.peers.shares_network_v6(&route.ipv6, network)
-        })
-        .is_deny()
+    if admission == Admission::Firewall
+        && ctx
+            .firewall
+            .evaluate_packet(Direction::Out, info, &route.endpoint_id, |network| {
+                ctx.peers.shares_network_v6(&route.ipv6, network)
+            })
+            .is_deny()
     {
         tracing::debug!(dst = %info.dst_ip, port = info.dst_port, "firewall denied outbound");
         ctx.stats.record_drop(DropReason::Firewall);
@@ -780,7 +881,10 @@ async fn prepare_datagrams(
     // no-ops otherwise, so ordinary traffic is untouched.
     let pkt = if ssh_nat().is_some_and(|s| info.protocol == 6 && info.src_port == s.listen_port) {
         let mut v = pkt.to_vec();
-        rewrite_ssh_port(&mut v, info, false);
+        if rewrite_ssh_port(&mut v, info, false) == SshRewrite::Truncated {
+            ctx.stats.record_drop(DropReason::Malformed);
+            return None;
+        }
         Bytes::from(v)
     } else {
         pkt
@@ -810,9 +914,21 @@ pub(crate) async fn send_over_route(
     info: &firewall::PacketInfo,
     pkt: Bytes,
 ) {
+    send_routed(ctx, route, info, pkt, Admission::Firewall).await;
+}
+
+/// [`send_over_route`] with the admission spelled out. True when the packet
+/// was handed on (sent or queued), false when it was refused or did not fit.
+async fn send_routed(
+    ctx: &SendCtx<'_>,
+    route: &PeerRoute,
+    info: &firewall::PacketInfo,
+    pkt: Bytes,
+    admission: Admission,
+) -> bool {
     let n = pkt.len();
-    let Some(encoded) = prepare_datagrams(ctx, route, info, pkt).await else {
-        return;
+    let Some(encoded) = prepare_datagrams(ctx, route, info, pkt, admission).await else {
+        return false;
     };
     if let Some(slot) = &route.scheduler {
         let sender = slot.get_or_init(|| fq_codel::Sender::spawn(route, Arc::clone(ctx.stats)));
@@ -821,6 +937,7 @@ pub(crate) async fn send_over_route(
         let datagrams = encoded.datagrams();
         send_batch(ctx, route, datagrams, &[(datagrams.len(), n)]);
     }
+    true
 }
 
 /// Hands an ordered run of datagrams to noq. `packets` records the end index and
@@ -904,6 +1021,7 @@ pub fn spawn_peer_reader(
         // empty `Bytes` behind, so the batch holds no packet memory between reads.
         let mut batch = vec![Bytes::new(); RECV_BATCH];
         let mut reassembly = fragment::Reassembler::default();
+        let mut ip_fragments = FragmentVerdicts::default();
         loop {
             reassembly.set_autotune(
                 reassembly_autotune.load(std::sync::atomic::Ordering::Relaxed),
@@ -979,7 +1097,7 @@ pub fn spawn_peer_reader(
                     network: &network,
                     shares_network: &|name| peers.shares_network_v6(&peer_ipv6, name),
                 };
-                match evaluate_inbound(&datagram, &firewall, &exit, peer) {
+                match evaluate_inbound(&datagram, &firewall, &exit, peer, &mut ip_fragments) {
                     InboundDecision::Accept(info) => {
                         // The TUN can be replaced with a smaller one while this
                         // connection stays open. Guard in-flight packets too,
@@ -1007,7 +1125,10 @@ pub fn spawn_peer_reader(
                                     && info.dst_port == s.mesh_port.load(Ordering::Relaxed) =>
                             {
                                 let mut v = datagram.to_vec();
-                                rewrite_ssh_port(&mut v, &info, true);
+                                if rewrite_ssh_port(&mut v, &info, true) == SshRewrite::Truncated {
+                                    stats.record_drop(DropReason::Malformed);
+                                    continue;
+                                }
                                 Bytes::from(v)
                             }
                             _ => datagram,
@@ -1036,6 +1157,7 @@ pub fn spawn_peer_reader(
                         }
                     }
                     InboundDecision::DropMalformed => stats.record_drop(DropReason::Malformed),
+                    InboundDecision::DropFragment => stats.record_drop(DropReason::Firewall),
                     InboundDecision::DropSpoof => {
                         stats.record_drop(DropReason::Spoof);
                         tracing::debug!(
@@ -1068,6 +1190,41 @@ fn send_peer_reply(conn: &Connection, handle: u16, reply: &[u8]) {
     }
 }
 
+/// Minimum gap between two TUN write failure warnings.
+const WRITE_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Lets one log line through per `interval` and counts the rest, so a failure
+/// that repeats at packet rate still shows up, once, with how often it happened.
+struct LogBudget {
+    interval: Duration,
+    last: Option<Instant>,
+    suppressed: u64,
+}
+
+impl LogBudget {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: None,
+            suppressed: 0,
+        }
+    }
+
+    /// `Some(n)` when a line may be logged now, `n` being how many were
+    /// swallowed since the last one.
+    fn allow(&mut self, now: Instant) -> Option<u64> {
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < self.interval)
+        {
+            self.suppressed += 1;
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
 /// Spawns a task that consumes packets from `tun_rx` and writes them to the TUN
 /// device. Single instance per session, serializes writes without a Mutex.
 /// `active` is the data-plane gate: while it is false (standby, after `ray
@@ -1090,6 +1247,7 @@ pub fn spawn_tun_writer<W: crate::tun::TunWrite>(
             .tun_udp_gso_enabled
             .set(i64::from(tun.udp_gso_enabled()));
         let mut batch = Vec::with_capacity(batch_size);
+        let mut write_error_log = LogBudget::new(WRITE_ERROR_LOG_INTERVAL);
         while let Some(packet) = tun_rx.recv().await {
             batch.clear();
             for packet in std::iter::once(packet)
@@ -1117,7 +1275,11 @@ pub fn spawn_tun_writer<W: crate::tun::TunWrite>(
                 && let Err(e) = tun.write_packets(&batch).await
             {
                 stats.tun_write_errors.inc();
-                tracing::warn!(error = %e, packets = batch.len(), "TUN batch write failed");
+                // A device that has gone away fails every batch; one line per
+                // batch would flood the journal at packet rate.
+                if let Some(suppressed) = write_error_log.allow(Instant::now()) {
+                    tracing::warn!(error = %e, packets = batch.len(), suppressed, "TUN batch write failed");
+                }
             } else if !batch.is_empty() {
                 stats.tun_write_batches.inc();
                 stats.tun_write_packets.inc_by(batch.len() as u64);
@@ -1134,6 +1296,7 @@ mod tests {
     use crate::firewall::Action;
     use iroh::SecretKey;
     use smol_str::SmolStr;
+    use std::sync::Mutex;
 
     #[tokio::test]
     async fn self_packets_return_to_tun_without_ssh_translation_or_a_peer() {
@@ -1207,6 +1370,7 @@ mod tests {
                 network,
                 shares_network: &|name| name == network,
             },
+            &mut FragmentVerdicts::default(),
         )
     }
 
@@ -1231,6 +1395,18 @@ mod tests {
         assert!(firewall::is_icmp_echo_reply(info.protocol, info.icmp_type));
         info.icmp_type = 8;
         assert!(!firewall::is_icmp_echo_reply(info.protocol, info.icmp_type));
+    }
+
+    #[test]
+    fn write_failures_log_once_per_interval_with_a_count() {
+        let start = Instant::now();
+        let mut budget = LogBudget::new(Duration::from_secs(10));
+        assert_eq!(budget.allow(start), Some(0));
+        for i in 1..=5 {
+            assert_eq!(budget.allow(start + Duration::from_secs(i)), None);
+        }
+        assert_eq!(budget.allow(start + Duration::from_secs(10)), Some(5));
+        assert_eq!(budget.allow(start + Duration::from_secs(11)), None);
     }
 
     fn test_peer(seed: u8) -> EndpointId {
@@ -1472,7 +1648,7 @@ mod tests {
         // ends. The transport network still exists at both ends.
         sender_peers.remove_peer_from_network(&b_ip, "z-allowed");
         assert!(
-            prepare_datagrams(&ctx, &route, &info, packet.clone())
+            prepare_datagrams(&ctx, &route, &info, packet.clone(), Admission::Firewall)
                 .await
                 .is_none()
         );
@@ -1966,8 +2142,12 @@ mod tests {
         !(sum as u16)
     }
 
+    /// Held by tests that change or depend on the process-global SSH NAT port.
+    static SSH_NAT_PORT_TEST: Mutex<()> = Mutex::new(());
+
     #[test]
     fn ssh_nat_rewrites_port_and_keeps_checksum_valid() {
+        let _port = SSH_NAT_PORT_TEST.lock().unwrap_or_else(|e| e.into_inner());
         // `SSH_NAT` is a process-global `OnceLock`, so another test in this binary
         // (e.g. the headless daemon build) may seed it first, making our
         // `init_ssh_nat` a no-op. Read the addresses the NAT actually holds and
@@ -1995,7 +2175,10 @@ mod tests {
         pkt[56..58].copy_from_slice(&ck.to_be_bytes());
 
         let info = firewall::parse_packet_info(&pkt).unwrap();
-        assert!(rewrite_ssh_port(&mut pkt, &info, true));
+        assert_eq!(
+            rewrite_ssh_port(&mut pkt, &info, true),
+            SshRewrite::Rewritten
+        );
         let info2 = firewall::parse_packet_info(&pkt).unwrap();
         assert_eq!(
             info2.dst_port, listen_port,
@@ -2016,7 +2199,10 @@ mod tests {
         let reply_ck = tcp_csum_v6(&pkt);
         pkt[56..58].copy_from_slice(&reply_ck.to_be_bytes());
         let reply = firewall::parse_packet_info(&pkt).unwrap();
-        assert!(rewrite_ssh_port(&mut pkt, &reply, false));
+        assert_eq!(
+            rewrite_ssh_port(&mut pkt, &reply, false),
+            SshRewrite::Rewritten
+        );
         assert_eq!(firewall::parse_packet_info(&pkt).unwrap().src_port, 2222);
         assert_eq!(u16::from_be_bytes([pkt[56], pkt[57]]), tcp_csum_v6(&pkt));
 
@@ -2043,7 +2229,10 @@ mod tests {
 
         let info = firewall::parse_packet_info(&ext).unwrap();
         assert_eq!(info.transport_offset, 48);
-        assert!(rewrite_ssh_port(&mut ext, &info, true));
+        assert_eq!(
+            rewrite_ssh_port(&mut ext, &info, true),
+            SshRewrite::Rewritten
+        );
         assert_eq!(ext[40..48], hop_by_hop, "extension header untouched");
         assert_eq!(
             firewall::parse_packet_info(&ext).unwrap().dst_port,
@@ -2055,11 +2244,34 @@ mod tests {
             "checksum stays valid behind an extension header"
         );
 
+        // A packet to the mesh port too short to hold the checksum cannot be
+        // rewritten, and says so, so the caller drops it rather than handing
+        // it to the host on the mesh port.
+        let mut short = pkt[..40 + 16].to_vec();
+        short[8..24].copy_from_slice(&Ipv6Addr::new(0x0200, 0, 0, 0, 0, 0, 0, 9).octets());
+        short[24..40].copy_from_slice(&our_v6.octets());
+        short[42..44].copy_from_slice(&2222u16.to_be_bytes());
+        let short_info = firewall::parse_packet_info(&short).unwrap();
+        assert_eq!(
+            rewrite_ssh_port(&mut short, &short_info, true),
+            SshRewrite::Truncated
+        );
+        // Another port is left alone, however short.
+        short[42..44].copy_from_slice(&80u16.to_be_bytes());
+        let short_info = firewall::parse_packet_info(&short).unwrap();
+        assert_eq!(
+            rewrite_ssh_port(&mut short, &short_info, true),
+            SshRewrite::Untouched
+        );
+
         // Inactive -> no rewrite.
         set_ssh_nat_active(false);
         let mut pkt2 = pkt.clone();
         let info3 = firewall::parse_packet_info(&pkt2).unwrap();
-        assert!(!rewrite_ssh_port(&mut pkt2, &info3, true));
+        assert_eq!(
+            rewrite_ssh_port(&mut pkt2, &info3, true),
+            SshRewrite::Untouched
+        );
         set_ssh_nat_port(SSH_PORT);
     }
 
@@ -2559,6 +2771,134 @@ mod tests {
         assert!(!is_magic_dns(&mk("200::9".parse().unwrap(), 53)));
         // The old v4 magic address is nobody's resolver now.
         assert!(!is_magic_dns(&mk("100.100.100.53".parse().unwrap(), 53)));
+    }
+
+    /// A UDP fragment from `src` to [`MY_V6`]: the first (`offset` 0) carries
+    /// the UDP header for `dst_port`, a later one only payload.
+    fn udp_fragment(src: Ipv6Addr, dst_port: u16, id: u32, offset: u16) -> Vec<u8> {
+        let mut pkt = vec![0u8; 64];
+        pkt[0] = 0x60;
+        pkt[6] = 44;
+        pkt[8..24].copy_from_slice(&src.octets());
+        pkt[24..40].copy_from_slice(&MY_V6.octets());
+        pkt[40] = 17;
+        pkt[42..44].copy_from_slice(&((offset << 3) | 1).to_be_bytes());
+        pkt[44..48].copy_from_slice(&id.to_be_bytes());
+        if offset == 0 {
+            pkt[48..50].copy_from_slice(&5353u16.to_be_bytes());
+            pkt[50..52].copy_from_slice(&dst_port.to_be_bytes());
+        } else {
+            // Payload that would read as an open port if taken for a header.
+            pkt[48..52].copy_from_slice(&[0x11, 0x94, 0x11, 0x94]);
+        }
+        pkt
+    }
+
+    /// A UDP send past the MTU arrives as fragments. The first meets the
+    /// firewall; the rest follow its verdict and never meet a rule on their own.
+    #[test]
+    fn inbound_fragments_follow_their_first_fragments_verdict() {
+        let peer = iroh::SecretKey::generate().public();
+        let fw = inbound_fw(
+            Action::Deny,
+            vec![firewall::FirewallRule {
+                direction: Direction::In,
+                action: Action::Allow,
+                protocol: firewall::Protocol::Udp,
+                port: Some(firewall::PortRange {
+                    start: 4500,
+                    end: 4500,
+                }),
+                peer: firewall::PeerFilter::Any,
+                network: None,
+                origin: firewall::RuleOrigin::Local,
+            }],
+        );
+        let mut verdicts = FragmentVerdicts::default();
+        let mut eval = |pkt: &[u8]| {
+            super::evaluate_inbound(
+                pkt,
+                &fw,
+                &no_exit(),
+                InboundPeer {
+                    identity: &peer,
+                    ipv6: TEST_V6,
+                    network: "test-net",
+                    shares_network: &|name| name == "test-net",
+                },
+                &mut verdicts,
+            )
+        };
+        // Before its first fragment, a later one has nothing to follow.
+        assert!(matches!(
+            eval(&udp_fragment(TEST_V6, 0, 1, 185)),
+            InboundDecision::DropFragment
+        ));
+        assert!(matches!(
+            eval(&udp_fragment(TEST_V6, 4500, 1, 0)),
+            InboundDecision::Accept(_)
+        ));
+        assert!(matches!(
+            eval(&udp_fragment(TEST_V6, 0, 1, 185)),
+            InboundDecision::Accept(_)
+        ));
+        // A refused first fragment refuses the rest of its packet.
+        assert!(matches!(
+            eval(&udp_fragment(TEST_V6, 9999, 2, 0)),
+            InboundDecision::DropFirewall(_)
+        ));
+        assert!(matches!(
+            eval(&udp_fragment(TEST_V6, 0, 2, 185)),
+            InboundDecision::DropFragment
+        ));
+        // The source check runs on every fragment, not just the first.
+        let other = Ipv6Addr::new(0x0200, 0, 0, 0, 0, 0, 0, 9);
+        assert!(matches!(
+            eval(&udp_fragment(other, 0, 1, 185)),
+            InboundDecision::DropSpoof
+        ));
+    }
+
+    /// TCP fragments to the mesh SSH port are refused before the firewall, so
+    /// their later fragments find no verdict to follow either.
+    #[test]
+    fn ssh_port_fragments_are_refused() {
+        let mut first = udp_fragment(TEST_V6, 2222, 7, 0);
+        first[40] = 6;
+        first.resize(48 + 20, 0);
+        first[48 + 12] = 5 << 4;
+        let f = firewall::parse_ipv6_fragment(&first).expect("a first fragment");
+        assert!(is_ssh_fragment(&f.info, 2222));
+        assert!(!is_ssh_fragment(&f.info, 22));
+        let udp = firewall::parse_ipv6_fragment(&udp_fragment(TEST_V6, 2222, 7, 0))
+            .expect("a first fragment");
+        assert!(!is_ssh_fragment(&udp.info, 2222), "UDP is not SSH");
+
+        // Through the inbound path, with the port the NAT holds right now.
+        let _port = SSH_NAT_PORT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let peer = iroh::SecretKey::generate().public();
+        let fw = inbound_fw(Action::Allow, vec![]);
+        let mut verdicts = FragmentVerdicts::default();
+        let mut eval = |pkt: &[u8]| {
+            super::evaluate_inbound(
+                pkt,
+                &fw,
+                &no_exit(),
+                InboundPeer {
+                    identity: &peer,
+                    ipv6: TEST_V6,
+                    network: "test-net",
+                    shares_network: &|name| name == "test-net",
+                },
+                &mut verdicts,
+            )
+        };
+        let mut to_ssh = first.clone();
+        to_ssh[50..52].copy_from_slice(&ssh_port().to_be_bytes());
+        assert!(matches!(eval(&to_ssh), InboundDecision::DropFragment));
+        let mut later = udp_fragment(TEST_V6, 0, 7, 185);
+        later[40] = 6;
+        assert!(matches!(eval(&later), InboundDecision::DropFragment));
     }
 
     #[test]
