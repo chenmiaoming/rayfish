@@ -20,10 +20,13 @@ macOS releases support Apple Silicon (arm64) and Intel (x86_64). Users can choos
 - The standalone `ray-macos-aarch64` or `ray-macos-x86_64` binary with the CLI
   and launchd daemon, including `ray gui` and `ray set-operator`.
 
-Versioned releases build both. DMGs can also be built manually. The **macOS app
-release** workflow builds each DMG with Xcode 26.6. The app also bundles the Rust `ray` CLI, using the
+Versioned releases build both. DMGs can also be built manually; nightly releases
+build standalone binaries for both architectures. The **macOS app release** workflow
+builds each DMG with Xcode 26.6. The app also bundles the Rust `ray` CLI, using the
 repository's Cargo version.
 The DMG uses Rayfish's logo, fonts, and colors, with a drag-to-Applications layout.
+Nightly releases include `ray-macos-aarch64` and `ray-macos-x86_64`, rebuilt from
+each push to master.
 
 Configure these repository secrets before running it:
 

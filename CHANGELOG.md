@@ -39,8 +39,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pushes to master no longer publish a rolling `nightly` pre-release. Builds
-  ship only with versioned releases.
+- The `nightly` pre-release no longer includes the Android APK. Apps ship only
+  with versioned releases; `ray update --nightly` still updates the CLI and
+  daemon.
 - Linux: the file-transfer and membership store moved from
   `/etc/rayfish/blobs` to `/var/lib/rayfish/blobs`. An existing store is moved
   on first start.
