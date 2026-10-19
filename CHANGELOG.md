@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-10-19
+
 ### Added
 
 - iOS: crash reporting, with an opt-out toggle and a Send diagnostics button in
@@ -2909,7 +2911,8 @@ First public release.
 - **Optional transports / export**: `--features tor` (Tor transport) and
   `--features otel` (OTLP span export).
 
-[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.9...HEAD
+[Unreleased]: https://github.com/rayfish/rayfish/compare/v0.5.10...HEAD
+[0.5.10]: https://github.com/rayfish/rayfish/compare/v0.5.9...v0.5.10
 [0.5.9]: https://github.com/rayfish/rayfish/compare/v0.5.8...v0.5.9
 [0.5.8]: https://github.com/rayfish/rayfish/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/rayfish/rayfish/compare/v0.5.6...v0.5.7
