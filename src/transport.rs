@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use anyhow::{Context, Result};
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
     address_lookup::{PkarrPublisher, PkarrResolver},
     dns::{DnsResolver, NameserverConfig},
     endpoint::Connection,
@@ -541,6 +541,14 @@ pub fn build_relay_mode(o: &ServerOverride) -> Result<Option<RelayMode>> {
         parsed.extend(RelayMode::Default.relay_map().urls::<Vec<RelayUrl>>());
     }
     Ok(Some(RelayMode::custom(parsed)))
+}
+
+/// The relays an endpoint built from `o` starts with: the override, or the N0
+/// preset's default when unset. Phones drop these while idle and restore them
+/// on wake.
+pub fn configured_relay_map(o: &ServerOverride) -> Result<RelayMap> {
+    let mode = build_relay_mode(o)?.unwrap_or_else(iroh::endpoint::default_relay_mode);
+    Ok(mode.relay_map())
 }
 
 /// Apply a discovery-DNS override to the endpoint builder. Each configured URL

@@ -229,14 +229,15 @@ windows-sys = { version = "0.61.2", features = [
 # https://github.com/n0-computer/iroh-address-lookups/pull/15
 # Drop this patch when an upstream release includes it.
 iroh-mdns-address-lookup = { git = "https://github.com/n0-computer/iroh-address-lookups", rev = "6f103e7a92ddbd2007383527ab5024c983e3c1c6" }
-# iroh 1.3 with the address filter and socket configuration hook:
-# https://github.com/n0-computer/iroh/pull/4397
-# https://github.com/n0-computer/iroh/pull/4406
+# iroh 1.3 from the fork's `rayfish` branch, which merges these PR branches:
+# https://github.com/n0-computer/iroh/pull/4397 (direct address filter)
+# https://github.com/n0-computer/iroh/pull/4406 (socket configuration hook)
+# fix/release-removed-home-relay-upstream (idle phones drop their relay)
 # iroh-base/-dns/-relay are patched too so the fork and registry copies don't clash.
-iroh = { git = "https://github.com/rayfish/iroh", rev = "1953e9a54db5c5da44afd4338d50e940ce3e9d47" }
-iroh-base = { git = "https://github.com/rayfish/iroh", rev = "1953e9a54db5c5da44afd4338d50e940ce3e9d47" }
-iroh-dns = { git = "https://github.com/rayfish/iroh", rev = "1953e9a54db5c5da44afd4338d50e940ce3e9d47" }
-iroh-relay = { git = "https://github.com/rayfish/iroh", rev = "1953e9a54db5c5da44afd4338d50e940ce3e9d47" }
+iroh = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
+iroh-base = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
+iroh-dns = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
+iroh-relay = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
 # netwatch's socket configuration hook is merged upstream but not yet released.
 # https://github.com/n0-computer/net-tools/pull/182
 netwatch = { git = "https://github.com/n0-computer/net-tools", rev = "d73b994abce8f683d7d6dcc163eee5eaefb952f5" }

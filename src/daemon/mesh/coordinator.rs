@@ -48,7 +48,7 @@ impl NetworkRegistry {
     }
 
     async fn handle_disconnect(self: Arc<Self>, ev: forward::DisconnectEvent) {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         if self.transport.is_suspended() {
             // Android's idle suspension deliberately closes links. Keep the
             // roster/route state intact so the next TUN packet can wake and

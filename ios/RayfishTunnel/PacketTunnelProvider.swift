@@ -12,6 +12,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var watch: FileWatch?
     private var pathMonitor: NWPathMonitor?
     private var lastPath: String?
+    private var sleptAt: Date?
     private let notifier = OfferNotifier()
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
@@ -98,13 +99,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {
+        queue.async { [self] in sleptAt = Date() }
         completionHandler()
     }
 
+    /// A sleeping phone wakes every few seconds for any incoming packet, so a
+    /// rebind on each wake kept the radio busy all night. Only a long sleep can
+    /// leave sockets stale; interface changes come from the path monitor.
     override func wake() {
-        // Sockets may have gone stale while the device slept.
-        queue.async { [self] in host?.node.networkChanged() }
+        queue.async { [self] in
+            guard let sleptAt, Date().timeIntervalSince(sleptAt) >= Self.staleSleep else { return }
+            host?.node.networkChanged()
+        }
     }
+
+    private static let staleSleep: TimeInterval = 10 * 60
 
     private func watchFiles(_ host: NodeHost) {
         watch = try? host.node.watchFiles(listener: FileListener { [weak self, weak host] in

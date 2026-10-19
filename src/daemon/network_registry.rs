@@ -418,7 +418,7 @@ impl NetworkRegistry {
 
     /// Resume mesh activity without touching the TUN/DNS plane. The relay stays
     /// connected in idle mode so file offers can still arrive.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pub(crate) async fn wake_transport(&self) {
         // Avoid an atomic read-modify-write for every packet while mesh links
         // are already active.
@@ -427,26 +427,30 @@ impl NetworkRegistry {
         }
         if self.transport.mark_awake() {
             tracing::info!("resuming idle mesh links");
+            self.transport.sync_relays().await;
             self.transport.endpoint.network_change().await;
             self.poll_nudge.notify_waiters();
             tracing::info!("mesh links resumed after idle");
         }
     }
 
-    /// Close mesh connections while keeping the relay, endpoint, TUN and DNS
-    /// alive so file offers can still arrive.
+    /// Go outgoing-only: close mesh connections and drop the relay, keeping
+    /// the endpoint, TUN and DNS alive. Every unsolicited packet wakes a
+    /// sleeping phone, and the relay alone pings every 15-20 seconds, so an
+    /// idle phone is unreachable until it sends something itself.
     /// Disconnect handling sees the suspended flag and must not start retries.
-    #[cfg(target_os = "android")]
-    pub(crate) fn suspend_mesh_links(&self) {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub(crate) async fn suspend_mesh_links(&self) {
         if !self.transport.mark_suspended() {
             return;
         }
         tracing::info!("suspending idle mesh links");
         for (ip, conn) in self.peers.all_connections() {
-            conn.close(VarInt::from_u32(forward::IDLE_CODE), b"android idle");
+            conn.close(VarInt::from_u32(forward::IDLE_CODE), b"idle");
             self.peers.remove(&ip);
         }
-        tracing::info!("mesh links suspended after idle timeout");
+        self.transport.sync_relays().await;
+        tracing::info!("mesh links and relay suspended after idle timeout");
     }
 
     /// The raw on-demand dial mechanism: connect to `target` across every shared
@@ -455,7 +459,7 @@ impl NetworkRegistry {
     /// established (the caller then flushes any buffered packets). The forwarding
     /// loop owns the buffering/dedup and calls this from a spawned task.
     pub(crate) async fn dial_target(self: &Arc<Self>, target: &peers::RouteTarget) -> bool {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         self.wake_transport().await;
         let targets: Vec<DialTarget> = target
             .networks

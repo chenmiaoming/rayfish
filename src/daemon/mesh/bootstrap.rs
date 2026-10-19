@@ -506,7 +506,9 @@ async fn build_daemon_inner(
     // Stays empty when mDNS is off, so `ray mdns scan` reports nothing rather
     // than stale sightings from a previous run.
     let lan_peers = Arc::new(LanPeers::new());
-    let mdns = MdnsDiscovery::new(&ep, Arc::clone(&lan_peers))?;
+    // Set while a phone is idle and outgoing-only; mDNS skips its windows then.
+    let suspended = Arc::new(AtomicBool::new(false));
+    let mdns = MdnsDiscovery::new(&ep, Arc::clone(&lan_peers), Arc::clone(&suspended))?;
     if app_config.mdns_enabled {
         if let Err(error) = mdns.start().await {
             tracing::warn!(%error, "failed to start mDNS discovery");
@@ -529,6 +531,10 @@ async fn build_daemon_inner(
             lan_peers,
             warm_lookup,
             pkarr_relay_url,
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            suspended,
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            relay_map: transport::configured_relay_map(&app_config.relay)?,
         },
     ));
     // The per-peer connection driver is built once here and shared by the

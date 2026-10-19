@@ -271,7 +271,7 @@ pub(crate) use network_registry::{
     DialTarget, NameOwner, NetworkRegistry, finish_interrupted_rename, missing_networks,
 };
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod idle_transport;
 
 // Domain satellites with their own owned state (and ALPN accept arms), held by
@@ -786,7 +786,7 @@ struct TunTasks {
     writer: JoinHandle<()>,
     /// The `run_mesh` reader loop task.
     mesh: JoinHandle<()>,
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     idle_transport: JoinHandle<()>,
 }
 
@@ -796,7 +796,7 @@ impl TunTasks {
         self.cancel.cancel();
         self.writer.abort();
         self.mesh.abort();
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         self.idle_transport.abort();
     }
 }
@@ -1099,6 +1099,13 @@ impl Daemon {
     /// forward the endpoint sits on dead sockets until something else rebuilds
     /// them. iroh rebinds and re-probes its paths in response.
     pub async fn network_changed(&self) {
+        // An idle phone is outgoing-only. Waking the transport rebinds anyway,
+        // so a roam while idle costs nothing until the phone sends something.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if self.transport.is_suspended() {
+            tracing::debug!("host reported a network change while idle; deferring rebind");
+            return;
+        }
         tracing::info!("host reported a network change; rebinding endpoint");
         self.transport.endpoint.network_change().await;
         // Re-resolve every network's signed record too. Anything a coordinator
@@ -1197,7 +1204,7 @@ impl Daemon {
             cancel,
             writer: writer_handle,
             mesh: mesh_handle,
-            #[cfg(target_os = "android")]
+            #[cfg(any(target_os = "android", target_os = "ios"))]
             idle_transport: idle_transport::spawn(
                 Arc::clone(&self.registry),
                 self.shutdown_token.child_token(),
