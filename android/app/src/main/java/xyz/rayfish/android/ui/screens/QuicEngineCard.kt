@@ -34,6 +34,7 @@ import xyz.rayfish.android.ui.components.SectionCard
 import xyz.rayfish.android.ui.components.SectionLabel
 import xyz.rayfish.android.ui.theme.Chakra
 import xyz.rayfish.android.ui.theme.Rf
+import xyz.rayfish.android.ui.userMessage
 
 @Composable
 fun QuicEngineCard(onToast: (String) -> Unit, onChanged: () -> Unit) {
@@ -46,7 +47,7 @@ fun QuicEngineCard(onToast: (String) -> Unit, onChanged: () -> Unit) {
         try {
             engine = withContext(Dispatchers.IO) { NodeHolder.get(context).quicEngine() }
         } catch (t: Throwable) {
-            onToast(context.getString(R.string.error_failed, t.message.orEmpty()))
+            onToast(context.getString(R.string.error_failed, t.userMessage))
         }
     }
     SectionCard {
@@ -63,7 +64,7 @@ fun QuicEngineCard(onToast: (String) -> Unit, onChanged: () -> Unit) {
                             needsRestart = true
                             onChanged()
                         } catch (t: Throwable) {
-                            onToast(context.getString(R.string.error_failed, t.message.orEmpty()))
+                            onToast(context.getString(R.string.error_failed, t.userMessage))
                         } finally {
                             saving = false
                         }
@@ -96,7 +97,7 @@ fun QuicEngineCard(onToast: (String) -> Unit, onChanged: () -> Unit) {
                         })
                         needsRestart = false
                     } catch (t: Throwable) {
-                        onToast(context.getString(R.string.error_failed, t.message.orEmpty()))
+                        onToast(context.getString(R.string.error_failed, t.userMessage))
                     }
                 }) {
                     Text(stringResource(R.string.quic_engine_restart), fontFamily = Chakra, color = Rf.Rose400)

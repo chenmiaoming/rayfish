@@ -84,7 +84,11 @@ pub(crate) async fn ipc_join(
     // a self-contained invite code. An invite decodes to the network key plus the
     // coordinator to dial and a one-time secret to present.
     let (network_key, invite, coordinator) = match invite::decode_invite_code(network_key) {
-        Ok((net_pubkey, coord, secret)) => (net_pubkey.to_string(), Some(secret), Some(coord)),
+        Ok(decoded) => (
+            decoded.network_key.to_string(),
+            Some(decoded.secret),
+            Some(decoded.coordinator),
+        ),
         Err(_) => (network_key.to_string(), None, None),
     };
     let mut stream = ipc::connect().await?;
@@ -254,6 +258,15 @@ fn prompt_yes(question: &str) -> Result<bool> {
 pub(crate) async fn ipc_leave(name: &str) -> Result<()> {
     let response = ipc_request(ipc::IpcMessage::Leave {
         name: name.to_string(),
+    })
+    .await?;
+    print_ok_reply(response)
+}
+
+pub(crate) async fn ipc_rename(network: &str, new_name: &str) -> Result<()> {
+    let response = ipc_request(ipc::IpcMessage::RenameNetwork {
+        network: network.to_string(),
+        new_name: new_name.to_string(),
     })
     .await?;
     print_ok_reply(response)

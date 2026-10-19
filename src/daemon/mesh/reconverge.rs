@@ -9,7 +9,7 @@ use url::Url;
 use super::super::*;
 
 /// How often a node re-resolves the signed record when nothing triggers it.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 const GROUP_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The same poll on a battery-powered node, where every tick is a radio wakeup
@@ -22,7 +22,7 @@ const GROUP_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Keyed on the platform, not on `on_demand`: that is a desktop config key
 /// (`GlobalKey::OnDemand`) a wired node can set for its own reasons, and a
 /// 15-minute-stale roster is not what it asked for by setting it.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 const GROUP_POLL_INTERVAL_BATTERY: Duration = Duration::from_secs(15 * 60);
 
 /// Materialize this node's suggested firewall rules for `network` from the
@@ -278,7 +278,6 @@ pub(crate) async fn reconverge_and_apply(
     network_name: &str,
     state: &SharedNetworkState,
     my_identity: EndpointId,
-    alpn: &[u8],
     device_cert: &Option<control::DeviceCert>,
 ) {
     let MeshCtx {
@@ -332,16 +331,7 @@ pub(crate) async fn reconverge_and_apply(
             spawn_self_unpair(registry, network_name);
             return;
         }
-        drain_pending_rename(
-            endpoint,
-            &roster,
-            alpn,
-            network_name,
-            my_identity,
-            device_cert,
-            registry,
-        )
-        .await;
+        drain_pending_rename(&roster, network_name, my_identity, device_cert, registry).await;
         // Re-sync the exit-offer flag on this path too. An offer broadcast can
         // miss entirely (activation at boot races the first peer connections;
         // every coordinator offline), and a missed offer never changes the blob,
@@ -448,16 +438,7 @@ pub(crate) async fn reconverge_and_apply(
     attach_rejoined_peers(peers, device_user_map, &roster, network_name, my_identity).await;
     // If a local rename is still unconfirmed by this just-applied blob, keep
     // delivering it to the coordinator set until it lands.
-    drain_pending_rename(
-        endpoint,
-        &roster,
-        alpn,
-        network_name,
-        my_identity,
-        device_cert,
-        registry,
-    )
-    .await;
+    drain_pending_rename(&roster, network_name, my_identity, device_cert, registry).await;
     // Re-advertise the exit offer if the fresh roster disagrees with what we
     // actually offer. This is the retry that makes the offer survive a missed
     // broadcast: reconverges run exactly when a connection (re)forms (the
@@ -706,9 +687,9 @@ pub(crate) fn spawn_group_poller(
         // at-start resolve (catching a blob that changed while we were offline or
         // mid-restart) and then settles into its cadence. Without this the first
         // re-check was a full interval after boot.
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         let period = GROUP_POLL_INTERVAL_BATTERY;
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let period = GROUP_POLL_INTERVAL;
         let mut tick = tokio::time::interval(period);
         let nudge = Arc::clone(&registry.poll_nudge);

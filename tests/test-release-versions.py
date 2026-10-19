@@ -21,9 +21,14 @@ class ReleaseVersionTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.spec = self.root / "macos/project.yml"
         self.project = self.root / "macos/Rayfish.xcodeproj/project.pbxproj"
-        self.project.parent.mkdir(parents=True)
-        self.spec.write_text('    MARKETING_VERSION: "1.2.3"\n    CURRENT_PROJECT_VERSION: "7"\n')
-        self.project.write_text('\tMARKETING_VERSION = 1.2.3;\n' * 3)
+        for app in ("macos", "ios"):
+            (self.root / app / "Rayfish.xcodeproj").mkdir(parents=True)
+            (self.root / app / "project.yml").write_text(
+                '    MARKETING_VERSION: "1.2.3"\n    CURRENT_PROJECT_VERSION: "7"\n'
+            )
+            (self.root / app / "Rayfish.xcodeproj/project.pbxproj").write_text(
+                '\tMARKETING_VERSION = 1.2.3;\n' * 3
+            )
         output = redirect_stdout(StringIO())
         output.__enter__()
         self.addCleanup(output.__exit__, None, None, None)
@@ -35,6 +40,8 @@ class ReleaseVersionTests(unittest.TestCase):
             '    MARKETING_VERSION: "2.0.0"\n    CURRENT_PROJECT_VERSION: "7"\n',
         )
         self.assertEqual(self.project.read_text(), '\tMARKETING_VERSION = 2.0.0;\n' * 3)
+        ios = self.root / "ios/Rayfish.xcodeproj/project.pbxproj"
+        self.assertEqual(ios.read_text(), '\tMARKETING_VERSION = 2.0.0;\n' * 3)
 
     def test_prerelease_and_metadata_remain_numeric_for_apple(self):
         update_versions(self.root, "2.0.0-rc.1+build.2")

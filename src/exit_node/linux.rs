@@ -30,6 +30,11 @@ mod names {
 #[cfg(target_os = "linux")]
 pub(super) use names::*;
 
+pub(super) use crate::sysctl::{ipv6_conf, read_sysctl, write_sysctl};
+
+#[cfg(target_os = "linux")]
+use crate::hostfw;
+
 /// Turn this host into an exit node: enable IPv4/IPv6 forwarding and install an
 /// nftables table that masquerades overlay-sourced traffic that arrived on the
 /// TUN and is leaving by another interface, so replies come back to us and we
@@ -42,11 +47,19 @@ pub(super) use names::*;
 /// has no input interface and so never matches, which is correct: nothing this
 /// host originates is a peer's transit traffic.
 ///
-/// Nothing here opens the forward path: with no other ruleset the kernel forwards
-/// once the sysctls are on, and a host firewall that drops forwarding (ufw,
-/// firewalld, Docker's iptables policy) cannot be overridden from our own table
-/// anyway (an `accept` ends only the chain it is in, never another chain's drop).
-/// Such a host must be told to permit forwarding on its own terms.
+/// A host firewall that drops forwarding (ufw, firewalld, Docker's ip6tables
+/// policy) cannot be overridden from our own table (an `accept` ends only the chain
+/// it is in, never another chain's drop), so [`forward_fw::allow`] puts two accepts
+/// for the TUN at the top of the chain that drops, the way Tailscale does. Where
+/// that fails the warning names the command for the firewall in charge.
+///
+/// Turning on `all/forwarding` also makes the kernel ignore router advertisements
+/// on every interface left at `accept_ra=1`, so a host that learned its IPv6
+/// default route from one would lose it when the route expires, and with it the
+/// uplink the exit node exists to provide. Those interfaces are raised to
+/// `accept_ra=2` first (accept RAs even while forwarding) and put back on
+/// teardown. A host that was already forwarding had chosen to ignore RAs, so it is
+/// left alone.
 ///
 /// Idempotent, and safe to re-run while already enabled: the prior sysctl values
 /// are snapshotted to disk exactly once (a re-apply must not capture the values we
@@ -58,13 +71,22 @@ pub(super) use names::*;
 #[cfg(target_os = "linux")]
 pub(super) fn enable(tun_name: &str) -> Result<()> {
     let path = snapshot_path().context("no config dir to snapshot the forwarding sysctls into")?;
-    if !path.exists() {
-        Snapshot {
+    let mut snap = if path.exists() {
+        Snapshot::load(&path)
+    } else {
+        let snap = Snapshot {
             v4: read_sysctl(V4_FORWARD),
             v6: read_sysctl(V6_FORWARD),
             pf_token: None,
-        }
-        .save(&path)?;
+            // Writing `all/forwarding` sets every interface's own value, so
+            // restoring `all` alone would flatten whatever they held before.
+            extra: interface_forwarding(),
+        };
+        snap.save(&path)?;
+        snap
+    };
+    if snap.v6 != "1" {
+        keep_accepting_ras(tun_name, &mut snap, &path)?;
     }
     // IPv6 alone. The overlay routes no IPv4, so nothing can ever enter the TUN
     // from `100.64.0.0/10` to be masqueraded, and turning on `ip_forward` would
@@ -73,9 +95,261 @@ pub(super) fn enable(tun_name: &str) -> Result<()> {
     // and teardown may not assume which build turned it on.
     write_sysctl(V6_FORWARD, "1")?;
     nft_load(&server_nft_ruleset(tun_name))?;
+    let report = forward_fw::allow(tun_name);
+    if let Some(fix) = &report.manual_fix {
+        tracing::warn!(
+            tun = tun_name,
+            fix,
+            "the host firewall drops forwarded traffic and rayfish could not add an \
+             exception, so exit-node clients will get no replies until you run the fix"
+        );
+    }
     tracing::info!(tun = tun_name, "exit node forwarding + NAT enabled");
     Ok(())
 }
+
+/// Re-add the host-firewall forwarding exceptions a firewall reload dropped, for
+/// the periodic kernel check once [`check_kernel_state`] said they need it. Only
+/// a debug line when they cannot be added: [`enable`] already warned with the fix.
+#[cfg(target_os = "linux")]
+pub fn reassert_forward_firewall(tun_name: &str) {
+    let dumps = forward_fw::ForwardDumps::read(hostfw::run(&forward_fw::NFT_RULESET));
+    if let Some(fix) = forward_fw::reassert(tun_name, &dumps) {
+        tracing::debug!(fix, "host firewall still drops exit-node forwarding");
+    }
+}
+
+/// What one pass of the periodic kernel check found missing.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+pub struct KernelCheck {
+    /// The gateway's forwarding sysctl or nft table.
+    pub gateway: bool,
+    /// The client full tunnel's table, rules or default route.
+    pub client: bool,
+    /// The host-firewall forwarding exceptions (see [`reassert_forward_firewall`]).
+    pub forward_firewall: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl KernelCheck {
+    pub fn is_clean(&self) -> bool {
+        !self.gateway && !self.client && !self.forward_firewall
+    }
+
+    /// The roles to re-apply, for the log line.
+    pub fn missing(&self) -> Vec<&'static str> {
+        [(self.gateway, "gateway"), (self.client, "client tunnel")]
+            .into_iter()
+            .filter_map(|(gone, name)| gone.then_some(name))
+            .collect()
+    }
+}
+
+/// Read what the gateway (when `serving`) and the client tunnel (when `using`,
+/// with the families it carries) need from the kernel, changing nothing. One
+/// `nft list ruleset` answers for both tables and the forwarding exceptions.
+#[cfg(target_os = "linux")]
+pub fn check_kernel_state(
+    serving: bool,
+    using: Option<ExitFamilies>,
+    tun_name: &str,
+) -> KernelCheck {
+    let ruleset = hostfw::run(&forward_fw::NFT_RULESET);
+    let mut check = KernelCheck::default();
+    if let Some(carries) = using {
+        check.client = !client_state_intact(carries, ruleset.as_deref());
+    }
+    if serving {
+        check.gateway = !server_state_intact(ruleset.as_deref());
+        check.forward_firewall = !check.gateway
+            && forward_fw::needs_reassert(tun_name, &forward_fw::ForwardDumps::read(ruleset));
+    }
+    check
+}
+
+/// Every interface's own IPv6 `forwarding` value (and `default`'s), for the
+/// snapshot. `all` is left out: it is the snapshot's `v6`.
+#[cfg(target_os = "linux")]
+fn interface_forwarding() -> Vec<SavedSysctl> {
+    ipv6_conf_interfaces()
+        .into_iter()
+        .filter(|name| name != "all")
+        .filter_map(|name| {
+            let path = ipv6_conf(&name, "forwarding");
+            let value = read_sysctl(&path);
+            (!value.is_empty()).then_some(SavedSysctl { path, value })
+        })
+        .collect()
+}
+
+/// The entries of `/proc/sys/net/ipv6/conf`: every interface plus `all` and
+/// `default`. Empty when IPv6 is disabled.
+#[cfg(target_os = "linux")]
+fn ipv6_conf_interfaces() -> Vec<String> {
+    let Ok(dir) = fs::read_dir("/proc/sys/net/ipv6/conf") else {
+        return Vec::new();
+    };
+    dir.filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect()
+}
+
+/// Raise `accept_ra` from 1 to 2 on every interface that has it, recording the
+/// original in the snapshot (and saving it) before the write. See [`enable`].
+///
+/// Runs on every enable, not just the first, so an interface that appeared or was
+/// reset since is covered too; one already recorded is not recorded twice.
+#[cfg(target_os = "linux")]
+fn keep_accepting_ras(tun_name: &str, snap: &mut Snapshot, path: &Path) -> Result<()> {
+    let current: Vec<(String, String)> = ipv6_conf_interfaces()
+        .into_iter()
+        .map(|name| {
+            let value = read_sysctl(&accept_ra_path(&name));
+            (name, value)
+        })
+        .collect();
+    // The values from before we turned `all/forwarding` on, which rewrote
+    // every interface's own: on a re-enable the live ones all read 1.
+    let forwarding: Vec<String> = current
+        .iter()
+        .filter(|(name, _)| {
+            let own = ipv6_conf(name, "forwarding");
+            snap.extra.iter().any(|s| s.path == own && s.value == "1")
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let raise = ra_interfaces_to_raise(&current, tun_name, &forwarding);
+    if raise.is_empty() {
+        return Ok(());
+    }
+    for name in &raise {
+        let path = accept_ra_path(name);
+        if !snap.extra.iter().any(|s| s.path == path) {
+            snap.extra.push(SavedSysctl {
+                path,
+                value: "1".to_string(),
+            });
+        }
+    }
+    snap.save(path)?;
+    for name in &raise {
+        if let Err(e) = write_sysctl(&accept_ra_path(name), "2") {
+            tracing::warn!(interface = %name, error = %e, "could not keep accepting router advertisements");
+        }
+    }
+    tracing::warn!(
+        interfaces = %raise.join(","),
+        "IPv6 forwarding makes the kernel ignore router advertisements on these \
+         interfaces; set accept_ra=2 so their RA-learned routes survive (restored \
+         when the exit node is turned off)"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn accept_ra_path(name: &str) -> String {
+    ipv6_conf(name, "accept_ra")
+}
+
+/// Which of `(interface, accept_ra)` need raising to 2: those at exactly 1,
+/// other than the `all`/`default` templates, loopback, our own TUN, and the
+/// ones in `forwarding`, which were already forwarding on their own and so had
+/// already chosen to ignore RAs.
+#[cfg(target_os = "linux")]
+pub(super) fn ra_interfaces_to_raise(
+    current: &[(String, String)],
+    tun_name: &str,
+    forwarding: &[String],
+) -> Vec<String> {
+    current
+        .iter()
+        .filter(|(name, value)| {
+            value == "1"
+                && !matches!(name.as_str(), "all" | "default" | "lo")
+                && name != tun_name
+                && !forwarding.contains(name)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Whether the gateway's kernel state is still what [`enable`] left: forwarding on
+/// and our table loaded. A firewall reload or `nft flush ruleset` removes the
+/// table, and with it the masquerade, without telling us.
+#[cfg(target_os = "linux")]
+fn server_state_intact(ruleset: Option<&str>) -> bool {
+    read_sysctl(V6_FORWARD) == "1" && nft_table_exists(ruleset, SERVER_TABLE)
+}
+
+/// Whether the client full tunnel is still installed: our nft table, and for each
+/// family the tunnel carries, the bypass and catch-all rules and the tunnel
+/// table's default route.
+#[cfg(target_os = "linux")]
+fn client_state_intact(carries: ExitFamilies, ruleset: Option<&str>) -> bool {
+    nft_table_exists(ruleset, CLIENT_TABLE)
+        && tunnel_families(carries).iter().all(|family| {
+            ip_output(&[family, "rule", "show"]).is_some_and(|show| client_rules_present(&show))
+                && ip_output(&[family, "route", "show", "table", EXIT_TABLE])
+                    .is_some_and(|routes| routes.lines().any(|l| l.starts_with("default")))
+        })
+}
+
+/// Whether `ip rule show` output still has the rules the tunnel cannot work
+/// without: the mark bypass, the `main` lookup, and the catch-all.
+#[cfg(target_os = "linux")]
+pub(super) fn client_rules_present(show: &str) -> bool {
+    let mark = fwmark_selector();
+    let at = |pref: &str, want: &[&str]| {
+        show.lines().any(|line| {
+            line.split_once(':').is_some_and(|(p, rest)| {
+                let f: Vec<&str> = rest.split_whitespace().collect();
+                p.trim() == pref && f == want
+            })
+        })
+    };
+    at(
+        PREF_BYPASS,
+        &["from", "all", "fwmark", &mark, "lookup", "main"],
+    ) && at(
+        PREF_MAIN,
+        &[
+            "from",
+            "all",
+            "lookup",
+            "main",
+            "suppress_prefixlength",
+            "0",
+        ],
+    ) && parse_catch_all(show)
+}
+
+/// Whether `ruleset` (`nft -j list ruleset` output) has our `inet` table.
+/// Without a readable JSON dump (a failed run, or an `nft` built without JSON
+/// support) that is unknown rather than no, so ask `nft list table` instead:
+/// reading it as missing would re-apply the rules on every check.
+#[cfg(target_os = "linux")]
+fn nft_table_exists(ruleset: Option<&str>, table: &str) -> bool {
+    nft_table_exists_with(ruleset, table, || {
+        hostfw::run(&["nft", "list", "table", "inet", table]).is_some()
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn nft_table_exists_with(
+    ruleset: Option<&str>,
+    table: &str,
+    listed: impl FnOnce() -> bool,
+) -> bool {
+    match ruleset.filter(|json| forward_fw::nft_json_readable(json)) {
+        Some(json) => forward_fw::nft_has_table(json, "inet", table),
+        None => listed(),
+    }
+}
+
+/// The largest TCP MSS that fits the 1280-byte TUN: its MTU less the IPv6 and
+/// TCP headers.
+#[cfg(target_os = "linux")]
+pub(super) const TUN_MSS: u16 = crate::tun::MIN_TUN_MTU - 40 - 20;
 
 /// The nftables ruleset masquerading overlay traffic out of `tun_name`'s host.
 ///
@@ -84,6 +358,16 @@ pub(super) fn enable(tun_name: &str) -> Result<()> {
 /// (`iifname "<tun>"` scopes it to packets arriving on our own TUN, and an inbound
 /// IPv4 packet is dropped as spoofed long before it could get there), but a rule
 /// that cannot match is a rule that misleads whoever reads `nft list ruleset` next.
+///
+/// The `forward` chain clamps the MSS of TCP SYNs crossing the TUN, in both
+/// directions, to [`TUN_MSS`]. The TUN is 1280 (see `tun::PREFERRED_TUN_MTU`),
+/// narrower than the 1500-byte path a remote or a mesh client usually has, and
+/// a remote that drops the ICMPv6 Packet Too Big would otherwise stall every
+/// full-sized segment. `rt mtu` is no good here: for a SYN arriving from the
+/// TUN it reads the uplink's route, typically 1500, so a 1500-MTU client's MSS
+/// of 1440 would pass. The fixed ceiling holds for either direction, since no
+/// IPv6 uplink is narrower than 1280. It only ever lowers the MSS and its
+/// policy is `accept`, so it filters nothing.
 #[cfg(target_os = "linux")]
 pub(super) fn server_nft_ruleset(tun_name: &str) -> String {
     format!(
@@ -93,11 +377,17 @@ pub(super) fn server_nft_ruleset(tun_name: &str) -> String {
          \t\ttype nat hook postrouting priority srcnat; policy accept;\n\
          \t\tiifname \"{tun}\" ip6 saddr {v6} oifname != \"{tun}\" masquerade\n\
          \t}}\n\
+         \tchain forward {{\n\
+         \t\ttype filter hook forward priority mangle; policy accept;\n\
+         \t\tiifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size > {mss} tcp option maxseg size set {mss}\n\
+         \t\toifname \"{tun}\" tcp flags & (syn | rst) == syn tcp option maxseg size > {mss} tcp option maxseg size set {mss}\n\
+         \t}}\n\
          }}\n",
         reset = drop_table(SERVER_TABLE),
         t = SERVER_TABLE,
         v6 = V6_OVERLAY,
         tun = tun_name,
+        mss = TUN_MSS,
     )
 }
 
@@ -115,6 +405,7 @@ pub fn disable() {
     }
     let _ = nft_load(&drop_table(SERVER_TABLE));
     Snapshot::load(&path).restore_sysctls();
+    forward_fw::remove();
     let _ = fs::remove_file(&path);
     tracing::info!("exit node forwarding + NAT disabled");
 }
@@ -187,10 +478,19 @@ pub(super) fn bypass_source_addrs(family: &str) -> Vec<IpAddr> {
 /// host from *outside* the tunnel answering out the interface they arrived on, so a
 /// headless box does not cut itself off the instant it starts using an exit node.
 ///
-/// `prerouting` tags anything arriving on a non-TUN interface (and marks the packet
-/// itself, so the reverse-path check resolves against `main`); `output` puts that
-/// mark back on the locally-generated replies, and `type route` forces a re-route
-/// once it is set.
+/// `prerouting` tags connections arriving on a non-TUN interface for this host
+/// (and marks the packet itself, so the reverse-path check resolves against
+/// `main`); `output` puts that mark back on the locally-generated replies, and
+/// `type route` forces a re-route once it is set.
+///
+/// Every mark is OR'd in and matched under a mask, never assigned: other tools
+/// (wg-quick, Mullvad, kube-proxy) keep their own bits in the same mark, and
+/// overwriting them breaks their routing. `fib daddr type local` keeps forwarded
+/// traffic (containers, VMs) out of it: that is not a connection to this host, and
+/// marking it would send it around the tunnel. `output` only touches packets
+/// without a mark of their own, because a socket that sets one (a WireGuard
+/// socket, say) is matched exactly by its owner's rules and must reach them as it
+/// was sent.
 ///
 /// This covers connections that arrive *after* the tunnel is up. Ones that predate
 /// it cannot be handled here at all: loading this table is what loads conntrack, so
@@ -207,12 +507,12 @@ pub(super) fn client_nft_script(tun_name: &str) -> String {
          \tchain prerouting {{\n\
          \t\ttype filter hook prerouting priority mangle; policy accept;\n\
          \t\tiifname \"{tun}\" return\n\
-         \t\tct mark set {mark}\n\
-         \t\tmeta mark set {mark}\n\
+         \t\tfib daddr type local ct mark set ct mark | {mark}\n\
+         \t\tfib daddr type local meta mark set meta mark | {mark}\n\
          \t}}\n\
          \tchain output {{\n\
          \t\ttype route hook output priority mangle; policy accept;\n\
-         \t\tct mark {mark} meta mark set {mark}\n\
+         \t\tmeta mark == 0 ct mark & {mark} == {mark} meta mark set meta mark | {mark}\n\
          \t}}\n\
          }}\n",
         reset = drop_table(CLIENT_TABLE),
@@ -271,7 +571,6 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
             let _ = run_ip(&[family, "route", "flush", "table", EXIT_TABLE]);
         }
     }
-    let mark = format!("{SOCKET_MARK:#x}");
     for family in tunnel_families(carries).iter().copied() {
         // Give the tunnel table the prefixes another VPN serves out of a table of
         // its own, or our catch-all rule swallows them (see the fn docs).
@@ -279,8 +578,8 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         run_ip(&[
             family, "route", "replace", "default", "dev", tun_name, "table", EXIT_TABLE,
         ])?;
-        // Keeps the catch-all standing: everything below is a rebuild, and the
-        // rules are re-added one `ip` process at a time. See [`RuleSweep`].
+        // Keeps the catch-all standing: everything below is a rebuild, deleted
+        // and re-added in two `ip` processes. See [`RuleSweep`].
         remove_client_rules(family, RuleSweep::KeepCatchAll);
         // The three bypasses go back **first**, because the catch-all now stays up
         // across the rebuild. That closed the window where traffic leaked out the
@@ -290,8 +589,8 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         // own QUIC underlay is routed into the tunnel it is carrying, along with
         // every pre-existing physical-sourced connection. That is precisely what
         // `PREF_BYPASS` and `PREF_SRC` exist to prevent, and it kills the mesh
-        // rather than leaking past it. Each of these is a separate `ip` process,
-        // so the window is real even now that it is a handful of them.
+        // rather than leaking past it. So they go in as one `ip -batch` process,
+        // which shrinks the window to the netlink round trips themselves.
         //
         // Ahead of everything else: traffic sourced from one of this host's own
         // physical addresses leaves the way it always did. That is every connection
@@ -304,32 +603,23 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         // connections are untracked at that moment and get registered with their
         // direction inverted. Traffic bound for the tunnel is sourced from the
         // overlay address instead, so it does not match.
-        for addr in bypass_source_addrs(family) {
-            run_ip(&[
-                family,
-                "rule",
-                "add",
-                "from",
-                &addr.to_string(),
-                "table",
-                "main",
-                "pref",
-                PREF_SRC,
-            ])?;
-        }
-        run_ip(&[
-            family,
-            "rule",
-            "add",
-            "fwmark",
-            &mark,
-            "table",
-            "main",
-            "pref",
-            PREF_BYPASS,
-        ])?;
-        run_ip(&[
-            family,
+        let mut adds: Vec<Vec<String>> = bypass_source_addrs(family)
+            .into_iter()
+            .map(|addr| {
+                argv(&[
+                    "rule",
+                    "add",
+                    "from",
+                    &addr.to_string(),
+                    "table",
+                    "main",
+                    "pref",
+                    PREF_SRC,
+                ])
+            })
+            .collect();
+        adds.push(bypass_rule_args("add"));
+        adds.push(argv(&[
             "rule",
             "add",
             "table",
@@ -338,7 +628,7 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
             "0",
             "pref",
             PREF_MAIN,
-        ])?;
+        ]));
         // The mirrored destinations, in one rule. It outranks the two `main`
         // rules above, because neither of them can find a co-resident VPN's
         // prefixes: those live in its own table, and `PREF_MAIN`'s
@@ -366,8 +656,9 @@ pub fn install_client_routing(tun_name: &str, carries: ExitFamilies) -> Result<(
         // rule exists for the traffic that would otherwise stop at `PREF_SRC` or
         // `PREF_BYPASS` above and look up `main`.
         if mirrored > 0 {
-            run_ip(&foreign_rule_args(family, "add"))?;
+            adds.push(argv(&foreign_rule_args(family, "add")[1..]));
         }
+        run_ip_batch(family, &adds, false)?;
         // Only if the rebuild did not inherit it: `ip rule add` is not idempotent,
         // so adding it unconditionally would stack a duplicate on every re-apply,
         // and `remove_client_rules` deletes one match at a time. `EEXIST` is
@@ -420,8 +711,8 @@ pub fn teardown_client_routing() {
 /// [`RuleSweep::KeepCatchAll`], because the catch-all at [`PREF_TUNNEL`] is the
 /// only thing standing between tunnel-bound traffic and `main`: drop it and every
 /// packet leaves the physical uplink, sourced from this host's real address,
-/// until the rebuild puts it back. That is not instant: every rule is a separate
-/// `ip` process, and the mirrored routes that go in first are one process per
+/// until the rebuild puts it back. That is not instant: the rules are deleted and
+/// re-added by separate `ip` processes, and the mirrored routes that go in first are one process per
 /// foreign prefix, which a co-resident VPN can have hundreds of. Since the rule
 /// never varies (`table <EXIT_TABLE> pref <PREF_TUNNEL>`, no per-run content),
 /// leaving it standing across the rebuild costs nothing and closes the window:
@@ -576,17 +867,20 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
     // re-deriving the address list: a lease change between install and teardown
     // would otherwise strand a rule pointing at an address we no longer hold. Only
     // rules matching our exact shape at our pref are touched.
-    for addr in installed_source_rules(family) {
-        let _ = run_ip(&[
-            family, "rule", "del", "from", &addr, "table", "main", "pref", PREF_SRC,
-        ]);
-    }
+    let mut dels: Vec<Vec<String>> = installed_source_rules(family)
+        .into_iter()
+        .map(|addr| {
+            argv(&[
+                "rule", "del", "from", &addr, "table", "main", "pref", PREF_SRC,
+            ])
+        })
+        .collect();
     // One rule, deleted by its full spec, so this needs no readback at all.
     // While it was a rule per mirrored prefix it did, and that readback carried
     // the same bug `parse_catch_all` had: `ip rule show` prints a table *name*
     // where `/etc/iproute2/rt_tables` maps our id, and a rule whose table did not
     // match the numeric string was left behind to accumulate on every re-apply.
-    let _ = run_ip(&foreign_rule_args(family, "del"));
+    dels.push(argv(&foreign_rule_args(family, "del")[1..]));
     // Then whatever the *old* shape left behind. Kernel rules outlive the process
     // and the panic hook `abort()`s, so a host that ran a build with the per-prefix
     // rules and then swapped the binary keeps them: the del above names a spec they
@@ -600,8 +894,7 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
     // and safe only here: `remove_stray_rules` deletes only rules that look like
     // the shape we used to install, so a foreign rule parked at 98 is left alone.
     for stray in strays_at_our_pref(family) {
-        let _ = run_ip(&[
-            family,
+        dels.push(argv(&[
             "rule",
             "del",
             "to",
@@ -610,22 +903,25 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
             EXIT_TABLE,
             "pref",
             PREF_FOREIGN,
-        ]);
+        ]));
     }
-    let mark = format!("{SOCKET_MARK:#x}");
-    let _ = run_ip(&[
-        family,
+    dels.push(bypass_rule_args("del"));
+    // The unmasked spelling older builds installed. The kernel reads a del
+    // with no mask as mask 0xffffffff, so it matches only that old rule and
+    // never the masked one; each del removes its own spelling, in either
+    // order, and the batch's `-force` keeps a miss from stopping the rest.
+    let legacy_mark = format!("{SOCKET_MARK:#x}");
+    dels.push(argv(&[
         "rule",
         "del",
         "fwmark",
-        &mark,
+        &legacy_mark,
         "table",
         "main",
         "pref",
         PREF_BYPASS,
-    ]);
-    let _ = run_ip(&[
-        family,
+    ]));
+    dels.push(argv(&[
         "rule",
         "del",
         "table",
@@ -634,18 +930,92 @@ pub(super) fn remove_client_rules(family: &str, sweep: RuleSweep) {
         "0",
         "pref",
         PREF_MAIN,
-    ]);
+    ]));
     if sweep == RuleSweep::All {
-        let _ = run_ip(&[
-            family,
+        dels.push(argv(&[
             "rule",
             "del",
             "table",
             EXIT_TABLE,
             "pref",
             PREF_TUNNEL,
-        ]);
+        ]));
     }
+    // `-force` so one "not found" does not stop the rest; the exit status then
+    // reports that some failed, which for a sweep is expected.
+    let _ = run_ip_batch(family, &dels, true);
+}
+
+/// The `fwmark` selector of the [`PREF_BYPASS`] rule: our mark under its own
+/// mask, so a packet that also carries another tool's bits still matches.
+#[cfg(target_os = "linux")]
+pub(super) fn fwmark_selector() -> String {
+    format!("{SOCKET_MARK:#x}/{SOCKET_MARK:#x}")
+}
+
+/// The [`PREF_BYPASS`] rule for `ip -batch`, `verb` being `add` or `del`, so the
+/// two spell it identically.
+#[cfg(target_os = "linux")]
+pub(super) fn bypass_rule_args(verb: &str) -> Vec<String> {
+    argv(&[
+        "rule",
+        verb,
+        "fwmark",
+        &fwmark_selector(),
+        "table",
+        "main",
+        "pref",
+        PREF_BYPASS,
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn argv(args: &[&str]) -> Vec<String> {
+    args.iter().map(|a| (*a).to_string()).collect()
+}
+
+/// The stdin of `ip -batch -`: one command per line, without the leading `ip`
+/// and without the family, which [`run_ip_batch`] passes once for all of them.
+#[cfg(target_os = "linux")]
+pub(super) fn batch_script(commands: &[Vec<String>]) -> String {
+    commands.iter().map(|c| c.join(" ") + "\n").collect()
+}
+
+/// Run several `ip` commands in one process. Without `force`, `ip` stops at the
+/// first failure and so does the result.
+#[cfg(target_os = "linux")]
+pub(super) fn run_ip_batch(family: &str, commands: &[Vec<String>], force: bool) -> Result<()> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![family];
+    if force {
+        args.push("-force");
+    }
+    args.extend(["-batch", "-"]);
+    let mut child = Command::new("ip")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning `ip -batch -`")?;
+    child
+        .stdin
+        .take()
+        .context("ip stdin unavailable")?
+        .write_all(batch_script(commands).as_bytes())
+        .context("writing ip batch")?;
+    let out = child.wait_with_output().context("waiting for ip")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`ip {family} -batch` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// One route, as [`parse_foreign_routes`] reads it back off `ip route show`.
@@ -977,19 +1347,4 @@ pub(super) fn run_ip(args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// The sysctl's current value, or `""` if it can't be read (then it is not
-/// restored on teardown).
-#[cfg(target_os = "linux")]
-pub(super) fn read_sysctl(path: &str) -> String {
-    fs::read_to_string(format!("/proc/sys/{path}"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn write_sysctl(path: &str, value: &str) -> Result<()> {
-    fs::write(format!("/proc/sys/{path}"), value)
-        .with_context(|| format!("writing sysctl {path}={value}"))
 }

@@ -10,9 +10,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use anyhow::{Context, Result};
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
     address_lookup::{PkarrPublisher, PkarrResolver},
-    dns::{DnsProtocol, DnsResolver},
+    dns::{DnsResolver, NameserverConfig},
     endpoint::Connection,
     endpoint::presets,
     endpoint::{BindOpts, Builder, DirectAddrFilter, QuicTransportConfig, SocketConfigurator},
@@ -36,10 +36,16 @@ pub const FILES_ALPN: &[u8] = b"rayfish/files/2";
 
 /// Identity-level ALPN for the `ray connect` friend-request handshake. Unlike
 /// `network_alpn`, this is not per-network: it accepts connection requests
-/// addressed to this node's contact key. The trailing `/1` is its protocol
+/// addressed to this node's identity. The trailing `/1` is its protocol
 /// version, **bump it on any breaking change to the `ConnectMsg` handshake**;
 /// peers on different versions can't negotiate a connection (transport-enforced).
 pub const CONNECT_ALPN: &[u8] = b"rayfish/connect/2";
+
+/// ALPN for delivering a private invitation (`ConnectMsg::InviteOffer`) to a
+/// user's identity. Separate from [`CONNECT_ALPN`] so a node too old to read
+/// an offer fails the handshake instead of the message: the sender can tell
+/// it apart from an offline or refusing recipient and stop retrying.
+pub const INVITE_ALPN: &[u8] = b"rayfish/invite/1";
 
 /// Fixed UDP port the endpoint binds so users can port-forward a stable, known
 /// port for guaranteed direct reachability (Tailscale-style). Unlike an ephemeral
@@ -160,7 +166,8 @@ fn control_plane_nameservers(o: &ServerOverride, system: Option<Vec<Ipv4Addr>>) 
     if system.is_none() && o.servers.is_empty() {
         return Vec::new();
     }
-    let mut out: Vec<Ipv4Addr> = crate::config::resolve_upstreams(o, system.unwrap_or_default())
+    let system = system.unwrap_or_default().into_iter().map(IpAddr::V4);
+    let mut out: Vec<Ipv4Addr> = crate::config::resolve_upstreams(o, system.collect())
         .into_iter()
         .filter_map(|ip| match ip {
             IpAddr::V4(ip) => Some(ip),
@@ -312,7 +319,7 @@ async fn bind_endpoint(cfg: &BindConfig<'_>, port: u16) -> Result<Endpoint> {
     // with it, and a resolv.conf that already points at our magic IP (a restart
     // before the revert, a crash) makes the control plane wait on the data plane
     // it exists to bring up. Not setting `with_system_defaults` is deliberate:
-    // hickory then never reads the file, so neither can come back.
+    // the resolver never reads the file, so neither can come back.
     //
     // Empty means we had no way to read the host's resolvers (Android reads them
     // over JNI, and its own resolver honours the device's Private DNS), so leave
@@ -320,10 +327,10 @@ async fn bind_endpoint(cfg: &BindConfig<'_>, port: u16) -> Result<Endpoint> {
     if !nameservers.is_empty() {
         builder = builder.dns_resolver(
             DnsResolver::builder()
-                .with_nameservers(
+                .add_nameserver_configs(
                     nameservers
                         .iter()
-                        .map(|ip| (SocketAddr::from((*ip, 53u16)), DnsProtocol::Udp)),
+                        .map(|ip| NameserverConfig::udp(IpAddr::V4(*ip))),
                 )
                 .build(),
         );
@@ -534,6 +541,14 @@ pub fn build_relay_mode(o: &ServerOverride) -> Result<Option<RelayMode>> {
         parsed.extend(RelayMode::Default.relay_map().urls::<Vec<RelayUrl>>());
     }
     Ok(Some(RelayMode::custom(parsed)))
+}
+
+/// The relays an endpoint built from `o` starts with: the override, or the N0
+/// preset's default when unset. Phones drop these while idle and restore them
+/// on wake.
+pub fn configured_relay_map(o: &ServerOverride) -> Result<RelayMap> {
+    let mode = build_relay_mode(o)?.unwrap_or_else(iroh::endpoint::default_relay_mode);
+    Ok(mode.relay_map())
 }
 
 /// Apply a discovery-DNS override to the endpoint builder. Each configured URL

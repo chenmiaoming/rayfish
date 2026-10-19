@@ -60,6 +60,9 @@ pub(super) struct MdnsDiscovery {
     enabled: AtomicBool,
     /// Restarts the window now, after the LAN addresses changed.
     wake: Arc<Notify>,
+    /// Set while the transport is idle and outgoing-only. Windows are skipped
+    /// then: an open mDNS socket receives every query on the LAN.
+    suspended: Arc<AtomicBool>,
     /// Serializes config writes, scheduler changes, and shutdown.
     worker: AsyncMutex<Option<JoinHandle<()>>>,
 }
@@ -114,7 +117,11 @@ fn lan_ips(data: &EndpointData) -> BTreeSet<IpAddr> {
 }
 
 impl MdnsDiscovery {
-    pub(super) fn new(endpoint: &Endpoint, peers: Arc<LanPeers>) -> Result<Arc<Self>> {
+    pub(super) fn new(
+        endpoint: &Endpoint,
+        peers: Arc<LanPeers>,
+        suspended: Arc<AtomicBool>,
+    ) -> Result<Arc<Self>> {
         let discovery = Arc::new(Self {
             endpoint_id: endpoint.id(),
             current: ArcSwapOption::empty(),
@@ -122,6 +129,7 @@ impl MdnsDiscovery {
             peers,
             enabled: AtomicBool::new(false),
             wake: Arc::new(Notify::new()),
+            suspended,
             worker: AsyncMutex::new(None),
         });
         endpoint
@@ -257,6 +265,15 @@ async fn run_windows(
         }
         peers.expire_unseen(SIGHTING_TTL);
         if !reopen_now {
+            wait_for_window(&wake).await;
+        }
+        // Stay closed while idle; the next window after a wake opens as usual.
+        loop {
+            match discovery.upgrade() {
+                Some(discovery) if discovery.suspended.load(Ordering::Acquire) => {}
+                Some(_) => break,
+                None => return,
+            }
             wait_for_window(&wake).await;
         }
         // The strong reference lives only for the open, never across a wait,
@@ -396,7 +413,8 @@ mod tests {
             .bind()
             .await
             .unwrap();
-        let mdns = MdnsDiscovery::new(&endpoint, Arc::new(LanPeers::new())).unwrap();
+        let mdns =
+            MdnsDiscovery::new(&endpoint, Arc::new(LanPeers::new()), Arc::default()).unwrap();
         mdns.start().await.unwrap();
         assert!(
             mdns.current.load().is_some(),
@@ -442,7 +460,7 @@ mod tests {
         let peers = Arc::new(LanPeers::new());
         let lookups = local.address_lookup().unwrap();
         let initial_lookup_count = lookups.len();
-        let mdns = MdnsDiscovery::new(&local, Arc::clone(&peers)).unwrap();
+        let mdns = MdnsDiscovery::new(&local, Arc::clone(&peers), Arc::default()).unwrap();
         assert_eq!(lookups.len(), initial_lookup_count + 1);
         let (connection, other_connection) = timeout(Duration::from_secs(5), async {
             tokio::join!(local.connect(remote.addr(), &alpn), async {

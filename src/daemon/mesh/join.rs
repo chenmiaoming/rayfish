@@ -123,6 +123,10 @@ pub(crate) struct JoinParams {
     /// Fresh join (send `JoinRequest` first) vs reconnect/restore (coordinator
     /// speaks first).
     pub(crate) initial: bool,
+    /// Present when the connection came from a dial that is not registered yet.
+    /// Held until this join registers it, so other joins to the same peer keep
+    /// finding and reusing it (see [`MeshDialer`]).
+    pub(crate) dial_claim: Option<DialClaim>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -130,7 +134,6 @@ pub(crate) async fn join_mesh_shared(
     initial_conn: Connection,
     ep: &Endpoint,
     network_name: &str,
-    alpn: &[u8],
     ctx: MeshCtx,
     params: JoinParams,
     token: CancellationToken,
@@ -164,6 +167,7 @@ pub(crate) async fn join_mesh_shared(
         auto_accept_firewall,
         auto_accept_files,
         initial,
+        dial_claim,
     } = params;
     let my_identity = identity.local_identity();
     let join_certificate_issuer = if initial
@@ -286,7 +290,6 @@ pub(crate) async fn join_mesh_shared(
         ep.clone(),
         my_identity,
         net_pubkey,
-        alpn.to_vec(),
         device_cert.clone(),
     );
 
@@ -320,8 +323,8 @@ pub(crate) async fn join_mesh_shared(
         network_name,
     )
     .await;
+    drop(dial_claim);
     connect_to_roster_peers(
-        ep,
         &members,
         network_name,
         net_pubkey,
@@ -518,7 +521,6 @@ pub(crate) async fn send_mesh_hello(
 /// logged and skipped, as is a peer whose hello exchange fails.
 #[allow(clippy::too_many_arguments)]
 async fn connect_to_roster_peers(
-    ep: &Endpoint,
     members: &[crate::membership::Member],
     network_name: &str,
     net_pubkey: EndpointId,
@@ -533,25 +535,10 @@ async fn connect_to_roster_peers(
         if member.identity == my_identity || member.identity == skip_id {
             continue;
         }
-        // Another network may be establishing this same peer right now. Skip
-        // this eager dial if its handshake owns the gate; the supervisor will
-        // attach this network after that connection is registered.
-        let dial_lock = registry.mesh_dial_lock(member.identity);
-        let Ok(_dial_guard) = dial_lock.try_lock() else {
-            continue;
-        };
-        let peer_ip = derive_ipv6(&member.identity);
-        let connected = if let Some(conn) = ctx
-            .peers
-            .conn_for_ip(&peer_ip)
-            .filter(|conn| conn.close_reason().is_none())
-        {
-            Ok(conn)
-        } else {
-            transport::connect_to_peer_with_alpn(ep, member.identity, &transport::mesh_alpn()).await
-        };
-        match connected {
-            Ok(conn) => {
+        // Another network may be establishing this same peer right now; its
+        // dial is shared rather than repeated, and this hello rides it.
+        match registry.connect_mesh_peer(member.identity).await {
+            Ok(DialedPeer { conn, claim }) => {
                 if let Err(error) = send_mesh_hello(
                     &conn,
                     net_pubkey,
@@ -567,6 +554,7 @@ async fn connect_to_roster_peers(
                     continue;
                 }
                 register_dialed_peer(ctx, router, conn, member.identity, network_name).await;
+                drop(claim);
                 tracing::info!(peer_ip = %derive_ipv6(&member.identity), "connected to mesh peer");
             }
             Err(e) => {
@@ -753,7 +741,6 @@ fn spawn_reconverge_worker(
     endpoint_w: Endpoint,
     my_identity_w: EndpointId,
     net_pubkey_w: EndpointId,
-    alpn_w: Vec<u8>,
     device_cert_w: Option<control::DeviceCert>,
 ) {
     tokio::spawn(async move {
@@ -797,7 +784,6 @@ fn spawn_reconverge_worker(
                 &network_name,
                 &live_state,
                 my_identity_w,
-                &alpn_w,
                 &device_cert_w,
             )
             .await;

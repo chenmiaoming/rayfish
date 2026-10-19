@@ -72,6 +72,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "android")]
 use android_tun::{AndroidTunReader, AndroidTunWriter};
+use iroh::EndpointId;
 use rayfish::config;
 use rayfish::config::QuicEngine as CoreQuicEngine;
 use rayfish::config::settings::GlobalKey;
@@ -107,41 +108,59 @@ const START_TIMEOUT: Duration = Duration::from_secs(45);
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum RayError {
     /// A method that needs the daemon was called before [`Node::start`].
-    #[error("node not started")]
+    #[error("Rayfish is not running")]
     NotStarted,
     /// The supplied invite/pairing code could not be decoded.
-    #[error("bad code: {0}")]
+    #[error("that code is not valid: {0}")]
     BadCode(String),
     /// Joining a network failed (dial, handshake, or admission).
-    #[error("join failed: {0}")]
+    #[error("could not join: {0}")]
     JoinFailed(String),
     /// Pairing with a primary device failed.
-    #[error("pair failed: {0}")]
+    #[error("could not pair: {0}")]
     PairFailed(String),
     /// Any other core error: identity load, endpoint bind, create, or an
     /// unexpected protocol response.
     #[error("{0}")]
     Network(String),
     /// A backup code would not decode, or the password was wrong. The two are
-    /// one case: the AEAD cannot tell them apart.
-    #[error("{0}")]
-    BadBackup(String),
+    /// one case: the AEAD cannot tell them apart, so neither can the message.
+    #[error("wrong password, or the backup is damaged")]
+    BadBackup,
     /// [`Node::restore_identity`] found an identity already on the device and
     /// was not told to replace it. Carries the existing public key so the UI can
     /// name what it is about to overwrite. Not a failure on its own: the caller
     /// is expected to confirm with the user and call again with
     /// `replace_existing`.
-    #[error("device already has identity {0}")]
+    #[error("this device already has identity {0}")]
     IdentityExists(String),
     /// A restore was attempted while the node was running. The endpoint is bound
     /// to the old key, so the identity cannot change under it; stop first.
-    #[error("stop the node before restoring an identity")]
+    #[error("turn Rayfish off before restoring an identity")]
     NodeRunning,
 }
 
+/// The error in words, from its `Display`. The generated bindings describe an
+/// error by its variant and fields (`v1=...` in Kotlin, the case name in
+/// Swift), which is not something to show a person.
+#[uniffi::export]
+pub fn error_message(error: RayError) -> String {
+    // Sentence case for the screen; the core's own errors start lowercase.
+    let text = error.to_string();
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
+}
+
 impl RayError {
+    /// `{:#}` so an `anyhow::Error` keeps its cause chain. Plain `to_string()`
+    /// printed only the outermost context, which is how a bind failure reached
+    /// crash reports as just "failed to bind iroh endpoint" with the OS error
+    /// that explains it cut off.
     fn network(e: impl std::fmt::Display) -> Self {
-        RayError::Network(e.to_string())
+        RayError::Network(format!("{e:#}"))
     }
 }
 
@@ -265,6 +284,85 @@ pub struct Status {
     pub peers: Vec<PeerInfo>,
     pub networks: Vec<NetworkDetail>,
     pub pending_networks: Vec<String>,
+    /// The user identity peers connect to and invite: the primary device's
+    /// endpoint. `None` while the node is stopped.
+    pub identity: Option<String>,
+}
+
+/// Which strangers may send connect requests and invitations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum InboundPolicy {
+    Anyone,
+    /// Only peers that share a network with this node.
+    Known,
+    Nobody,
+}
+
+impl From<config::InboundPolicy> for InboundPolicy {
+    fn from(policy: config::InboundPolicy) -> Self {
+        match policy {
+            config::InboundPolicy::Anyone => Self::Anyone,
+            config::InboundPolicy::Known => Self::Known,
+            config::InboundPolicy::Nobody => Self::Nobody,
+        }
+    }
+}
+
+impl From<InboundPolicy> for config::InboundPolicy {
+    fn from(policy: InboundPolicy) -> Self {
+        match policy {
+            InboundPolicy::Anyone => Self::Anyone,
+            InboundPolicy::Known => Self::Known,
+            InboundPolicy::Nobody => Self::Nobody,
+        }
+    }
+}
+
+/// The inbound policy and the identities refused outright.
+#[derive(uniffi::Record)]
+pub struct InboundSettings {
+    pub policy: InboundPolicy,
+    pub blocked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum InvitationState {
+    Pending,
+    Accepted,
+    Declined,
+}
+
+impl From<ipc::InvitationStatus> for InvitationState {
+    fn from(status: ipc::InvitationStatus) -> Self {
+        match status {
+            ipc::InvitationStatus::Pending => Self::Pending,
+            ipc::InvitationStatus::Accepted => Self::Accepted,
+            ipc::InvitationStatus::Declined => Self::Declined,
+        }
+    }
+}
+
+/// An invitation a coordinator delivered to this node. The code stays in the
+/// node: accepting by `id` is all the app needs.
+#[derive(uniffi::Record)]
+pub struct Invitation {
+    pub id: String,
+    pub network: String,
+    pub coordinator: String,
+    pub received_secs: u64,
+    pub state: InvitationState,
+}
+
+impl From<ipc::InvitationInfo> for Invitation {
+    fn from(info: ipc::InvitationInfo) -> Self {
+        Self {
+            id: info.id,
+            network: info.network.into(),
+            coordinator: info.coordinator.to_string(),
+            received_secs: info.received,
+            state: info.status.into(),
+        }
+    }
 }
 
 /// One network's liveness, for the health snapshot.
@@ -396,6 +494,23 @@ impl Node {
             .ok_or(RayError::NotStarted)
     }
 
+    fn edit_blocked(&self, peer: &str, remove: bool) -> Result<(), RayError> {
+        let state = self.state()?;
+        expect_ok(
+            self.runtime
+                .block_on(state.edit_peer_list(GlobalKey::Blocked, peer, remove)),
+            "block list",
+        )
+    }
+
+    fn set_global(&self, key: GlobalKey, value: &str) -> Result<(), RayError> {
+        let state = self.state()?;
+        expect_ok(
+            self.runtime.block_on(state.config_set(key, value)),
+            "settings",
+        )
+    }
+
     /// This node's endpoint id, read from a fresh `status()` snapshot.
     fn node_id(state: &Arc<DaemonState>) -> String {
         match state.status() {
@@ -512,6 +627,7 @@ fn saved_networks_status() -> Status {
         peers: Vec::new(),
         networks: Vec::new(),
         pending_networks: Vec::new(),
+        identity: None,
     };
     let Ok(cfg) = config::load() else {
         return empty;
@@ -581,7 +697,12 @@ impl Node {
         // is undefined behaviour once the runtime's threads are up, and it also
         // let one test redirect another's config reads mid-test.
         config::set_config_dir_override(PathBuf::from(&config_dir));
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        // An iOS packet tunnel is killed past roughly 50 MB. Every worker brings
+        // its own stack and allocator caches, and the mesh needs few of them.
+        #[cfg(target_os = "ios")]
+        builder.worker_threads(2).max_blocking_threads(8);
+        let runtime = builder
             .enable_all()
             .build()
             .expect("failed to build tokio runtime");
@@ -651,7 +772,11 @@ impl Node {
         // secret) or a bare room id (the network pubkey). Mirrors the CLI's
         // `ipc_join` fallback: on decode failure, treat the input as a room id.
         let (network_key, invite, coordinator) = match invite::decode_invite_code(&code) {
-            Ok((net_pubkey, coord, secret)) => (net_pubkey.to_string(), Some(secret), Some(coord)),
+            Ok(decoded) => (
+                decoded.network_key.to_string(),
+                Some(decoded.secret),
+                Some(decoded.coordinator),
+            ),
             Err(_) => (code.clone(), None, None),
         };
 
@@ -772,6 +897,23 @@ impl Node {
         }
         config::update_settings(|cfg| {
             cfg.default_hostname = Some(name);
+            Ok(())
+        })
+        .map_err(RayError::network)?;
+        Ok(())
+    }
+
+    /// Name the device after its Settings name on first run, so pairing
+    /// auto-joins all use one name. Folded into a hostname the way the desktop
+    /// folds its OS hostname, or `phone` when nothing usable is left. No-op once
+    /// a name is set.
+    pub fn seed_default_hostname(&self, name: String) -> Result<(), RayError> {
+        let name = hostname::mesh_form(&name).unwrap_or_else(|| "phone".to_string());
+        // One read-modify-write, so a rename landing at the same time wins.
+        config::update_settings(|cfg| {
+            if cfg.default_hostname.as_deref().is_none_or(str::is_empty) {
+                cfg.default_hostname = Some(name);
+            }
             Ok(())
         })
         .map_err(RayError::network)?;
@@ -1052,6 +1194,103 @@ impl Node {
         expect_ok(state.reject_connect(&short_id), "connections")
     }
 
+    /// Decline an incoming connect request and block the requester.
+    pub fn block_connect_request(&self, short_id: String) -> Result<(), RayError> {
+        let state = self.state()?;
+        expect_ok(
+            self.runtime.block_on(state.deny_connection(&short_id)),
+            "connections",
+        )
+    }
+
+    /// Ask the user behind `peer` (an identity) for a direct connection. They
+    /// must approve it before a private network is created.
+    pub fn connect_peer(&self, peer: String, hostname: Option<String>) -> Result<String, RayError> {
+        let state = self.state()?;
+        match self.runtime.block_on(state.connect(peer.trim(), hostname)) {
+            IpcMessage::Ok { message } => Ok(message),
+            IpcMessage::Joined { name, .. } => Ok(format!("Connected on {name}")),
+            IpcMessage::Error { message } => Err(RayError::Network(message)),
+            other => Err(RayError::Network(format!(
+                "unexpected connect response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Invitations coordinators delivered to this node, newest state included.
+    pub fn list_invitations(&self) -> Result<Vec<Invitation>, RayError> {
+        let state = self.state()?;
+        match self.runtime.block_on(state.list_invitations()) {
+            IpcMessage::InvitationsResponse { invitations } => {
+                Ok(invitations.into_iter().map(Invitation::from).collect())
+            }
+            IpcMessage::Error { message } => Err(RayError::Network(message)),
+            other => Err(RayError::Network(format!(
+                "unexpected invitations response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Join the network an invitation names.
+    pub fn accept_invitation(&self, id: String) -> Result<(), RayError> {
+        let state = self.state()?;
+        match self.runtime.block_on(state.accept_invitation(&id, None)) {
+            IpcMessage::Ok { .. } | IpcMessage::Joined { .. } => Ok(()),
+            IpcMessage::Error { message } => Err(RayError::Network(message)),
+            other => Err(RayError::Network(format!(
+                "unexpected invitation response: {other:?}"
+            ))),
+        }
+    }
+
+    pub fn decline_invitation(&self, id: String) -> Result<(), RayError> {
+        let state = self.state()?;
+        expect_ok(
+            self.runtime.block_on(state.decline_invitation(&id)),
+            "invitations",
+        )
+    }
+
+    /// Deliver an invite for `network` to `recipient`'s identity. An offline
+    /// recipient is not an error: the node retries until the invite expires.
+    pub fn send_invite(&self, network: String, recipient: String) -> Result<String, RayError> {
+        let recipient: EndpointId = recipient.trim().parse().map_err(RayError::network)?;
+        let state = self.state()?;
+        match self
+            .runtime
+            .block_on(state.deliver_invite(&network, recipient))
+        {
+            IpcMessage::Ok { message } => Ok(message),
+            IpcMessage::Error { message } => Err(RayError::Network(message)),
+            other => Err(RayError::Network(format!(
+                "unexpected invite response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Who may send connect requests and invitations, and who is blocked.
+    pub fn inbound_settings(&self) -> Result<InboundSettings, RayError> {
+        let settings = config::load_inbound().map_err(RayError::network)?;
+        Ok(InboundSettings {
+            policy: settings.inbound.into(),
+            blocked: settings.blocked.iter().map(ToString::to_string).collect(),
+        })
+    }
+
+    pub fn set_inbound_policy(&self, policy: InboundPolicy) -> Result<(), RayError> {
+        let value = config::InboundPolicy::from(policy);
+        self.set_global(GlobalKey::Inbound, value.as_ref())
+    }
+
+    /// Block `peer` (an identity, or a hostname this node knows).
+    pub fn block_peer(&self, peer: String) -> Result<(), RayError> {
+        self.edit_blocked(&peer, false)
+    }
+
+    pub fn unblock_peer(&self, peer: String) -> Result<(), RayError> {
+        self.edit_blocked(&peer, true)
+    }
+
     /// Join requests awaiting approval on a network we coordinate.
     pub fn list_join_requests(&self, network: String) -> Result<Vec<PendingRequest>, RayError> {
         let state = self.state()?;
@@ -1197,8 +1436,8 @@ impl Node {
             return Err(RayError::NodeRunning);
         }
 
-        let backup = keybackup::decrypt_backup(&code, &password)
-            .map_err(|e| RayError::BadBackup(e.to_string()))?;
+        let backup =
+            keybackup::decrypt_backup(&code, &password).map_err(|_| RayError::BadBackup)?;
         let restored = backup.secret_key.public().to_string();
 
         // Deliberately not `load_or_create`: on a device with no identity yet
@@ -1304,16 +1543,41 @@ impl Node {
         }
     }
 
+    /// Bring the data plane up over the utun interface of the iOS
+    /// `NEPacketTunnelProvider` this process hosts. Call it once the provider's
+    /// network settings are applied, so the interface exists. NetworkExtension
+    /// owns the routes and DNS, so unlike Android's [`Node::up`] this configures
+    /// nothing on the host. Requires [`Node::start`] first.
+    pub fn up_packet_tunnel(&self) -> Result<(), RayError> {
+        #[cfg(not(target_os = "ios"))]
+        {
+            Err(RayError::Network(
+                "the packet tunnel data plane is only supported on iOS".to_owned(),
+            ))
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let state = self.state()?;
+            // Opening the async utun registers it with the reactor, and this runs
+            // on a provider thread outside the runtime.
+            let _guard = self.runtime.enter();
+            let (reader, writer) = rayfish::tun::open_packet_tunnel().map_err(RayError::network)?;
+            self.runtime
+                .block_on(state.attach_external_tun(reader, writer));
+            Ok(())
+        }
+    }
+
     /// Tear the data plane down (stop the forward loop, close the fds) while
     /// keeping the control plane connected. Requires [`Node::start`] first.
     pub fn down(&self) -> Result<(), RayError> {
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             Err(RayError::Network(
-                "VpnService data plane is only supported on Android".to_owned(),
+                "the mobile data plane is only supported on Android and iOS".to_owned(),
             ))
         }
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let state = self.state()?;
             state.detach_tun();
@@ -1385,6 +1649,7 @@ impl Node {
             networks,
             pending_networks,
             inactive_networks,
+            identity,
             ..
         } = state.status()
         else {
@@ -1428,6 +1693,7 @@ impl Node {
             peers: flat_peers,
             networks: detail,
             pending_networks,
+            identity: identity.map(|id| id.to_string()),
         }
     }
 
@@ -1512,6 +1778,15 @@ mod device_name_tests {
     use super::*;
 
     #[test]
+    fn error_message_is_sentence_case() {
+        assert_eq!(
+            error_message(RayError::BadBackup),
+            "Wrong password, or the backup is damaged"
+        );
+        assert_eq!(error_message(RayError::Network(String::new())), "");
+    }
+
+    #[test]
     fn set_default_hostname_persists_and_rejects_invalid() {
         // Serialize against the other test that builds a Node, so its config
         // directory cannot bleed into the reads below.
@@ -1525,6 +1800,9 @@ mod device_name_tests {
 
         #[cfg(not(windows))]
         {
+            node.seed_default_hostname("iPhone 15 Pro".into()).unwrap();
+            assert_eq!(node.default_hostname(), "iphone-15-pro");
+
             node.set_default_hostname("my-phone".into()).unwrap();
             assert_eq!(node.default_hostname(), "my-phone");
             assert_eq!(
@@ -1534,6 +1812,10 @@ mod device_name_tests {
 
             // Invalid name is rejected and does not overwrite the stored value.
             assert!(node.set_default_hostname("BAD NAME".into()).is_err());
+            assert_eq!(node.default_hostname(), "my-phone");
+
+            // A name the user chose is never replaced by the model.
+            node.seed_default_hostname("Pixel 9".into()).unwrap();
             assert_eq!(node.default_hostname(), "my-phone");
 
             assert_eq!(node.quic_engine().unwrap(), QuicEngine::Standalone);

@@ -4,15 +4,6 @@
 use super::super::*;
 use futures::StreamExt;
 
-/// Upper bound on a single proactive full-mesh dial in `dial_all_members`. An
-/// offline peer's `connect` fails on its own (fast when it has no fresh
-/// discovery record, but up to iroh's internal handshake timeout (tens of
-/// seconds) when a stale record still points at it). We cap it so a
-/// restart/reconnect never blocks that long on a dead peer: the dial is
-/// best-effort and the peer's own reconnect loop re-establishes the link once it
-/// comes back online.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// A cold resume should give every recently known peer an equal chance to win
 /// the first connection race.  This cap avoids turning a large roster into an
 /// unbounded NAT-punch / relay storm.
@@ -24,7 +15,6 @@ const WARM_DIAL_CONCURRENCY: usize = 12;
 struct JoinContext<'a> {
     display_name: &'a str,
     my_hostname: &'a str,
-    alpn: &'a [u8],
     net_pubkey: EndpointId,
     /// Exact GroupBlob hash committed by the signed record used for this join.
     group_hash: blake3::Hash,
@@ -416,10 +406,22 @@ impl NetworkRegistry {
     ) -> Result<TryJoin> {
         let net_pubkey: EndpointId = network_key.parse().context("invalid network key")?;
 
-        if let Some(a) = alias
-            && self.networks.contains_key(a)
-        {
-            anyhow::bail!("already in network '{a}'");
+        // A name given with `--name` (or a restore's saved one) is used as is, so
+        // it must be free or this network's own: a restore, or a rejoin of a
+        // network whose saved config the join then updates.
+        if let Some(a) = alias {
+            match self.name_owner(a)? {
+                NameOwner::Free => {}
+                NameOwner::Network(key) if key == net_pubkey => {
+                    if self.networks.contains_key(a) {
+                        anyhow::bail!("already in network '{a}'");
+                    }
+                }
+                NameOwner::Network(_) | NameOwner::Unknown => anyhow::bail!(
+                    "network name '{a}' belongs to another network on this node; \
+                     choose another --name"
+                ),
+            }
         }
 
         // A fresh join has to be admitted by a coordinator over a mesh connection
@@ -456,13 +458,17 @@ impl NetworkRegistry {
             anyhow::bail!("this device has been unpaired by its primary");
         }
 
-        let alpn = transport::mesh_alpn();
         // Use coordinator's network name from GroupBlob, or user alias, or truncated key as fallback
         let blob_name = data
             .name
             .clone()
             .unwrap_or_else(|| network_key[..network_key.len().min(8)].to_string());
-        let display_name_owned = alias.map(|a| a.to_string()).unwrap_or(blob_name);
+        let display_name_owned = match alias {
+            Some(a) => a.to_string(),
+            // The coordinator chose this name, and another network here may hold
+            // it: take the next free suffix rather than that network's config.
+            None => self.unclaimed_network_name(&blob_name, Some(net_pubkey))?,
+        };
         let display_name = display_name_owned.as_str();
 
         if self.networks.contains_key(display_name) {
@@ -492,7 +498,6 @@ impl NetworkRegistry {
         let ctx = JoinContext {
             display_name,
             my_hostname: &my_hostname,
-            alpn: &alpn,
             net_pubkey,
             group_hash,
             invite,
@@ -630,48 +635,24 @@ impl NetworkRegistry {
         let mut last_err = anyhow::anyhow!("no coordinators tried");
         let mut pending = false;
         for coordinator_id in &order {
-            let dial_lock = self.mesh_dial_lock(*coordinator_id);
-            let _dial_guard = dial_lock.lock().await;
             // Reconnect + cleanup are daemon-wide now (the connection supervisor),
             // so no per-network reconnect task; readers report to the shared sender.
             let cancel = self.shutdown_token.child_token();
 
-            let peer_ip = derive_ipv6(coordinator_id);
-            let conn = if let Some(conn) = self
-                .peers
-                .conn_for_ip(&peer_ip)
-                .filter(|conn| conn.close_reason().is_none())
-            {
-                conn
-            } else {
-                tracing::info!(coordinator = %coordinator_id.fmt_short(), "connecting to coordinator");
-                let Ok(dialed) = tokio::time::timeout(
-                    DIAL_TIMEOUT,
-                    transport::connect_to_peer_with_alpn(
-                        &self.transport.endpoint,
-                        *coordinator_id,
-                        ctx.alpn,
-                    ),
-                )
-                .await
-                else {
+            // Joins to the same peer (pairing queues one per network) share one
+            // connection and run their handshakes on it side by side.
+            let DialedPeer { conn, claim } = match self.connect_mesh_peer(*coordinator_id).await {
+                Ok(dialed) => dialed,
+                Err(e) => {
+                    tracing::warn!(coordinator = %coordinator_id.fmt_short(), error = %e, "coordinator unreachable, trying next");
                     cancel.cancel();
-                    last_err = anyhow::anyhow!("coordinator dial timed out");
+                    last_err = anyhow::anyhow!("coordinator offline: {e}");
                     continue;
-                };
-                match dialed {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::warn!(coordinator = %coordinator_id.fmt_short(), error = %e, "coordinator unreachable, trying next");
-                        cancel.cancel();
-                        last_err = anyhow::anyhow!("coordinator offline: {e}");
-                        continue;
-                    }
                 }
             };
 
             match self
-                .run_join_handshake(ctx, data, conn, true, &cancel)
+                .run_join_handshake(ctx, data, conn, claim, true, &cancel)
                 .await
             {
                 Ok(JoinResult::Joined {
@@ -792,23 +773,9 @@ impl NetworkRegistry {
             }));
         }
 
-        let dial_lock = self.mesh_dial_lock(coordinator_id);
-        let _dial_guard = dial_lock.lock().await;
-        let peer_ip = derive_ipv6(&coordinator_id);
-        let connected = if let Some(conn) = self
-            .peers
-            .conn_for_ip(&peer_ip)
-            .filter(|conn| conn.close_reason().is_none())
-        {
-            Ok(conn)
-        } else {
-            tracing::info!(coordinator = %coordinator_id.fmt_short(), "connecting to coordinator");
-            transport::connect_to_peer_with_alpn(&self.transport.endpoint, coordinator_id, ctx.alpn)
-                .await
-        };
-        let state = match connected {
-            Ok(conn) => match self
-                .run_join_handshake(ctx, data, conn, false, &cancel)
+        let state = match self.connect_mesh_peer(coordinator_id).await {
+            Ok(DialedPeer { conn, claim }) => match self
+                .run_join_handshake(ctx, data, conn, claim, false, &cancel)
                 .await
             {
                 Ok(JoinResult::Joined {
@@ -925,12 +892,10 @@ impl NetworkRegistry {
                     .and_then(|member| member.hostname.clone())
             })
             .unwrap_or_else(|| default_join_hostname(&data.members, my_identity));
-        let alpn = transport::mesh_alpn();
         let invite_lock = Arc::new(AsyncMutex::new(()));
         let ctx = JoinContext {
             display_name: name,
             my_hostname: &my_hostname,
-            alpn: &alpn,
             net_pubkey,
             group_hash,
             invite: None,
@@ -991,6 +956,7 @@ impl NetworkRegistry {
         ctx: &JoinContext<'_>,
         data: &crate::membership::GroupBlob,
         conn: iroh::endpoint::Connection,
+        dial_claim: Option<DialClaim>,
         initial: bool,
         cancel: &CancellationToken,
     ) -> Result<JoinResult> {
@@ -998,7 +964,6 @@ impl NetworkRegistry {
             conn,
             &self.transport.endpoint,
             ctx.display_name,
-            ctx.alpn,
             self.mesh_ctx(),
             JoinParams {
                 my_hostname: Some(ctx.my_hostname.to_string()),
@@ -1009,6 +974,7 @@ impl NetworkRegistry {
                 auto_accept_firewall: ctx.auto_accept_firewall,
                 auto_accept_files: ctx.auto_accept_files,
                 initial,
+                dial_claim,
             },
             cancel.clone(),
             Arc::clone(self),
@@ -1427,42 +1393,17 @@ impl NetworkRegistry {
     ) {
         let ctx = self.mesh_ctx();
         let m = member;
-        let dial_lock = self.mesh_dial_lock(m.identity);
-        let _dial_guard = dial_lock.lock().await;
-        // Bound each dial so a dead peer with a stale discovery record can't
-        // stall restore for iroh's full internal handshake timeout; the
-        // connection supervisor retries anything still unreachable.
-        let peer_ip = derive_ipv6(&m.identity);
-        let dialed = if let Some(conn) = self
-            .peers
-            .conn_for_ip(&peer_ip)
-            .filter(|conn| conn.close_reason().is_none())
-        {
-            Ok(conn)
-        } else {
-            let Ok(dialed) = tokio::time::timeout(
-                DIAL_TIMEOUT,
-                transport::connect_to_peer_with_alpn(
-                    &self.transport.endpoint,
-                    m.identity,
-                    &transport::mesh_alpn(),
-                ),
-            )
-            .await
-            else {
-                self.reachability.note_fail(m.identity);
-                tracing::debug!(
-                    network = %network_name,
-                    peer = %m.identity.fmt_short(),
-                    timeout_secs = DIAL_TIMEOUT.as_secs(),
-                    "dial timed out; connection supervisor will retry"
-                );
-                return;
-            };
-            dialed
-        };
+        // Bounded inside the dialer, so a dead peer with a stale discovery
+        // record can't stall restore for iroh's full internal handshake
+        // timeout; the connection supervisor retries anything still
+        // unreachable. A dial another network already has in flight to this
+        // peer is shared rather than repeated.
+        let dialed = self.connect_mesh_peer(m.identity).await;
         match dialed {
-            Ok(peer_conn) => {
+            Ok(DialedPeer {
+                conn: peer_conn,
+                claim,
+            }) => {
                 if let Err(error) = send_mesh_hello(
                     &peer_conn,
                     net_pubkey,
@@ -1494,6 +1435,8 @@ impl NetworkRegistry {
                     network_name,
                 )
                 .await;
+                // Registered: later callers find the connection in the peer table.
+                drop(claim);
                 // Eager-connect reachability: a successful dial marks the peer
                 // reachable so `ray status` shows it active/idle, not offline.
                 self.reachability.note_ok(m.identity);
@@ -1714,7 +1657,6 @@ mod tests {
         let context = JoinContext {
             display_name: "box",
             my_hostname: "studio",
-            alpn: &alpn,
             net_pubkey: id(90),
             group_hash: blake3::hash(b"test roster"),
             invite: None,
@@ -1964,5 +1906,308 @@ mod tests {
         let peer = id(1);
         let target = select_restore_target(Some((hash, vec![peer])), None, true, &[peer]).unwrap();
         assert_eq!(target.peers, vec![peer]);
+    }
+
+    /// Points the daemon's config directory at a fresh temporary one until
+    /// dropped. Hold `config::CONFIG_ENV_LOCK` while it lives.
+    struct TempConfigDir {
+        _dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TempConfigDir {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os("RAYFISH_CONFIG_DIR");
+            unsafe { std::env::set_var("RAYFISH_CONFIG_DIR", dir.path()) };
+            Self {
+                _dir: dir,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for TempConfigDir {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("RAYFISH_CONFIG_DIR", value),
+                    None => std::env::remove_var("RAYFISH_CONFIG_DIR"),
+                }
+            }
+        }
+    }
+
+    /// A saved network that is not active, as one whose restore has not landed.
+    fn save_inactive_network(name: &str, key: &SecretKey) {
+        config::save_network(&config::NetworkConfig {
+            network_secret_key: Some(key.clone()),
+            network_public_key: Some(key.public()),
+            ..config::empty_network_config(name)
+        })
+        .unwrap();
+    }
+
+    fn saved_key(name: &str) -> Option<EndpointId> {
+        config::load_network(name)
+            .unwrap()
+            .and_then(|net| net.network_public_key)
+    }
+
+    /// A network's local name is its config's file name, so a create or join
+    /// under the name of a saved network that is not active would overwrite that
+    /// network's config, its secret key included. Both are refused instead.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_saved_network_keeps_its_name_while_inactive() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = TempConfigDir::new();
+        let daemon = build_headless(false).await.unwrap();
+        let saved = SecretKey::generate();
+        save_inactive_network("home", &saved);
+
+        let created = daemon
+            .registry
+            .create_network_inner(
+                GroupMode::Restricted,
+                Some("home".into()),
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(&created, IpcMessage::Error { message } if message.contains("saved network")),
+            "{created:?}"
+        );
+        let other = SecretKey::generate().public();
+        let joined = daemon
+            .registry
+            .join_network_inner(
+                &other.to_string(),
+                Some("home"),
+                None,
+                None,
+                None,
+                false,
+                false,
+                true,
+            )
+            .await;
+        let error = joined
+            .err()
+            .expect("a join under another network's name is refused");
+        assert!(
+            format!("{error:#}").contains("another network"),
+            "{error:#}"
+        );
+        assert_eq!(saved_key("home"), Some(saved.public()));
+        daemon.shutdown_and_close().await;
+    }
+
+    /// A name this node picks itself takes the next free suffix instead. The
+    /// network that holds a name keeps it, so a rejoin lands on its own config.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_picked_name_skips_names_other_networks_hold() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = TempConfigDir::new();
+        let daemon = build_headless(false).await.unwrap();
+        let (first, second) = (SecretKey::generate(), SecretKey::generate());
+        save_inactive_network("gaming", &first);
+        save_inactive_network("gaming-1", &second);
+        config::save_network(&config::empty_network_config("lan")).unwrap();
+        let registry = &daemon.registry;
+
+        let fresh = SecretKey::generate().public();
+        assert_eq!(
+            registry
+                .unclaimed_network_name("gaming", Some(fresh))
+                .unwrap(),
+            "gaming-2"
+        );
+        assert_eq!(
+            registry.unclaimed_network_name("gaming", None).unwrap(),
+            "gaming-2"
+        );
+        assert_eq!(
+            registry
+                .unclaimed_network_name("gaming", Some(first.public()))
+                .unwrap(),
+            "gaming"
+        );
+        assert_eq!(
+            registry
+                .unclaimed_network_name("gaming", Some(second.public()))
+                .unwrap(),
+            "gaming-1"
+        );
+        // A saved config that records no key is no network's own.
+        assert_eq!(registry.name_owner("lan").unwrap(), NameOwner::Unknown);
+        assert_eq!(
+            registry.unclaimed_network_name("lan", Some(fresh)).unwrap(),
+            "lan-1"
+        );
+        assert_eq!(registry.name_owner("office").unwrap(), NameOwner::Free);
+        // A name at the length limit leaves no room for a suffix: the candidate
+        // is cut short to stay a valid name rather than failing the lookup.
+        let longest = "a".repeat(63);
+        save_inactive_network(&longest, &SecretKey::generate());
+        assert_eq!(
+            registry
+                .unclaimed_network_name(&longest, Some(fresh))
+                .unwrap(),
+            format!("{}-1", "a".repeat(61))
+        );
+        daemon.shutdown_and_close().await;
+    }
+
+    /// A discovery relay that holds every request until `open` is set, then
+    /// answers a publish with 200 and a resolve with 404.
+    async fn gated_relay(open: tokio::sync::watch::Receiver<bool>) -> url::Url {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let url = url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut open = open.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    if open.wait_for(|open| *open).await.is_err() {
+                        return;
+                    }
+                    let status = if request.starts_with(b"PUT") {
+                        "200 OK"
+                    } else {
+                        "404 Not Found"
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        url
+    }
+
+    /// A create saves the network's config before its first record publish
+    /// returns, and registers the handle only after. A restore sweep landing in
+    /// that gap used to see a saved network that was not live and restore it,
+    /// leaving two coordinator states whose publishers fought over the record:
+    /// a joiner admitted by one was then removed by the other's older roster.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_restore_sweep_skips_a_network_still_being_created() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = TempConfigDir::new();
+        let (open_tx, open_rx) = tokio::sync::watch::channel(false);
+        let relay = gated_relay(open_rx).await;
+        config::update_settings(|cfg| {
+            cfg.mdns_enabled = false;
+            cfg.discovery_dns = config::ServerOverride {
+                servers: vec![relay.to_string()],
+                replace: true,
+            };
+            Ok(())
+        })
+        .unwrap();
+        let daemon = build_headless(false).await.unwrap();
+        let registry = Arc::clone(&daemon.registry);
+
+        let create = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move {
+                registry
+                    .create_network_inner(
+                        GroupMode::Restricted,
+                        Some("lab".into()),
+                        None,
+                        false,
+                        None,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while config::load_network("lab").unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the create saves its config before publishing");
+        assert!(
+            !registry.networks.contains_key("lab"),
+            "publish is held open"
+        );
+
+        let saved = config::load().unwrap();
+        let missing = missing_networks(
+            &saved.networks,
+            |name| registry.networks.contains_key(name),
+            |name| registry.restoring.contains(name),
+        );
+        assert!(
+            missing.iter().all(|m| m.name != "lab"),
+            "a sweep would restore a network that is still being created"
+        );
+        assert!(registry.claim_registration("lab").is_none());
+
+        open_tx.send(true).unwrap();
+        let created = create.await.unwrap().unwrap();
+        assert!(matches!(created, IpcMessage::Created { .. }), "{created:?}");
+        assert!(registry.networks.contains_key("lab"));
+        assert!(!registry.restoring.contains("lab"), "the claim is released");
+        daemon.shutdown_and_close().await;
+    }
+
+    /// `ray rename` refuses an invalid name, a name another saved network holds,
+    /// the network's own name and a network it does not know, and moves nothing.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rename_refuses_names_it_cannot_take() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = TempConfigDir::new();
+        let daemon = build_headless(false).await.unwrap();
+        let (home, lab) = (SecretKey::generate(), SecretKey::generate());
+        save_inactive_network("home", &home);
+        save_inactive_network("lab", &lab);
+
+        for (from, to, refusal) in [
+            ("home", "lab", "belongs to another network"),
+            ("home", "Lab", "invalid network name"),
+            ("home", "home", "already has that name"),
+            ("office", "work", "not found"),
+        ] {
+            let reply = daemon.registry.rename_network(from, to).await;
+            assert!(
+                matches!(&reply, IpcMessage::Error { message } if message.contains(refusal)),
+                "{from} -> {to}: {reply:?}"
+            );
+        }
+        assert_eq!(saved_key("home"), Some(home.public()));
+        assert_eq!(saved_key("lab"), Some(lab.public()));
+        assert!(config::load_network("work").unwrap().is_none());
+        daemon.shutdown_and_close().await;
     }
 }

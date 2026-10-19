@@ -406,7 +406,7 @@ impl Ipv6Prefix {
 }
 
 /// Who may route out through us on one network.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Allow {
     /// `ray exit-node allow <net> '*'`: any member of the network.
     any: bool,
@@ -517,10 +517,38 @@ impl ExitServer {
         self.nets.store(Arc::new(nets));
     }
 
+    /// Follow a network renamed on this node: its allow-list is now consulted
+    /// under `to`. Leaves the policy alone when the network offers no exit,
+    /// including on standby, when nothing is loaded.
+    pub fn rename_network(&self, from: &str, to: &str) {
+        self.nets.rcu(|nets| {
+            let mut nets = HashMap::clone(nets);
+            if let Some(allow) = nets.remove(from) {
+                nets.insert(SmolStr::new(to), allow);
+            }
+            nets
+        });
+    }
+
     /// Drop all exit offers (data plane going to standby). Pair with
     /// [`apply_os`](Self::apply_os) to take the kernel state down with them.
     pub fn clear(&self) {
         self.nets.store(Arc::default());
+    }
+
+    /// Re-read the host's addresses and on-link prefixes that transit is refused
+    /// to. Runs on every reconcile and on the daemon's periodic kernel check, so a
+    /// new lease or interface is covered within one tick instead of at the next
+    /// `ray up`. Spawns a process; callers keep it off the async runtime.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    pub fn refresh_host_interfaces(&self) {
+        let host = host_interfaces();
+        if **self.self_addrs.load() != host.addrs {
+            self.set_self_addrs(host.addrs);
+        }
+        if **self.on_link.load() != host.on_link {
+            self.set_on_link(host.on_link);
+        }
     }
 
     /// Reconcile the kernel forwarding/NAT with the current offer state: install it
@@ -536,9 +564,7 @@ impl ExitServer {
     pub fn apply_os(&self, tun_name: &str) -> Option<String> {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
         if self.is_active() {
-            let host = host_interfaces();
-            self.set_self_addrs(host.addrs);
-            self.set_on_link(host.on_link);
+            self.refresh_host_interfaces();
             // Re-read rather than cache: an uplink gains or loses IPv6 with a
             // lease or a link change, and the claim we publish has to follow.
             self.v6_uplink.store(has_v6_uplink(), Ordering::Relaxed);
@@ -752,6 +778,18 @@ impl ExitClient {
     pub fn set(&self, selection: Option<ExitSelection>) {
         self.inner.store(selection.map(Arc::new));
     }
+
+    /// Follow a network renamed on this node: a selection on `from` now tags its
+    /// traffic with, and routes it on, `to`.
+    pub fn rename_network(&self, from: &str, to: &str) {
+        self.inner.rcu(|selection| match selection {
+            Some(s) if s.network == from => Some(Arc::new(ExitSelection {
+                network: SmolStr::new(to),
+                ..ExitSelection::clone(s)
+            })),
+            other => other.clone(),
+        });
+    }
 }
 
 /// The upstreams a client full tunnel should forward DNS to, or `None` when it
@@ -759,9 +797,9 @@ impl ExitClient {
 ///
 /// Only a tunnel that carries IPv6 and not IPv4 needs one, which is IPv6-only
 /// mode and, since the gateway's claim narrows the tunnel too, a dual-stack node
-/// routing through a gateway that can only return IPv6. Every upstream the
-/// desktop capture can produce is IPv4 (`DnsConfigurator::captured_upstreams`),
-/// so left alone the daemon would forward each lookup out the physical link: the
+/// routing through a gateway that can only return IPv6. Nearly every upstream
+/// the desktop capture produces is IPv4 (`DnsConfigurator::captured_upstreams`;
+/// only a Linux resolv.conf takeover captures IPv6 ones), so left alone the daemon would forward each lookup out the physical link: the
 /// exit node would carry the traffic and see none of the names that chose it. A
 /// tunnel that carries IPv4 has no such gap, since it carries the captured
 /// upstreams' own family.
@@ -835,12 +873,27 @@ const V6_FORWARD: &str = "net.inet6.ip6.forwarding";
 ///
 /// Present-but-empty fields mean "we could not read the original, so do not touch
 /// it on the way out". `pf_token` is BSD-only (see [`pf_enable`]).
+///
+/// `extra` holds further sysctls to put back after `v4`/`v6`, in order: on Linux the
+/// per-interface IPv6 `forwarding` values (writing `all` overwrites every one of
+/// them) and any `accept_ra` we raised. Each is its own `sysctl:<path>=<value>` line,
+/// which an older build reading the file skips, and a file an older build wrote
+/// simply has none.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[derive(Default)]
 struct Snapshot {
     v4: String,
     v6: String,
     pf_token: Option<String>,
+    extra: Vec<SavedSysctl>,
+}
+
+/// One sysctl value to restore on teardown.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SavedSysctl {
+    path: String,
+    value: String,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
@@ -852,6 +905,18 @@ impl Snapshot {
             return snap;
         };
         for line in body.lines() {
+            // Split on the last `=`: values are numbers or a pf token, while an
+            // interface name inside a `sysctl:` path may itself contain one.
+            if let Some((path, value)) = line
+                .strip_prefix("sysctl:")
+                .and_then(|rest| rest.rsplit_once('='))
+            {
+                snap.extra.push(SavedSysctl {
+                    path: path.to_string(),
+                    value: value.to_string(),
+                });
+                continue;
+            }
             match line.split_once('=') {
                 Some(("v4", v)) => snap.v4 = v.to_string(),
                 Some(("v6", v)) => snap.v6 = v.to_string(),
@@ -867,15 +932,24 @@ impl Snapshot {
         if let Some(token) = &self.pf_token {
             body.push_str(&format!("pf_token={token}\n"));
         }
+        for saved in &self.extra {
+            body.push_str(&format!("sysctl:{}={}\n", saved.path, saved.value));
+        }
         crate::config::write_file(path, body.as_bytes(), false)
     }
 
     /// Put the forwarding sysctls back, skipping any we never managed to read.
+    /// `extra` goes last, because writing `all/forwarding` resets every
+    /// interface's own value and those have to land on top of it. An interface
+    /// that has gone away since fails its write, which is ignored.
     fn restore_sysctls(&self) {
         for (name, value) in [(V4_FORWARD, &self.v4), (V6_FORWARD, &self.v6)] {
             if !value.is_empty() {
                 let _ = write_sysctl(name, value);
             }
+        }
+        for saved in &self.extra {
+            let _ = write_sysctl(&saved.path, &saved.value);
         }
     }
 }
@@ -890,11 +964,16 @@ fn snapshot_path() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
+mod forward_fw;
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 use linux::*;
 #[cfg(target_os = "linux")]
-pub use linux::{disable, install_client_routing, teardown_client_routing};
+pub use linux::{
+    KernelCheck, check_kernel_state, disable, install_client_routing, reassert_forward_firewall,
+    teardown_client_routing,
+};
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 mod pf;
@@ -1372,6 +1451,180 @@ mod tests {
         for phys in ["en0", "eth0", "bridge100", "wlan0", "lo0"] {
             assert!(!is_tunnel_iface(phys), "{phys} is a real interface");
         }
+    }
+
+    /// The client marks are OR'd in under a mask, only for traffic to this host,
+    /// and the reply mark only goes onto packets nobody else marked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_client_marks_never_clobber_another_tools_bits() {
+        let script = client_nft_script("tun-rayfish");
+        assert!(
+            script.contains("fib daddr type local ct mark set ct mark | 0x7261"),
+            "{script}"
+        );
+        assert!(
+            script.contains("fib daddr type local meta mark set meta mark | 0x7261"),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "meta mark == 0 ct mark & 0x7261 == 0x7261 meta mark set meta mark | 0x7261"
+            ),
+            "{script}"
+        );
+        assert!(
+            !script.contains("mark set 0x"),
+            "no bare assignment: {script}"
+        );
+    }
+
+    /// The bypass rule matches the mark under its mask, add and del alike, and the
+    /// batch carries one command per line without the family.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_bypass_rule_is_masked_and_batched() {
+        assert_eq!(
+            bypass_rule_args("add"),
+            strs(&[
+                "rule",
+                "add",
+                "fwmark",
+                "0x7261/0x7261",
+                "table",
+                "main",
+                "pref",
+                PREF_BYPASS
+            ])
+        );
+        assert_eq!(bypass_rule_args("del")[1], "del");
+        assert_eq!(
+            batch_script(&[bypass_rule_args("add"), strs(&["rule", "del", "pref", "1"])]),
+            "rule add fwmark 0x7261/0x7261 table main pref 100\nrule del pref 1\n"
+        );
+    }
+
+    /// A JSON dump answers for itself; without one, the plain listing does,
+    /// so an `nft` without JSON support does not read every table as gone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_table_check_without_json_falls_back_to_listing_it() {
+        let json = r#"{"nftables":[{"table":{"family":"inet","name":"rayfish-exit"}}]}"#;
+        let never = || panic!("a readable dump needs no second run");
+        assert!(nft_table_exists_with(Some(json), "rayfish-exit", never));
+        assert!(!nft_table_exists_with(Some(json), "other", never));
+        for unreadable in [None, Some(""), Some("JSON support not compiled-in")] {
+            assert!(nft_table_exists_with(unreadable, "rayfish-exit", || true));
+            assert!(!nft_table_exists_with(unreadable, "rayfish-exit", || false));
+        }
+    }
+
+    /// The gateway clamps the MSS of SYNs crossing the TUN in both directions,
+    /// and the chain that does it filters nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_server_nft_ruleset_clamps_mss_on_the_tun() {
+        let rules = server_nft_ruleset("tun-rayfish");
+        assert!(
+            rules.contains("type filter hook forward priority mangle; policy accept;"),
+            "{rules}"
+        );
+        for dir in ["iifname", "oifname"] {
+            assert!(
+                rules.contains(&format!(
+                    "{dir} \"tun-rayfish\" tcp flags & (syn | rst) == syn \
+                     tcp option maxseg size > 1220 tcp option maxseg size set 1220"
+                )),
+                "{rules}"
+            );
+        }
+        assert!(!rules.contains(" drop"), "{rules}");
+        assert!(!rules.contains("rt mtu"), "{rules}");
+    }
+
+    /// The periodic check sees a full rule set as intact, and a missing piece or
+    /// an older build's unmasked bypass as broken.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn client_rules_are_checked_for_every_piece() {
+        let full = "\
+0:\tfrom all lookup local
+99:\tfrom 2001:db8::5 lookup main
+100:\tfrom all fwmark 0x7261/0x7261 lookup main
+101:\tfrom all lookup main suppress_prefixlength 0
+102:\tfrom all lookup 29793
+32766:\tfrom all lookup main
+";
+        assert!(client_rules_present(full));
+        assert!(!client_rules_present(
+            &full.replace("0x7261/0x7261", "0x7261")
+        ));
+        assert!(!client_rules_present(&full.replace("102:", "103:")));
+        assert!(!client_rules_present(&full.replace(
+            "101:\tfrom all lookup main suppress_prefixlength 0\n",
+            ""
+        )));
+    }
+
+    /// Only real interfaces at `accept_ra=1` are raised: not the templates, not
+    /// loopback, not our TUN, not one already at 0 or 2, and not one that was
+    /// already forwarding.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn accept_ra_is_raised_only_where_forwarding_would_silence_it() {
+        let current: Vec<(String, String)> = [
+            ("all", "1"),
+            ("default", "1"),
+            ("lo", "1"),
+            ("tun-rayfish", "1"),
+            ("eth0", "1"),
+            ("eth1", "0"),
+            ("wlan0", "2"),
+            ("enp3s0", "1"),
+        ]
+        .iter()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(
+            ra_interfaces_to_raise(&current, "tun-rayfish", &[]),
+            ["eth0", "enp3s0"]
+        );
+        // An interface that was forwarding on its own already ignored RAs.
+        assert_eq!(
+            ra_interfaces_to_raise(&current, "tun-rayfish", &["enp3s0".to_string()]),
+            ["eth0"]
+        );
+    }
+
+    /// The snapshot keeps its extra sysctls in order and still reads a file an
+    /// older build wrote, which has none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_snapshot_round_trips_extra_sysctls_and_reads_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exit-forward.snapshot");
+        fs::write(&path, "v4=0\nv6=0\n").unwrap();
+        let old = Snapshot::load(&path);
+        assert_eq!((old.v4.as_str(), old.v6.as_str()), ("0", "0"));
+        assert!(old.extra.is_empty());
+
+        let saved = |path: &str, value: &str| SavedSysctl {
+            path: path.to_string(),
+            value: value.to_string(),
+        };
+        let snap = Snapshot {
+            v4: "0".into(),
+            v6: "0".into(),
+            pf_token: None,
+            extra: vec![
+                saved("net/ipv6/conf/eth0/forwarding", "1"),
+                saved("net/ipv6/conf/odd=name/accept_ra", "1"),
+            ],
+        };
+        snap.save(&path).unwrap();
+        let back = Snapshot::load(&path);
+        assert_eq!(back.extra, snap.extra);
+        assert_eq!(back.v6, "0");
     }
 
     /// The Linux twin of the above, and the same argument: `nft_load` never runs in

@@ -340,7 +340,7 @@ impl FileService {
     /// offer, so unknown endpoints cannot make the phone process file metadata.
     pub(crate) async fn accept_file_offer(self: &Arc<Self>, conn: Connection) {
         let remote_id = conn.remote_id();
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         if self.transport.is_suspended()
             && self
                 .registry
@@ -651,18 +651,10 @@ impl FileService {
         }
     }
 
-    /// This user's identity: the cert's `user_identity` (paired secondary) or our
-    /// own endpoint id (primary/unpaired).
-    fn own_user_identity(&self) -> EndpointId {
-        self.current_device_cert()
-            .map(|c| c.user_identity)
-            .unwrap_or_else(|| self.transport.endpoint.id())
-    }
-
     /// `ray pair list`: enumerate this user's other paired devices as roster
     /// members sharing our `user_identity` but a different device id.
     pub(crate) fn list_paired_devices(&self) -> IpcMessage {
-        let own_user = self.own_user_identity();
+        let own_user = self.registry.own_identity();
         let own_device = self.transport.endpoint.id();
         let mut by_device: HashMap<EndpointId, (Option<String>, Vec<String>)> = HashMap::new();
         for entry in self.registry.networks.iter() {

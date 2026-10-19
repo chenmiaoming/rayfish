@@ -59,6 +59,7 @@ pub(super) fn enable(_tun_name: &str) -> Result<()> {
             v4: read_sysctl(V4_FORWARD),
             v6: read_sysctl(V6_FORWARD),
             pf_token: None,
+            extra: Vec::new(),
         };
         snap.save(&path)?;
         snap

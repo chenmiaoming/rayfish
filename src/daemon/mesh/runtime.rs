@@ -2,12 +2,18 @@
 //! connect-all, activate/deactivate (data plane), teardown, leave. Split out of `daemon/mod.rs`.
 
 use super::super::*;
+use dashmap::mapref::entry::Entry;
 // The desktop-gated `start_ssh` binds SSH listeners on concrete IPs, and the
 // macOS exit-node helpers below match on underlay addresses. macOS without the
 // desktop feature (the ray-mobile host build) still needs the import.
 #[cfg(any(feature = "desktop", target_os = "macos"))]
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
+use std::sync::PoisonError;
 use std::sync::RwLock;
+use tokio::sync::MutexGuard as AsyncMutexGuard;
+#[cfg(target_os = "linux")]
+use tokio::time::MissedTickBehavior;
 
 use super::create_join::{RestoredGroupBlob, mesh_version_is_speakable};
 
@@ -17,6 +23,10 @@ use super::create_join::{RestoredGroupBlob, mesh_version_is_speakable};
 /// enough that a broken exit node does not hang the command.
 #[cfg(target_os = "macos")]
 const EXIT_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often the exit node's kernel state is checked for removal by another tool.
+#[cfg(target_os = "linux")]
+const EXIT_KERNEL_CHECK: Duration = Duration::from_secs(30);
 
 /// Per-attempt wait for a control pong. Also paces the readiness loop.
 #[cfg(target_os = "macos")]
@@ -283,6 +293,12 @@ impl NetworkRegistry {
         };
 
         let last_group_hash = self.seal_group_snapshot(&mut net_state).await?;
+        // Another path may have registered this network while the roster was
+        // resolving. Its state is the live one, so neither rewrite its config
+        // nor sign a record of ours.
+        if self.networks.contains_key(name) {
+            return Ok(ipc_err(format!("network '{name}' already active")));
+        }
         let restored_hash_was_published = source_published && last_group_hash == source_hash;
 
         // Replace only the blob-derived projection on the latest saved config.
@@ -302,7 +318,12 @@ impl NetworkRegistry {
         })?;
         anyhow::ensure!(updated.is_some(), "network is no longer saved");
         let restored_record = self
-            .publish_group_hash(name, &net_secret_key, last_group_hash)
+            .publish_group_hash(
+                name,
+                &net_secret_key,
+                last_group_hash,
+                &net_state.snapshot_commit,
+            )
             .await;
 
         let cancel = self.shutdown_token.child_token();
@@ -319,6 +340,39 @@ impl NetworkRegistry {
             &cancel,
             restored_record.as_ref().map(|_| last_group_hash),
         );
+
+        // Register the network from its restored local state before dialing
+        // peers, so `ray status` / IPC sees it the instant the local restore
+        // finishes. `dial_all_members` awaits a handshake per peer; when it gated
+        // this insert, a freshly (re)started daemon answered `status` with "no
+        // active networks" until every dial resolved.
+        //
+        // Never replace a handle another path registered meanwhile: the old
+        // handle's tasks would keep running on a second state for the same
+        // network, and its publisher would sign that state's roster over the
+        // live one's.
+        let handle = NetworkHandle {
+            name: name.to_string(),
+            network_key: net_public_key,
+            role: NetworkRole::Coordinator,
+            state: Arc::clone(&state),
+            dht_notify: Some(Arc::clone(&dht_notify)),
+            cancel: cancel.clone(),
+            tasks,
+            invite_lock: Arc::clone(&invite_lock),
+            // A coordinator holds the network key and publishes a version this
+            // build supports, including the rollout compatibility version.
+            incompatible: None,
+        };
+        match self.networks.entry(name.to_string()) {
+            Entry::Occupied(_) => {
+                cancel.cancel();
+                return Ok(ipc_err(format!("network '{name}' already active")));
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(handle);
+            }
+        }
 
         self.register_coordinator_handler(
             &ctx,
@@ -367,25 +421,6 @@ impl NetworkRegistry {
         // any member that has since been idle-closed, before the first reconverge
         // (self excluded).
         self.seed_route_map(name, &members_to_dial);
-        // Register the network from its restored local state before dialing
-        // peers, so `ray status` / IPC sees it the instant the local restore
-        // finishes. `dial_all_members` awaits a handshake per peer; when it gated
-        // this insert, a freshly (re)started daemon answered `status` with "no
-        // active networks" until every dial resolved.
-        let handle = NetworkHandle {
-            name: name.to_string(),
-            network_key: net_public_key,
-            role: NetworkRole::Coordinator,
-            state,
-            dht_notify: Some(dht_notify),
-            cancel: cancel.clone(),
-            tasks,
-            invite_lock,
-            // A coordinator holds the network key and publishes a version this
-            // build supports, including the rollout compatibility version.
-            incompatible: None,
-        };
-        self.networks.insert(name.to_string(), handle);
         self.refresh_search_domains().await;
 
         // Full mesh: proactively dial every known member in the background so a
@@ -424,7 +459,7 @@ impl NetworkRegistry {
     }
 
     #[tracing::instrument(skip(self), fields(net = name))]
-    pub(crate) async fn nuke_network(&self, name: &str, force: bool) -> IpcMessage {
+    pub(crate) async fn nuke_network(self: &Arc<Self>, name: &str, force: bool) -> IpcMessage {
         let (is_coordinator, has_other_members, has_other_coordinators) = {
             let handle = match self.networks.get(name) {
                 Some(h) => h,
@@ -915,17 +950,18 @@ impl NetworkRegistry {
 
     /// Start a member network's restore loop, unless one is already running for
     /// it. The [`restoring`](NetworkRegistry::restoring) guard is what lets the
-    /// startup path and the supervisor's sweep both call this freely.
-    fn spawn_member_restore(self: &Arc<Self>, net: &config::NetworkConfig) {
+    /// startup path and the supervisor's sweep both call this freely. Returns
+    /// the loop's handle, for a caller with work to do once it ends.
+    pub(crate) fn spawn_member_restore(
+        self: &Arc<Self>,
+        net: &config::NetworkConfig,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let Some(net_pubkey) = net.network_public_key.map(|k| k.to_string()) else {
             tracing::warn!(network = %net.name, "no network public key in config, skipping restore");
-            return;
+            return None;
         };
-        if !self.restoring.insert(net.name.clone()) {
-            return;
-        }
+        let claim = self.claim_registration(&net.name)?;
         let me = Arc::clone(self);
-        let guard = net.name.clone();
         let saved = SavedMemberNetwork {
             name: net.name.clone(),
             net_pubkey,
@@ -935,23 +971,21 @@ impl NetworkRegistry {
             cached_hash: net.last_group_hash,
             cached_is_published: net.last_group_hash_published,
         };
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             Arc::clone(&me).restore_member_network(saved).await;
-            me.restoring.remove(&guard);
-        });
+            drop(claim);
+        }))
     }
 
     /// Start a coordinator network's restore, unless one is already running for
     /// it. Returns the handle so startup can await it as a barrier; the sweep
     /// drops it. Unlike the member path this is a single attempt, so the sweep's
     /// tick is what retries it.
-    fn spawn_coordinator_restore(
+    pub(crate) fn spawn_coordinator_restore(
         self: &Arc<Self>,
         net: &config::NetworkConfig,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        if !self.restoring.insert(net.name.clone()) {
-            return None;
-        }
+        let claim = self.claim_registration(&net.name)?;
         let me = Arc::clone(self);
         let name = net.name.clone();
         let mode = net.group_mode;
@@ -968,7 +1002,7 @@ impl NetworkRegistry {
                 }
                 _ => {}
             }
-            me.restoring.remove(&name);
+            drop(claim);
         }))
     }
 
@@ -1093,21 +1127,6 @@ impl NetworkRegistry {
                 let _ = me
                     .join_network(&key, name.as_deref(), None, None, None, false, false)
                     .await;
-            });
-        }
-
-        // Publish the contact record immediately so `ray connect` works right
-        // away, rather than waiting up to one publisher interval (the active-gated
-        // `spawn_contact_publisher` only re-checks every TTL/2).
-        if let Some(secret) = app_config.contact_secret_key.clone()
-            && let Ok(client) =
-                dht::create_pkarr_client(&self.transport.endpoint, &self.transport.pkarr_relay_url)
-        {
-            let endpoint_id = self.transport.endpoint.id();
-            tokio::spawn(async move {
-                if let Err(e) = dht::publish_contact(&client, &secret, endpoint_id).await {
-                    tracing::warn!(error = %e, "failed to publish contact record on connect");
-                }
             });
         }
 
@@ -1259,10 +1278,10 @@ impl Daemon {
         // wrong instead of silently reporting success on a degraded VPN.
         let mut warnings: Vec<String> = Vec::new();
 
-        // The TUN device/routes are managed by the OS on desktop. On Android the
-        // packet interface is a `VpnService` fd whose routes are configured on the
-        // Kotlin side, so these desktop route calls don't apply.
-        #[cfg(not(target_os = "android"))]
+        // The TUN device/routes are managed by the OS on desktop. On Android and
+        // iOS the platform owns the packet interface and configures its routes,
+        // so these desktop route calls don't apply.
+        #[cfg(not(embedded_tun))]
         {
             let tun_name = self.tun_name.load().as_str().to_owned();
             let my_v6 = derive_ipv6(&self.transport.identity.local_identity());
@@ -1300,6 +1319,43 @@ impl Daemon {
                 let err = format!("{e:#}");
                 tracing::warn!(error = %err, "failed to route 200::/7 into TUN");
                 warnings.push(format!("failed to route IPv6 peer range into TUN: {err}"));
+            }
+
+            // Another interface routing part of `200::/7` wins over ours for
+            // that part, and the mesh just looks dead. Say which one. The
+            // metric is left alone: lowering it would break the other overlay
+            // instead, and which one should win is the operator's call.
+            #[cfg(target_os = "linux")]
+            match tun::overlay_route_warnings(&tun_name).await {
+                Ok(found) => {
+                    for w in found {
+                        tracing::warn!("{w}");
+                        warnings.push(w);
+                    }
+                }
+                Err(e) => tracing::debug!(error = %format!("{e:#}"), "cannot list IPv6 routes"),
+            }
+
+            // Something else on the host can take the link down or delete the
+            // address or route later; put them back while we are up.
+            #[cfg(target_os = "linux")]
+            {
+                let token = CancellationToken::new();
+                if let Some(old) = self
+                    .tun_watch_token
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .replace(token.clone())
+                {
+                    old.cancel();
+                }
+                tun::spawn_repair_watcher(
+                    tun_name.clone(),
+                    my_v6,
+                    Arc::clone(&self.active),
+                    Arc::clone(&self.registry.exit_reapply),
+                    token,
+                );
             }
 
             // Another VPN's kill switch ends in a catch-all block, and its
@@ -1406,7 +1462,17 @@ impl Daemon {
         // One reconcile at a time (see `Daemon::exit_reconcile`): the kernel
         // enable's snapshot-then-write is not safe to interleave.
         let started = tokio::time::Instant::now();
-        let _guard = self.exit_reconcile.lock().await;
+        let guard = self.exit_reconcile.lock().await;
+        self.apply_exit_node_locked(&guard, started).await
+    }
+
+    /// [`apply_exit_node`](Self::apply_exit_node) for a caller already holding
+    /// `exit_reconcile`, which `_guard` proves. `started` is when it asked.
+    async fn apply_exit_node_locked(
+        &self,
+        _guard: &AsyncMutexGuard<'_, ()>,
+        started: tokio::time::Instant,
+    ) -> Option<String> {
         let locked = started.elapsed();
         let tun_name = self.tun_name.load().as_str().to_owned();
         let reload = self.registry.reload_exit_state();
@@ -1467,6 +1533,137 @@ impl Daemon {
                 }
             }
         });
+    }
+
+    /// Spawn the daemon-lifetime check that the exit node's kernel state is still
+    /// there. Our nft tables and `ip rule`s live outside the process, and a
+    /// firewall reload, `nft flush ruleset` or a network manager restart removes
+    /// them without telling us: a gateway then forwards without masquerading, and
+    /// a client's tunnel quietly stops. Every [`EXIT_KERNEL_CHECK`] this re-applies
+    /// whatever went missing, re-reads the gateway's own addresses, and re-adds
+    /// the host-firewall forwarding exceptions and mesh SSH accept a reload
+    /// dropped. Linux only, the
+    /// one platform whose exit state another tool commonly flushes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {
+        let daemon = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(EXIT_KERNEL_CHECK);
+            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            // The first tick is immediate, and `activate` has just applied.
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = daemon.shutdown_token.cancelled() => break,
+                    _ = tick.tick() => {}
+                }
+                if daemon.active.load(Ordering::SeqCst) {
+                    daemon.check_exit_kernel_state().await;
+                    #[cfg(feature = "desktop")]
+                    daemon.reassert_ssh_host_firewall().await;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn spawn_exit_kernel_watch(self: &Arc<Self>) {}
+
+    /// The same tick puts back the mesh SSH host-firewall accept `ray up` added,
+    /// which the same reload drops. Quiet: `ray up` already warned with the fix.
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    async fn reassert_ssh_host_firewall(&self) {
+        if self
+            .ssh_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+        {
+            return;
+        }
+        let tun_name = self.tun_name.load().as_str().to_owned();
+        let port = crate::forward::SSH_LISTEN_PORT;
+        if let Ok(Some(warning)) = tokio::task::spawn_blocking(move || {
+            crate::hostfw::ensure_inbound_tcp(&tun_name, port).warning(port)
+        })
+        .await
+        {
+            tracing::debug!(warning, "host firewall still blocks mesh SSH");
+        }
+    }
+
+    /// One pass of [`spawn_exit_kernel_watch`](Self::spawn_exit_kernel_watch).
+    /// The read-only probe runs without the reconcile lock, so a clean pass
+    /// never waits on (or holds up) a reconcile. Anything found is read again
+    /// under the lock before acting, since the first read may have caught a
+    /// reconcile half-done.
+    #[cfg(target_os = "linux")]
+    async fn check_exit_kernel_state(&self) {
+        if self
+            .probe_exit_kernel()
+            .await
+            .is_none_or(|check| check.is_clean())
+        {
+            return;
+        }
+        let started = tokio::time::Instant::now();
+        let guard = self.exit_reconcile.lock().await;
+        // `ray down` may have run while this waited for the lock. It tears the
+        // exit state down under the same lock, so re-applying now would put
+        // back the forwarding and NAT it just removed.
+        if !self.active.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(check) = self.probe_exit_kernel().await else {
+            return;
+        };
+        if check.forward_firewall {
+            let tun_name = self.tun_name.load().as_str().to_owned();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::exit_node::reassert_forward_firewall(&tun_name)
+            })
+            .await;
+        }
+        let missing = check.missing();
+        if missing.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            missing = %missing.join(", "),
+            "exit-node kernel state was removed from outside rayfish (a firewall \
+             reload or `nft flush ruleset`?); re-applying"
+        );
+        if let Some(warning) = self.apply_exit_node_locked(&guard, started).await {
+            tracing::warn!(
+                warning,
+                "exit-node re-apply after kernel state went missing"
+            );
+        }
+    }
+
+    /// Read what the exit roles in effect need from the kernel, and re-read the
+    /// gateway's own addresses. `None` when neither role is in effect.
+    #[cfg(target_os = "linux")]
+    async fn probe_exit_kernel(&self) -> Option<crate::exit_node::KernelCheck> {
+        let server = self.registry.exit_server.clone();
+        let serving = server.is_active();
+        // A failed install was already reported and rolled back; retrying it on
+        // a timer is not this check's job.
+        let using = (self.registry.exit_client.is_active()
+            && self.registry.exit_install_error.load().is_none())
+        .then(|| self.tunnel_carries());
+        if !serving && using.is_none() {
+            return None;
+        }
+        let tun_name = self.tun_name.load().as_str().to_owned();
+        tokio::task::spawn_blocking(move || {
+            if serving {
+                server.refresh_host_interfaces();
+            }
+            crate::exit_node::check_kernel_state(serving, using, &tun_name)
+        })
+        .await
+        .ok()
     }
 
     /// After a `ray exit-node` mutation: if the data plane is up, reconcile the
@@ -1831,6 +2028,17 @@ impl Daemon {
             };
         }
 
+        // First, so the watcher does not undo the link-down below.
+        #[cfg(target_os = "linux")]
+        if let Some(token) = self
+            .tun_watch_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            token.cancel();
+        }
+
         // The SSH listeners and the IPv4 bridge bind the mesh IPs, which go down
         // with the data plane.
         #[cfg(feature = "desktop")]
@@ -1857,7 +2065,7 @@ impl Daemon {
         #[cfg(target_os = "macos")]
         crate::hostfw::remove_tun_passthrough();
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(embedded_tun))]
         if let Err(e) = tun::set_link_down(&tun_name).await {
             tracing::warn!(error = %format!("{e:#}"), "failed to bring TUN interface down");
         }

@@ -11,9 +11,12 @@
 //! targets every node, and a `*` peer means any peer. A `*-host-a,host-b`
 //! subject targets every current or explicitly declared host except those hosts;
 //! in `allows`, it means any peer except those hosts. Exclusion groups and
-//! aliases expand to joined hostnames when applied. Reapply after new hosts join
-//! to update target exclusions. Specs and their output (`--dry-run`, `--example`)
-//! use YAML.
+//! aliases expand to joined hostnames when applied. A target exclusion alias
+//! with no joined devices excludes no hosts yet. Target rules are published for
+//! concrete hosts only, so later devices with other hostnames inherit no grant.
+//! Reapply after new hosts join to include new servers and resolve user devices
+//! to exclude. Peer exclusions still require joined devices for every alias.
+//! Specs and their output (`--dry-run`, `--example`) use YAML.
 //!
 //! Firewall model: suggestions are additive. An `allows` list opens exactly the
 //! listed peers/ports (the node's own inbound default, Deny by default, drops
@@ -254,11 +257,16 @@ pub const EXAMPLE_SPEC: &str = r#"# Rayfish deploy spec. See `ray apply --help`.
 # assigned that exact hostname (it cannot pick another), so the firewall always
 # resolves the peer it names. The `*` subject targets every node, and a `*` peer
 # means any peer. In `allows`, `*-host-a,admins` means any peer except the named
-# host and group. An alias in an exclusion needs a joined device at apply time.
+# host and group. An alias in a peer exclusion needs a joined device at apply time.
 # Paired devices share a firewall identity, so excluding one also
 # excludes its user's other devices as peers. As a target, `*-admins` selects
-# current and explicitly declared hosts except that group's hosts. Reapply after
-# new hosts join. Other matching target blocks still add their rules.
+# current and explicitly declared hosts except that group's hosts. Target
+# exclusion aliases with no devices exclude no hosts yet. Only concrete targets
+# receive rules; there is no wildcard grant for later joiners. Reapply after
+# new hosts join to include new servers and exclude joined user devices. Keep
+# aliases in the spec even before they join. Other matching target blocks still
+# add their rules, so a broad `*` allow can also grant access to excluded users.
+# Explicit server targets must not name user devices.
 # Suggestions are advisory: each node queues
 # them for `ray firewall accept`, or auto-installs them if it joined with
 # `--auto-accept-firewall`.
@@ -272,7 +280,9 @@ pub const EXAMPLE_SPEC: &str = r#"# Rayfish deploy spec. See `ray apply --help`.
 
 aliases:
   # Fill in a real identity, e.g.:
-  #   alice: <paste from `ray identityof <host>`>
+  #   alice: <paste from `ray identityof <host>` or their `ray status`>
+  # An alias with no joined device can be invited with --invite-missing;
+  # they accept or decline with `ray invitations`.
 groups:
   admins: [alice, jumpbox]   # `alice` (alias, once defined) + a literal hostname
 
@@ -398,7 +408,9 @@ pub fn merge_aliases(
 ///
 /// Target exclusions expand against `current` and explicit spec hosts. Empty
 /// entries preserve membership and clear prior suggestions on excluded targets.
-/// Excluded aliases with no joined devices return an error.
+/// Target exclusion aliases with no joined devices exclude no targets yet and
+/// return a warning. No wildcard grant is emitted, so later devices with other
+/// hostnames get no rules until reapply. Peer exclusion aliases must resolve.
 pub fn expand_firewall(
     fw: &DeployNetwork,
     aliases: &BTreeMap<String, String>,
@@ -522,11 +534,15 @@ pub fn expand_firewall(
         }
 
         let subjects = if subject.starts_with("*-") {
-            let exclusion = expand_exclusion(subject)?;
-            let excluded: BTreeSet<_> = exclusion[2..].split(',').collect();
+            let exclusions = crate::firewall::parse_excluded_peer_terms(subject)?
+                .context("expected target exclusion selector")?;
+            // Empty aliases are safe here: only concrete targets receive rules,
+            // so a later user device cannot inherit a wildcard grant.
+            let excluded: BTreeSet<_> =
+                exclusions.into_iter().flat_map(&mut resolve_name).collect();
             targets
                 .iter()
-                .filter(|host| !excluded.contains(host.as_str()))
+                .filter(|host| !excluded.contains(*host))
                 .cloned()
                 .collect()
         } else {
@@ -596,6 +612,8 @@ fn merge_spec(existing: &mut String, new: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::firewall::{PeerFilter, materialize_suggestions};
+    use iroh::SecretKey;
     use ray_proto::policy::HostSuggestions;
 
     /// Parse a spec from YAML text. The top level is a `networks:` map. Unknown
@@ -970,26 +988,103 @@ networks:
     }
 
     #[test]
-    fn excluded_target_alias_without_joined_devices_rejects_apply() {
+    fn excluded_target_alias_without_joined_devices_warns() {
         let spec = parse(
             "networks:\n  sample-net:\n    '*-owner':\n      allows:\n        '*': 'tcp:12345'\n",
         )
         .unwrap();
         // Stored aliases must have the same exclusion behavior as inline aliases.
         let aliases = [("owner".to_string(), "identity-owner".to_string())].into();
-        let error = expand_firewall(
+        let current = ["build-box".parse().unwrap()].into();
+        let (expanded, warnings) = expand_firewall(
             &spec.networks["sample-net"],
             &aliases,
             &spec.groups,
             &|_| Vec::new(),
-            &HashSet::new(),
+            &current,
         )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("excluded alias 'owner' has no joined devices")
-        );
+        .unwrap();
+        assert_eq!(warnings, ["owner"]);
+        assert_eq!(expanded["*"], DeployHost::default());
+        assert_eq!(expanded["build-box"].allows["*"], "tcp:12345");
+    }
+
+    #[test]
+    fn excluded_user_targets_stay_closed_before_and_after_join_and_reapply() {
+        let spec = parse(
+            r#"
+aliases:
+  guest: identity-guest
+groups:
+  users: [owner, guest]
+networks:
+  sample-net:
+    "*-users":
+      allows:
+        coordinator: "tcp:12345"
+"#,
+        )
+        .unwrap();
+        let stored = [("owner".to_string(), "identity-owner".to_string())].into();
+        let aliases = merge_aliases(&stored, &spec.aliases);
+        let coordinator = SecretKey::from_bytes(&[1; 32]).public();
+        let resolve_peer = |host: &str| (host == "coordinator").then_some(coordinator);
+        let mut published = SuggestedFirewall::new();
+        for joined in [
+            vec![],
+            vec!["owner-phone"],
+            vec!["owner-phone", "guest-laptop"],
+        ] {
+            let current = ["coordinator", "build-box"]
+                .into_iter()
+                .chain(joined.iter().copied())
+                .map(|host| host.parse().unwrap())
+                .collect();
+            let (expanded, warnings) = expand_firewall(
+                &spec.networks["sample-net"],
+                &aliases,
+                &spec.groups,
+                &|identity| {
+                    joined
+                        .iter()
+                        .filter(|host| {
+                            matches!(
+                                (identity, **host),
+                                ("identity-owner", "owner-phone")
+                                    | ("identity-guest", "guest-laptop")
+                            )
+                        })
+                        .map(|host| host.to_string())
+                        .collect()
+                },
+                &current,
+            )
+            .unwrap();
+            assert_eq!(warnings.len(), 2 - joined.len());
+            // Newly joined users get no grant from the last published spec,
+            // including the interval before the coordinator reapplies it.
+            for user in ["owner-phone", "guest-laptop"] {
+                assert!(
+                    materialize_suggestions("sample-net", user, &published, &resolve_peer,)
+                        .is_empty()
+                );
+            }
+            published.extend(suggested_firewall(&expanded));
+            assert_eq!(published["*"], HostSuggestions::default());
+            for user in ["owner-phone", "guest-laptop"] {
+                assert!(
+                    materialize_suggestions("sample-net", user, &published, &resolve_peer,)
+                        .is_empty()
+                );
+            }
+            let server_rules =
+                materialize_suggestions("sample-net", "build-box", &published, &resolve_peer);
+            assert_eq!(server_rules.len(), 1);
+            assert_eq!(server_rules[0].peer, PeerFilter::Identity(coordinator));
+            let diff = membership_diff(&expanded, &current).unwrap();
+            assert!(diff.joins.is_empty());
+            assert!(diff.leaves.is_empty());
+        }
     }
 
     #[test]
