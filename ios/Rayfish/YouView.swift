@@ -12,8 +12,6 @@ struct YouView: View {
     @State private var restoring = false
     @State private var autoAccept = Preferences.autoAcceptOwnDevices
     @State private var crashReporting = Preferences.crashReporting
-    @State private var keychain: [KeychainBackup] = []
-    @State private var savingKeychain = false
 
     private var snapshot: Snapshot { model.snapshot }
 
@@ -73,8 +71,8 @@ struct YouView: View {
                     nameInput = snapshot.deviceName
                     editingName = true
                 }
-                .font(Rf.mono(14))
             }
+            .frame(minHeight: 44)
             if !snapshot.nodeId.isEmpty {
                 KeyValueRow(key: "Node id", value: String(snapshot.nodeId.prefix(16)) + "…") {
                     model.copy(snapshot.nodeId, toast: "Node id copied")
@@ -113,41 +111,18 @@ struct YouView: View {
             Toggle(isOn: $autoAccept) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Accept files from my devices").font(Rf.text()).foregroundStyle(Rf.body)
-                    Text("Saves them without asking").font(Rf.mono(12)).foregroundStyle(Rf.faint)
+                    Text("Saves them without asking").font(Rf.text(13)).foregroundStyle(Rf.faint)
                 }
             }
+            .padding(.vertical, 6)
             .onChange(of: autoAccept) { _, on in Preferences.autoAcceptOwnDevices = on }
-            HStack {
-                Text("QUIC engine").font(Rf.text()).foregroundStyle(Rf.body)
-                Spacer()
-                // A Menu rather than a menu Picker: the picker's label ignores
-                // custom fonts and renders in the large system style.
-                Menu {
-                    Picker("QUIC engine", selection: Binding(
-                        get: { snapshot.quicEngine },
-                        set: { engine in
-                            Task {
-                                if await model.perform(.setQuicEngine(engine), success: "Engine saved, restarting") != nil {
-                                    await model.restart()
-                                }
-                            }
-                        }
-                    )) {
-                        Text("Standalone").tag(QuicEngine.standalone)
-                        Text("FQ-CoDel").tag(QuicEngine.fqCodel)
-                    }
-                } label: {
-                    Text("\(snapshot.quicEngine == .fqCodel ? "FQ-CoDel" : "Standalone") ✎")
-                        .font(Rf.semibold(14)).foregroundStyle(Rf.rose400)
-                        .padding(.vertical, 6).padding(.horizontal, 8)
-                }
-            }
             Toggle(isOn: $crashReporting) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Crash reporting").font(Rf.text()).foregroundStyle(Rf.body)
-                    Text(crashReporting ? "on · diagnostics" : "off").font(Rf.mono(12)).foregroundStyle(Rf.faint)
+                    Text(crashReporting ? "on · diagnostics" : "off").font(Rf.text(13)).foregroundStyle(Rf.faint)
                 }
             }
+            .padding(.vertical, 6)
             .onChange(of: crashReporting) { _, on in
                 Preferences.crashReporting = on
                 Telemetry.apply()
@@ -160,6 +135,28 @@ struct YouView: View {
                 }
                 .padding(.top, 8)
             }
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("QUIC engine").font(Rf.text()).foregroundStyle(Rf.body)
+                    Text("Changing it restarts the tunnel").font(Rf.text(13)).foregroundStyle(Rf.faint)
+                }
+                Picker("QUIC engine", selection: Binding(
+                    get: { snapshot.quicEngine },
+                    set: { engine in
+                        Task {
+                            if await model.perform(.setQuicEngine(engine), success: "Engine saved, restarting") != nil {
+                                await model.restart()
+                            }
+                        }
+                    }
+                )) {
+                    Text("Standalone").tag(QuicEngine.standalone)
+                    Text("FQ-CoDel").tag(QuicEngine.fqCodel)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .padding(.top, 12)
         }
         .tint(Rf.rose400)
     }
@@ -167,7 +164,7 @@ struct YouView: View {
     private var identity: some View {
         SectionCard {
             SectionLabel("Identity")
-            Text("Your identity is the key your networks know you by. Back it up to move it to a new phone.")
+            Text("Your identity is the key your networks know you by. It is kept in iCloud Keychain, so a new phone on your Apple ID can restore it. Back it up to move it anywhere else.")
                 .font(Rf.text()).foregroundStyle(Rf.muted)
             HStack(spacing: 8) {
                 PillButton("Back up") { backingUp = true }
@@ -180,52 +177,6 @@ struct YouView: View {
                 }
             }
             .padding(.top, 8)
-            let saved = keychain.first { $0.publicKey == snapshot.nodeId }
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("iCloud Keychain").font(Rf.text()).foregroundStyle(Rf.body)
-                    Text(saved.map { "Saved \($0.saved.formatted(date: .abbreviated, time: .shortened))" } ?? "Not saved")
-                        .font(Rf.mono(12)).foregroundStyle(saved == nil ? Rf.faint : Rf.emerald)
-                }
-                Spacer()
-                LinkButton(savingKeychain ? "Saving…" : (saved == nil ? "Save" : "Update")) {
-                    Task { await saveToKeychain() }
-                }
-                .disabled(savingKeychain || snapshot.nodeId.isEmpty)
-                if let saved {
-                    LinkButton("Remove") { removeFromKeychain(saved) }
-                }
-            }
-            .padding(.top, 14)
-        }
-        .task { await reloadKeychain() }
-    }
-
-    private func reloadKeychain() async {
-        keychain = await Task.detached { IdentityKeychain.list() }.value
-    }
-
-    private func saveToKeychain() async {
-        savingKeychain = true
-        defer { savingKeychain = false }
-        do {
-            let node = model.tunnel.local.node
-            let name = snapshot.deviceName.isEmpty ? UIDevice.current.name : snapshot.deviceName
-            try await Task.detached { try IdentityKeychain.save(node: node, deviceName: name) }.value
-            await reloadKeychain()
-            model.toast = "Saved to iCloud Keychain"
-        } catch {
-            model.toast = userMessage(error)
-        }
-    }
-
-    private func removeFromKeychain(_ backup: KeychainBackup) {
-        do {
-            try IdentityKeychain.remove(backup.publicKey)
-            keychain.removeAll { $0.publicKey == backup.publicKey }
-            model.toast = "Removed from iCloud Keychain"
-        } catch {
-            model.toast = userMessage(error)
         }
     }
 
@@ -267,11 +218,11 @@ struct BackupSheet: View {
                 RayfishField("Password", text: $password, secure: true)
                 RayfishField("Confirm password", text: $confirm, secure: true)
                 if !confirm.isEmpty && password != confirm {
-                    Text("The passwords do not match").font(Rf.mono(12)).foregroundStyle(Rf.rose400)
+                    Text("The passwords do not match").font(Rf.text(13)).foregroundStyle(Rf.rose400)
                 }
                 PillButton(working ? "Sealing…" : "Save backup") { Task { await seal() } }
                     .disabled(password.count < 8 || password != confirm || working)
-                Text("At least 8 characters.").font(Rf.mono(12)).foregroundStyle(Rf.faint)
+                Text("At least 8 characters.").font(Rf.text(13)).foregroundStyle(Rf.faint)
             }
             .padding(20)
         }
@@ -350,7 +301,7 @@ struct RestoreSheet: View {
                     }
                 }
                 if !code.isEmpty {
-                    Text("Backup loaded · \(code.count) characters").font(Rf.mono(12)).foregroundStyle(Rf.emerald)
+                    Text("Backup loaded · \(code.count) characters").font(Rf.text(13)).foregroundStyle(Rf.emerald)
                 }
                 RayfishField("Password", text: $password, secure: true)
                 PillButton(working ? "Restoring…" : "Restore") { Task { await restore(replace: false) } }

@@ -18,6 +18,7 @@ final class AppModel: ObservableObject {
     let tunnel: Tunnel
     private var refreshing = false
     private var refreshAgain = false
+    private var keychainChecked: String?
 
     init() {
         let directory = (try? AppGroup.stateDirectory())
@@ -115,6 +116,21 @@ final class AppModel: ObservableObject {
     /// Every published change redraws the tabs; the 2 s poll mostly repeats itself.
     private func apply(_ next: Snapshot) {
         if next != snapshot { snapshot = next }
+        keepKeychainBackup()
+    }
+
+    /// Keep this device's identity in iCloud Keychain, once per identity and
+    /// launch, so a new phone on the same Apple ID can restore it.
+    private func keepKeychainBackup() {
+        let nodeId = snapshot.nodeId
+        guard !nodeId.isEmpty, nodeId != keychainChecked else { return }
+        keychainChecked = nodeId
+        let node = tunnel.local.node
+        let name = snapshot.deviceName.isEmpty ? UIDevice.current.name : snapshot.deviceName
+        Task.detached(priority: .utility) {
+            guard !IdentityKeychain.list().contains(where: { $0.publicKey == nodeId }) else { return }
+            try? IdentityKeychain.save(node: node, deviceName: name)
+        }
     }
 
     /// An invite code for `network`, ready to show.

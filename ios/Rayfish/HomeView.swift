@@ -150,7 +150,7 @@ struct RowSubtitle: View {
         self.color = color
     }
     var body: some View {
-        Text(text).font(Rf.mono(12)).foregroundStyle(color)
+        Text(text).font(Rf.text(13)).foregroundStyle(color)
     }
 }
 

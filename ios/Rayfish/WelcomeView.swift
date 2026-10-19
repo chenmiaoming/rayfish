@@ -22,7 +22,7 @@ struct WelcomeView: View {
                     }
                     .padding(.top, 14)
                     Text("Restoring moves an identity from another device, or back from a backup you saved. You will need the password you chose for it.")
-                        .font(Rf.mono(12)).foregroundStyle(Rf.faint)
+                        .font(Rf.text(13)).foregroundStyle(Rf.faint)
                         .padding(.top, 10)
                 }
                 if !keychain.isEmpty {

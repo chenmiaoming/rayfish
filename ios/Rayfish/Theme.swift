@@ -18,11 +18,18 @@ enum Rf {
     static let primary = color(0xf4f4f5)
     static let onPrimary = color(0x18181b)
 
-    static func text(_ size: CGFloat = 14) -> Font { .custom("ChakraPetch-Regular", size: size) }
-    static func semibold(_ size: CGFloat = 14) -> Font { .custom("ChakraPetch-SemiBold", size: size) }
+    /// Body text is the system face. Chakra Petch is kept for titles and Plex
+    /// Mono for data (ids, addresses, codes), where they read well.
+    static func text(_ size: CGFloat = 14) -> Font { system(size, .regular) }
+    static func semibold(_ size: CGFloat = 14) -> Font { system(size, .semibold) }
     static func bold(_ size: CGFloat = 20) -> Font { .custom("ChakraPetch-Bold", size: size) }
     static func mono(_ size: CGFloat = 12) -> Font { .custom("IBMPlexMono-Regular", size: size) }
     static let logo = Font.custom("PressStart2P-Regular", size: 14)
+
+    /// Scales with Dynamic Type, as the custom fonts do.
+    private static func system(_ size: CGFloat, _ weight: UIFont.Weight) -> Font {
+        Font(UIFontMetrics(forTextStyle: .body).scaledFont(for: .systemFont(ofSize: size, weight: weight)) as CTFont)
+    }
 
     private static func color(_ hex: UInt32) -> Color {
         Color(red: Double((hex >> 16) & 255) / 255,
@@ -44,6 +51,12 @@ enum Rf {
                                    .font: UIFont(name: "ChakraPetch-Bold", size: 17) ?? .boldSystemFont(ofSize: 17)]
         UINavigationBar.appearance().standardAppearance = bar
         UINavigationBar.appearance().scrollEdgeAppearance = bar
+        let segments = UISegmentedControl.appearance()
+        segments.selectedSegmentTintColor = UIColor(rose500)
+        segments.setTitleTextAttributes([.foregroundColor: UIColor(body),
+                                         .font: UIFont.systemFont(ofSize: 14, weight: .medium)], for: .normal)
+        segments.setTitleTextAttributes([.foregroundColor: UIColor.white,
+                                         .font: UIFont.systemFont(ofSize: 14, weight: .semibold)], for: .selected)
     }
 }
 
@@ -83,7 +96,7 @@ struct StatusEyebrow: View {
         let color = transitioning ? Rf.amber : (connected ? Rf.emerald : Rf.muted)
         HStack(spacing: 7) {
             Circle().fill(color).frame(width: 6, height: 6)
-            Text(text.uppercased()).font(Rf.mono(12)).tracking(2).foregroundStyle(color)
+            Text(text.uppercased()).font(Rf.semibold(12)).tracking(1).foregroundStyle(color)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 14)
@@ -109,7 +122,7 @@ struct SectionLabel: View {
     init(_ text: String) { self.text = text }
 
     var body: some View {
-        Text(text.uppercased()).font(Rf.mono(12)).tracking(2).foregroundStyle(Rf.faint)
+        Text(text.uppercased()).font(Rf.semibold(12)).tracking(1).foregroundStyle(Rf.faint)
             .padding(.bottom, 8)
     }
 }
@@ -187,8 +200,10 @@ struct LinkButton: View {
 
     var body: some View {
         Button(action: action) {
+            // No horizontal padding, so the text lines up with the text around it.
             Text(title).font(Rf.semibold(14)).foregroundStyle(color)
-                .padding(.vertical, 6).padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -232,7 +247,7 @@ struct ToggleCard: View {
             Toggle(isOn: $isOn) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(Rf.semibold(16)).foregroundStyle(Rf.heading)
-                    Text(subtitle).font(Rf.mono(12)).foregroundStyle(Rf.muted)
+                    Text(subtitle).font(Rf.text(13)).foregroundStyle(Rf.muted)
                 }
             }
             .tint(Rf.rose500)

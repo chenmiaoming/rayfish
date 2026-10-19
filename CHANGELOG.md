@@ -13,7 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `just ios-run` builds, installs, and launches the iOS app on a connected iPhone.
 - An iOS app, the counterpart of the Android one: networks, invites and QR
   codes, pairing, file transfer, firewall rules, join and connect requests,
-  and identity backup and restore, including a backup in iCloud Keychain. It
+  and identity backup and restore. It keeps the identity in iCloud Keychain on
+  its own, so a new iPhone on the same Apple ID can restore it. It
   runs Rayfish as a VPN through a packet tunnel extension.
 - `ray up --set KEY=VALUE` persists settings after startup, alongside controller
   enrollment. Repeat the flag for multiple settings; `--enable` is an alias and

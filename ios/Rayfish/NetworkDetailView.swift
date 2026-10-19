@@ -100,7 +100,7 @@ struct NetworkDetailView: View {
         SectionCard {
             SectionLabel("Peers · \(network.peersOnline) online")
             if network.peers.isEmpty {
-                Text("No peers yet").font(Rf.mono(14)).foregroundStyle(Rf.faint)
+                Text("No peers yet").font(Rf.text()).foregroundStyle(Rf.faint)
             }
             ForEach(network.peers) { peer in
                 let domain = peer.domain(in: network)
@@ -142,7 +142,7 @@ struct NetworkDetailView: View {
             // Removal takes a rule's position in the node's full list.
             let inbound = firewall.rules.enumerated().filter { $0.element.direction == "in" }
             if inbound.isEmpty {
-                Text("No inbound rules").font(Rf.mono(14)).foregroundStyle(Rf.faint).padding(.top, 6)
+                Text("No inbound rules").font(Rf.text()).foregroundStyle(Rf.faint).padding(.top, 6)
             }
             ForEach(inbound, id: \.offset) { index, rule in
                 HStack {
@@ -151,7 +151,7 @@ struct NetworkDetailView: View {
                     Text(rule.port == "*" ? "\(rule.action) \(rule.protocol)" : "\(rule.action) \(rule.protocol):\(rule.port)")
                         .font(Rf.mono(14)).foregroundStyle(Rf.body)
                     Spacer()
-                    Text(peerName(rule.peer, in: network)).font(Rf.mono(12)).foregroundStyle(Rf.faint)
+                    Text(peerName(rule.peer, in: network)).font(Rf.text(13)).foregroundStyle(Rf.faint)
                     LinkButton("Remove") {
                         Task {
                             if let updated = await model.perform(.removeFirewallRule(index: UInt32(index)), success: "Rule removed")?.firewall {
