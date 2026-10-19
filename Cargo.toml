@@ -232,7 +232,7 @@ iroh-mdns-address-lookup = { git = "https://github.com/n0-computer/iroh-address-
 # iroh 1.3 from the fork's `rayfish` branch, which merges these PR branches:
 # https://github.com/n0-computer/iroh/pull/4397 (direct address filter)
 # https://github.com/n0-computer/iroh/pull/4406 (socket configuration hook)
-# fix/release-removed-home-relay-upstream (idle phones drop their relay)
+# https://github.com/n0-computer/iroh/pull/4616 (release a removed home relay)
 # iroh-base/-dns/-relay are patched too so the fork and registry copies don't clash.
 iroh = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
 iroh-base = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
