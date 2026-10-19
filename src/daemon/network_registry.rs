@@ -36,6 +36,12 @@ const LEAVE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// past it the restore carries on in the background.
 const RENAME_RESTORE_WAIT: Duration = Duration::from_secs(10);
 
+/// How long re-authorizing a device that pairs again waits for the records
+/// that no longer nullify it to be published, before the pairing is refused
+/// ([`NetworkRegistry::reauth_device_locked`]). A failed publish is retried
+/// after five seconds, so this leaves room for a second attempt.
+const REAUTHORIZATION_PUBLISH_WAIT: Duration = Duration::from_secs(10);
+
 /// Keep the persisted hint set small and bounded.  A hint is only a speed-up;
 /// the endpoint id in the QUIC certificate remains the authentication boundary.
 const MAX_WARM_ENDPOINT_HINTS: usize = 64;
@@ -278,6 +284,9 @@ pub(crate) struct NetworkRegistry {
     /// revocation still under way when the device pairs again would put back
     /// the nullifiers the re-authorization clears.
     pub(crate) revocation_lock: AsyncMutex<()>,
+    /// Signalled each time a network's record is confirmed published here, for
+    /// a caller waiting until one is ([`Self::reauth_device_locked`]).
+    pub(crate) records_published: tokio::sync::watch::Sender<()>,
 }
 
 /// One saved network the restore supervisor found missing from the live map,
@@ -402,6 +411,7 @@ impl NetworkRegistry {
             unpair_lock: AsyncMutex::new(()),
             notice_nudge: Arc::new(Notify::new()),
             revocation_lock: AsyncMutex::new(()),
+            records_published: tokio::sync::watch::Sender::default(),
         }
     }
 
@@ -1484,7 +1494,12 @@ impl NetworkRegistry {
             }
         };
         match publish_signed_record(&client, commit, network, hash, packet).await {
-            Ok(marked) => marked,
+            Ok(marked) => {
+                if marked {
+                    self.records_published.send_replace(());
+                }
+                marked
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to publish network record");
                 false
@@ -1831,28 +1846,40 @@ impl NetworkRegistry {
         true
     }
 
-    /// Clear a re-paired device's nullifier (the inverse of `unpair`). Invoked
-    /// directly by the pairing accept arm when it re-authorizes a device: drops
-    /// it from the durable `revoked_devices` seed and from every coordinated
-    /// network's blob nullifier set, republishing so the device's fresh cert is
-    /// honored mesh wide again. Non-coordinated networks clear on their own
-    /// coordinator's next reseal. Waits for a revocation under way, which an
-    /// unpair the device asked for before this pairing can still be. Best-effort;
-    /// a persist/publish failure is logged, not surfaced.
-    pub(crate) async fn reauth_device(self: &Arc<Self>, device: EndpointId) {
-        let _revoking = self.revocation_lock.lock().await;
+    /// Clear the nullifier of a device that pairs again, before it gets the new
+    /// certificate (the inverse of `unpair`): drop it from the durable
+    /// `revoked_devices` seed and from every coordinated network's blob
+    /// nullifier set, wait, at most [`REAUTHORIZATION_PUBLISH_WAIT`], until each
+    /// network that changed has its new record published, and only then tell
+    /// the members. The device joins the networks shared with it as soon as it
+    /// has the certificate, reading the record first, and the earlier record
+    /// still nullifies its key. A nullifier names no pairing, so the device
+    /// would take that for a revocation of the new one. Non-coordinated
+    /// networks clear on their own coordinator's next reseal.
+    ///
+    /// Returns whether a revocation was lifted. If a record is not published in
+    /// time, the revocation is put back, so that the next attempt lifts it and
+    /// waits again, and an error is returned. The caller holds
+    /// [`Self::revocation_lock`].
+    pub(crate) async fn reauth_device_locked(
+        self: &Arc<Self>,
+        device: EndpointId,
+    ) -> Result<bool, String> {
+        // Before anything changes, so that no publication after it is missed.
+        let mut published = self.records_published.subscribe();
         // Drop from the durable nullifier seed so a later reseal won't re-add it.
         let hex = device.to_string();
+        let mut lifted = false;
         // No-op when the device was not in the seed: `update_settings` skips the
         // write when the callback changes nothing.
-        if let Err(e) = config::update_settings(|cfg| {
+        config::update_settings(|cfg| {
             if let Some(pos) = cfg.revoked_devices.iter().position(|d| *d == hex) {
                 cfg.revoked_devices.remove(pos);
+                lifted = true;
             }
             Ok(())
-        }) {
-            tracing::warn!(error = %e, "reauth: failed to clear device from nullifier seed");
-        }
+        })
+        .map_err(|e| format!("could not clear the device from the nullifier seed: {e:#}"))?;
         // Collect coordinated networks (clone the handles) before awaiting.
         let mut nets: Vec<(String, SharedNetworkState, Option<Arc<Notify>>)> = Vec::new();
         for entry in self.networks.iter() {
@@ -1871,23 +1898,60 @@ impl NetworkRegistry {
                 ));
             }
         }
-        let mut changed = false;
+        let mut changed = Vec::new();
+        let mut failure = None;
         for (net, state, dht_notify) in nets {
             let removed = {
                 let mut s = state.write().unwrap();
                 s.nullifiers.remove(&device)
             };
-            if removed {
-                changed = true;
-                update_snapshot_and_publish(&state, &self.transport.blob_store, &dht_notify).await;
-                let net_pubkey = state.read().unwrap().network_public_key;
-                broadcast_member_sync(self, net_pubkey, &net, None).await;
+            if !removed {
+                continue;
+            }
+            lifted = true;
+            // A network destroyed meanwhile leaves no record to wait for.
+            if !update_snapshot_and_publish(&state, &self.transport.blob_store, &dht_notify).await
+                && !state.read().unwrap().destroyed
+            {
+                failure = Some(format!(
+                    "could not save network '{net}' without the device's nullifier"
+                ));
+                break;
+            }
+            changed.push((net, state));
+        }
+        // Each network's own publisher publishes its record.
+        let deadline = tokio::time::Instant::now() + REAUTHORIZATION_PUBLISH_WAIT;
+        while failure.is_none() && !changed.iter().all(|(net, _)| record_is_published(net)) {
+            if !matches!(
+                tokio::time::timeout_at(deadline, published.changed()).await,
+                Ok(Ok(()))
+            ) {
+                failure = Some("the networks' records were not published in time".to_string());
             }
         }
-        if changed {
+        if let Some(message) = failure {
+            if let Err(error) = self.revoke_device_locked(device, |_| {}).await {
+                tracing::warn!(device = %device.fmt_short(), %error, "could not put back the revocation a failed re-authorization lifted");
+            }
+            return Err(message);
+        }
+        for (net, state) in changed {
+            let net_pubkey = state.read().unwrap().network_public_key;
+            broadcast_member_sync(self, net_pubkey, &net, None).await;
+        }
+        if lifted {
             tracing::info!(device = %device.fmt_short(), "re-authorized device (cleared nullifier)");
         }
+        Ok(lifted)
     }
+}
+
+/// Whether `network`'s current record is published, which its publisher marks
+/// once the relay took it. A network no longer saved here is not waited for.
+fn record_is_published(network: &str) -> bool {
+    config::load_network(network)
+        .is_ok_and(|net| net.is_none_or(|net| net.last_group_hash_published))
 }
 
 #[cfg(test)]

@@ -133,7 +133,7 @@ impl Daemon {
         let response: control::PairMsg = match control::recv_framed(&mut recv).await {
             Ok(response) => response,
             Err(e) => {
-                return ipc_err(format!("failed to read pair response: {e}"));
+                return ipc_err(format!("failed to read pair response: {e:#}"));
             }
         };
 

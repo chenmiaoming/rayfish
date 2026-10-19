@@ -563,6 +563,135 @@ async fn pairing_again_cancels_the_unpair_request() {
     primary.stop().await;
 }
 
+/// A device paired again joins the network its primary shares with it at once,
+/// reading the network's record first. The pairing completes only once the
+/// primary has lifted the earlier revocation and published the record without
+/// it, even when another revocation holds the primary up: the earlier record
+/// would have the device take the new pairing for revoked (#239 review).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_again_completes_once_the_revocation_is_lifted() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    let mut device = Node::new(&relay).await;
+    primary.start().await;
+    device.start().await;
+    let cert = paired(&primary, &device).await;
+    let home = unpaired_from_shared_network(&primary, &device).await;
+
+    // Another revocation holds the primary up while the device pairs again.
+    let registry = Arc::clone(&primary.daemon().registry);
+    let revoking = registry.revocation_lock.lock().await;
+    let (primary_id, secret) = ticket(&primary).await;
+    let daemon = device.daemon();
+    let pairing = device
+        .runtime
+        .as_ref()
+        .unwrap()
+        .spawn(async move { daemon.pair_with_device(primary_id, secret.to_vec()).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!pairing.is_finished());
+    assert_eq!(device.cert().await, None);
+    drop(revoking);
+    let result = pairing.await.unwrap();
+    assert!(
+        matches!(result, IpcMessage::PairingComplete { .. }),
+        "{result:?}"
+    );
+    let renewed = device
+        .cert()
+        .await
+        .expect("the pairing stored a certificate");
+    assert_eq!(renewed.generation, cert.generation + 1);
+
+    rejoined(&device, home).await;
+    assert_eq!(device.cert().await, Some(renewed));
+    assert!(!revoked(&primary.settings().await, device.id()));
+    assert!(!primary.nullifies("home", device.id()));
+    device.stop().await;
+    primary.stop().await;
+}
+
+/// A primary that cannot publish, in time, the record that lifts the revocation
+/// of a device pairing again refuses the pairing and puts the revocation back,
+/// saving nothing about the pairing. The next attempt lifts it again and
+/// completes once the record is out (#239 review).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_again_is_refused_until_the_lifted_revocation_is_published() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    let mut device = Node::new(&relay).await;
+    primary.start().await;
+    device.start().await;
+    let cert = paired(&primary, &device).await;
+    let home = unpaired_from_shared_network(&primary, &device).await;
+
+    relay.fail.store(true, Ordering::Relaxed);
+    let (primary_id, secret) = ticket(&primary).await;
+    let daemon = device.daemon();
+    let result = device
+        .run(async move { daemon.pair_with_device(primary_id, secret.to_vec()).await })
+        .await;
+    assert!(matches!(result, IpcMessage::Error { .. }), "{result:?}");
+    assert_eq!(device.cert().await, None);
+    let settings = primary.settings().await;
+    assert!(revoked(&settings, device.id()));
+    assert_eq!(settings.device_generations, []);
+    assert!(primary.nullifies("home", device.id()));
+
+    relay.fail.store(false, Ordering::Relaxed);
+    let renewed = pair(&primary, &device).await;
+    assert_eq!(renewed.generation, cert.generation + 1);
+    rejoined(&device, home).await;
+    assert_eq!(device.cert().await, Some(renewed));
+    assert!(!revoked(&primary.settings().await, device.id()));
+    device.stop().await;
+    primary.stop().await;
+}
+
+/// Have `device`, paired to `primary`, unpair itself, and wait until the
+/// primary has recorded that and published the record of "home", the network
+/// it coordinates with the device on: the record a joiner reads first now
+/// names the device nullified. Returns the key of "home".
+async fn unpaired_from_shared_network(primary: &Node, device: &Node) -> EndpointId {
+    let home = primary
+        .daemon()
+        .registry
+        .networks
+        .get("home")
+        .unwrap()
+        .network_key;
+    introduce(device, primary);
+    let result = device.unpair_self().await;
+    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
+    device
+        .eventually("the primary to confirm", |cfg| {
+            cfg.pending_unpairs.is_empty()
+        })
+        .await;
+    assert!(primary.nullifies("home", device.id()));
+    primary
+        .eventually("the record of home to be published", |cfg| {
+            cfg.networks
+                .iter()
+                .any(|net| net.name == "home" && net.last_group_hash_published)
+        })
+        .await;
+    home
+}
+
+/// Wait until `device` has joined the network `home` again, and for any unpair
+/// that joining set off to finish.
+async fn rejoined(device: &Node, home: EndpointId) {
+    device
+        .eventually("the device to join the shared network", move |cfg| {
+            cfg.networks
+                .iter()
+                .any(|net| net.network_public_key == Some(home))
+        })
+        .await;
+    device.unpair_settled().await;
+}
+
 /// A notice read by the device only after it paired again: it waited on the
 /// link behind a stream whose frame had not all arrived, though the primary
 /// saw it delivered. It names the earlier pairing, so the device keeps the new

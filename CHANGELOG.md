@@ -81,8 +81,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unpair interrupted by a restart is finished at the next start. A missed
   message used to leave the device's certificate unrevoked, or still on the
   device. A device paired again keeps the new pairing when a message about the
-  earlier one arrives late. A primary on an older release gets the earlier
-  one-shot request.
+  earlier one arrives late. Pairing a device again now completes only once the
+  primary's networks have stopped listing it as revoked, so that joining them
+  right away does not undo the new pairing; if that takes longer than 10
+  seconds, the pairing fails and can be tried again. A primary on an older
+  release gets the earlier one-shot request.
 - Android: error messages say what went wrong instead of showing `v1=...` or
   nothing.
 - After pairing, a new device joins all of its networks at once instead of

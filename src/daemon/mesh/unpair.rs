@@ -48,6 +48,14 @@
 //! whose unpair must still revoke it. Over mesh version 6 or 5 the notice is
 //! the bare `ControlMsg::Unpaired`, which names no pairing: an older device
 //! knows no other, and an older primary signs every pairing of a device alike.
+//!
+//! A nullifier names no pairing either: the signed blob lists the device's
+//! key, and a device that finds itself there unpairs. So the primary lifts the
+//! revocation of a device that pairs again before it signs the certificate,
+//! and waits until the records without it are published, since the device
+//! joins the networks shared with it at once and reads the record first. A
+//! pairing whose records are not published in time is refused, and the
+//! revocation put back.
 
 use super::super::network_registry::networks_joined_with_certificate;
 use super::super::*;
@@ -177,12 +185,12 @@ fn issued_generation(cfg: &config::AppConfig, device: EndpointId) -> u64 {
     device_generation(cfg, device).map_or(cfg.cert_generation, |known| known.issued)
 }
 
-/// Save a new pairing of `device` before it gets its certificate: one
-/// generation above the last issued, and, in the same write, the end of its
-/// notices, which are about earlier pairings. What it confirmed saving so far
-/// stays: this pairing counts only once the device confirms it too. Returns
-/// the generation to sign.
-pub(crate) fn save_new_pairing(device: EndpointId) -> Result<u64> {
+/// Save the generation of a new pairing of `device` before it gets its
+/// certificate: one above the last issued, and, in the same write, the end of
+/// its notices, which are about earlier pairings. What it confirmed saving so
+/// far stays: this pairing counts only once the device confirms it too.
+/// Returns the generation to sign.
+fn save_pairing_generation(device: EndpointId) -> Result<u64> {
     let mut generation = 0;
     config::update_settings(|cfg| {
         generation = issued_generation(cfg, device) + 1;
@@ -365,6 +373,9 @@ impl NetworkRegistry {
     /// network's verified blob. The blob was checked before this took the
     /// unpair lock, which a pairing holds until it completes, so a certificate
     /// stored since is a new pairing, signed at a higher generation, and stays.
+    /// A blob read after the pairing completed revokes the new one: the primary
+    /// publishes the records that lift the earlier revocation before it signs
+    /// ([`Self::save_new_pairing`]).
     pub(crate) async fn unpair_nullified(self: &Arc<Self>, cert: control::DeviceCert) {
         let _guard = self.unpair_lock.lock().await;
         match self.current_device_cert() {
@@ -566,9 +577,9 @@ impl NetworkRegistry {
 
     /// One notice to each device still to be told. Returns whether any is
     /// left: told or not, a device stays until it confirms
-    /// ([`Self::record_unpair`]) or pairs here again ([`save_new_pairing`]). A
-    /// notice that reaches the device after it paired again names the earlier
-    /// pairing, which the device ignores.
+    /// ([`Self::record_unpair`]) or pairs here again
+    /// ([`Self::save_new_pairing`]). A notice that reaches the device after it
+    /// paired again names the earlier pairing, which the device ignores.
     pub(crate) async fn attempt_unpair_notices(&self) -> bool {
         let notices = match config::load() {
             Ok(cfg) => cfg.pending_unpair_notices,
@@ -612,8 +623,8 @@ impl NetworkRegistry {
         device: EndpointId,
         generation: u64,
     ) -> Result<bool, String> {
-        // A pairing saved after this check re-authorizes the device once this
-        // revocation is done: its `reauth_device` waits for the lock.
+        // A pairing of the device takes this lock too, so it lifts this
+        // revocation only once it is done.
         let _revoking = self.revocation_lock.lock().await;
         let cfg = config::load().map_err(|error| format!("could not read settings: {error:#}"))?;
         if device_generation(&cfg, device)
@@ -628,5 +639,30 @@ impl NetworkRegistry {
         })
         .await?;
         Ok(true)
+    }
+
+    /// Save a new pairing of `device` before it gets its certificate, and
+    /// return the generation to sign it at. A revocation of the device here is
+    /// lifted first, with the records that no longer nullify it published
+    /// ([`Self::reauth_device_locked`]), since the device joins the networks
+    /// shared with it as soon as it has the certificate. Both run under
+    /// [`Self::revocation_lock`], so no revocation lands between them. On an
+    /// error the revocation stands and nothing about this pairing is saved, so
+    /// the notices about the earlier one stay as well.
+    pub(crate) async fn save_new_pairing(
+        self: &Arc<Self>,
+        device: EndpointId,
+    ) -> Result<u64, String> {
+        let _revoking = self.revocation_lock.lock().await;
+        let lifted = self.reauth_device_locked(device).await?;
+        match save_pairing_generation(device) {
+            Ok(generation) => Ok(generation),
+            Err(error) => {
+                if lifted && let Err(message) = self.revoke_device_locked(device, |_| {}).await {
+                    tracing::warn!(device = %device.fmt_short(), %message, "could not put back the revocation of a pairing that failed");
+                }
+                Err(format!("could not save the pairing: {error:#}"))
+            }
+        }
     }
 }

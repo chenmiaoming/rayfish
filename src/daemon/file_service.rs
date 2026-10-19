@@ -1252,10 +1252,24 @@ impl FileService {
                                 // unpair` left it. A notice or request about an
                                 // earlier pairing names a lower generation, so
                                 // neither undoes this one if it is acted on late.
-                                let generation = match save_new_pairing(device_pubkey) {
+                                // A deliberate (re-)pair also re-authorizes this
+                                // device first, clearing any nullifier for it
+                                // (durable seed + every coordinated blob) with
+                                // the records published: the device joins the
+                                // networks shared below at once, and a record
+                                // still nullifying it would end the new pairing.
+                                let generation = match self
+                                    .registry
+                                    .save_new_pairing(device_pubkey)
+                                    .await
+                                {
                                     Ok(generation) => generation,
-                                    Err(error) => {
-                                        tracing::warn!(error = %format!("{error:#}"), "could not save the pairing");
+                                    Err(message) => {
+                                        tracing::warn!(device = %device_pubkey.fmt_short(), %message, "could not save the pairing; refusing it");
+                                        conn.close(
+                                            VarInt::from_u32(0),
+                                            b"the primary could not save the pairing; pair again",
+                                        );
                                         return;
                                     }
                                 };
@@ -1263,16 +1277,6 @@ impl FileService {
                                 // Share our saved networks so the new device can auto-join them. Only
                                 // networks with a known public key (skips freshly created, unsynced ones).
                                 let networks = saved_pair_networks().unwrap_or_default();
-                                // A deliberate (re-)pair re-authorizes this device.
-                                // Clear any nullifier for it (durable seed + every
-                                // coordinated blob) so admission stops rejecting the
-                                // fresh cert; otherwise the device would reconnect-
-                                // loop. Spawned so the reseal/publish doesn't delay
-                                // the cert response the joiner is waiting on.
-                                let registry = Arc::clone(&self.registry);
-                                tokio::spawn(async move {
-                                    registry.reauth_device(device_pubkey).await;
-                                });
                                 let cert = control::DeviceCert::create(
                                     &self.secret_key,
                                     &device_pubkey,
