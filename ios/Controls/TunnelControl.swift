@@ -15,7 +15,7 @@ struct TunnelControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: VPNPreferences.controlKind, provider: Provider()) { isOn in
             ControlWidgetToggle("Rayfish", isOn: isOn, action: SetTunnelIntent()) { isOn in
-                Label(isOn ? "On" : "Off", systemImage: "network")
+                Label(isOn ? "On" : "Off", image: "Rayfish")
             }
         }
         .displayName("Rayfish")

@@ -14,6 +14,7 @@
 		0EE4B483378FEA62BB06A41C /* NetworkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0CE67690A500D0A9F453EF /* NetworkDetailView.swift */; };
 		0EE905EA15378C5500CB6151 /* SetTunnelIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F27F16943076D81DE6EFDC4 /* SetTunnelIntent.swift */; };
 		1317CED293FD296660DF6D62 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D1CB076E7E355518C78C3FE /* NetworkExtension.framework */; };
+		1C8A2D3A2492840FE6E268D3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3959E20C1D25A91B2C19FED5 /* Assets.xcassets */; };
 		23D5544C8245F43AF5855BDB /* SetTunnelIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F27F16943076D81DE6EFDC4 /* SetTunnelIntent.swift */; };
 		31CD200C348AD2E0B9D540D2 /* IBMPlexMono-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = 67092EEC7F40EE61708C5A2F /* IBMPlexMono-OFL.txt */; };
 		32A0405A0F9597DCDA37CEC8 /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8853920C086231394A47F4E /* Protocol.swift */; };
@@ -108,6 +109,7 @@
 		3140C30CD4A55D1274DD40F5 /* NodeHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeHost.swift; sourceTree = "<group>"; };
 		32459AD4AF3C4E66999DAC51 /* RayfishTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = RayfishTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3652755F19FBD0CFA5369908 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		3959E20C1D25A91B2C19FED5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3D56C418C2CCB66CC3EEA18D /* Rayfish.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Rayfish.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		417C9CF54A9DAF78E58E5E6A /* QRViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRViews.swift; sourceTree = "<group>"; };
 		4697C6E505B5E6961EBCA597 /* AppGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroup.swift; sourceTree = "<group>"; };
@@ -260,6 +262,7 @@
 		779945A2BED3B45AEB98DF00 /* Controls */ = {
 			isa = PBXGroup;
 			children = (
+				3959E20C1D25A91B2C19FED5 /* Assets.xcassets */,
 				0F27F16943076D81DE6EFDC4 /* SetTunnelIntent.swift */,
 				4AE873617A1C1F09D5745F8A /* TunnelControl.swift */,
 			);
@@ -350,6 +353,7 @@
 			buildConfigurationList = E72CB51E7A09175804AD8378 /* Build configuration list for PBXNativeTarget "RayfishControls" */;
 			buildPhases = (
 				8788326809CD750CB0E31F6B /* Sources */,
+				C3BBB2BDC8A7E9D56253A284 /* Resources */,
 				F5EE6B50377C3B222AC4B43E /* Frameworks */,
 			);
 			buildRules = (
@@ -435,6 +439,14 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		C3BBB2BDC8A7E9D56253A284 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C8A2D3A2492840FE6E268D3 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F32F4FD569FADCA723AEDB17 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
