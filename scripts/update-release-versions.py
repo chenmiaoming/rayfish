@@ -14,6 +14,8 @@ def update_versions(root: Path, version: str, dry_run: bool = False) -> None:
     fields = {
         "macos/project.yml": r'(MARKETING_VERSION: ")[^"]+("[ \t]*$)',
         "macos/Rayfish.xcodeproj/project.pbxproj": r"(MARKETING_VERSION = )[^;]+(;[ \t]*$)",
+        "ios/project.yml": r'(MARKETING_VERSION: ")[^"]+("[ \t]*$)',
+        "ios/Rayfish.xcodeproj/project.pbxproj": r"(MARKETING_VERSION = )[^;]+(;[ \t]*$)",
     }
     updates = {}
     for name, pattern in fields.items():
