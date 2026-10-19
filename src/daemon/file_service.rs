@@ -340,7 +340,7 @@ impl FileService {
     /// offer, so unknown endpoints cannot make the phone process file metadata.
     pub(crate) async fn accept_file_offer(self: &Arc<Self>, conn: Connection) {
         let remote_id = conn.remote_id();
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         if self.transport.is_suspended()
             && self
                 .registry

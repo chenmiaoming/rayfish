@@ -45,6 +45,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Phones are outgoing-only while idle. After two minutes without traffic from
+  the phone, Android and iOS close their peer links and disconnect from the
+  relay, and reconnect as soon as the phone sends something. While idle, peers
+  cannot reach the phone, file offers included, until it is used again.
+
 - Android and iOS: a new install takes its mesh name from the device name in
   Settings, so `Alice's Pixel` joins as `alice-pixel`. iOS shares only
   `iPhone` until Apple grants the app the device name entitlement. A possessive `'s` is
@@ -137,6 +142,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The local control socket limits concurrent and stalled clients.
 
 ### Performance
+
+- An idle iPhone no longer wakes several times a minute. It used to rebind its
+  connections on every wake, and the relay and open peer links kept waking it.
 
 - Linux: the TUN MTU is now 1280, so full-sized packets fit one QUIC datagram
   instead of being split in two.

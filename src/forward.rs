@@ -631,7 +631,7 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
             }
             // Android keeps the TUN, DNS, and file relay alive while mesh links
             // are idle. A kernel echo reply to a remote ping is not local demand.
-            #[cfg(target_os = "android")]
+            #[cfg(any(target_os = "android", target_os = "ios"))]
             if let Some(reg) = dialer.as_ref() {
                 if firewall::is_icmp_echo_reply(info.protocol, info.icmp_type) {
                     if reg.transport.is_suspended() {
