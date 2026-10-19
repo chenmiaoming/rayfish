@@ -193,8 +193,8 @@ pub(super) async fn run_pty_session(
         origin,
     } = spec;
     let (pty, pts) = pty_process::open().context("opening pty")?;
-    let _ = pty.resize(Size::new(pty_req.row, pty_req.col));
     prepare_pts(&pts);
+    let _ = pty.resize(Size::new(pty_req.row, pty_req.col));
     let tty = tty_name(&pts);
     // Keep a slave fd open until the child exits. `login` briefly reopens its
     // terminal while starting, which would otherwise make the PTY reader see
