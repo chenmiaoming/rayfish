@@ -783,6 +783,20 @@ async fn set_link_state(tun_name: &str, up: bool) -> Result<()> {
         })
         .await?;
     }
+    #[cfg(target_os = "illumos")]
+    {
+        // The TUN is IPv6-only, so only the inet6 stream exists; a plain
+        // `ifconfig tunN up` would address the unplumbed IPv4 side and fail.
+        let state = if up { "up" } else { "down" };
+        let status = std::process::Command::new("/sbin/ifconfig")
+            .args([tun_name, "inet6", state])
+            .status()
+            .context("run ifconfig")?;
+        anyhow::ensure!(
+            status.success(),
+            "ifconfig inet6 {state} failed with {status}"
+        );
+    }
     #[cfg(target_os = "windows")]
     {
         let args = windows_link_args(tun_name, up);
