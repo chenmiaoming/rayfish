@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- iOS 18: a Rayfish control turns the VPN on and off from Control Center,
+  the Lock Screen or the Action button.
+
 ## [0.5.10] - 2026-10-19
 
 ### Added

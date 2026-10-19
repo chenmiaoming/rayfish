@@ -66,33 +66,25 @@ final class DeviceTunnel: Tunnel {
 
     func load() async {
         do {
-            manager = try await NETunnelProviderManager.loadAllFromPreferences().first {
-                ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == AppGroup.tunnelBundleIdentifier
-            }
+            manager = try await VPNPreferences.load()
         } catch {
             RayfishLog.app.error("Loading VPN preferences failed: \(error.localizedDescription, privacy: .public)")
         }
         update()
     }
 
-    /// Connecting also turns on-demand on, so iOS brings the tunnel back after
-    /// a reboot or when it stops the extension, like an always-on VPN.
     func connect() async throws {
-        let manager = try await configuredManager(onDemand: true)
-        try manager.connection.startVPNTunnel()
+        manager = try await VPNPreferences.start(install: true)
         update()
     }
 
-    /// On-demand goes off first: otherwise iOS restarts the tunnel right away.
     func disconnect() async {
-        if let manager, manager.isOnDemandEnabled {
-            do {
-                _ = try await configuredManager(onDemand: false)
-            } catch {
-                RayfishLog.app.error("Turning off on-demand failed: \(error.localizedDescription, privacy: .public)")
-            }
+        do {
+            if let current = try await VPNPreferences.stop() { manager = current }
+        } catch {
+            RayfishLog.app.error("Turning off on-demand failed: \(error.localizedDescription, privacy: .public)")
+            manager?.connection.stopVPNTunnel()
         }
-        manager?.connection.stopVPNTunnel()
         update()
     }
 
@@ -111,24 +103,6 @@ final class DeviceTunnel: Tunnel {
         return decoded
     }
 
-    /// Install the VPN configuration on first use. iOS asks the person to allow it.
-    private func configuredManager(onDemand: Bool) async throws -> NETunnelProviderManager {
-        let manager = manager ?? NETunnelProviderManager()
-        let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
-        proto.providerBundleIdentifier = AppGroup.tunnelBundleIdentifier
-        proto.serverAddress = "Rayfish mesh"
-        manager.protocolConfiguration = proto
-        manager.localizedDescription = "Rayfish"
-        manager.isEnabled = true
-        manager.onDemandRules = [NEOnDemandRuleConnect()]
-        manager.isOnDemandEnabled = onDemand
-        try await manager.saveToPreferences()
-        // A freshly saved configuration cannot start until it is reloaded.
-        try await manager.loadFromPreferences()
-        self.manager = manager
-        return manager
-    }
-
     private func update() {
         let next: TunnelState = switch manager?.connection.status {
         case .connected: .on
@@ -138,6 +112,7 @@ final class DeviceTunnel: Tunnel {
         }
         guard next != state else { return }
         state = next
+        VPNPreferences.reloadControl()
         onChange?()
     }
 }

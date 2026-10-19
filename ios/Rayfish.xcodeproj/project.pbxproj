@@ -7,11 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0780FF12AB19F677EF83099E /* VPNPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = C768E7FCBE04A95FEA731991 /* VPNPreferences.swift */; };
 		080FD8A1A58C68F98B78E82F /* IdentityKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21E6F711DADDCC3A6868F0DD /* IdentityKeychain.swift */; };
 		089FABC140FCD4A6912A6EFC /* Telemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35D7BDFC9C4C957648A57C3 /* Telemetry.swift */; };
 		0A70EB9A90223A35C4515B0E /* ChakraPetch-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DAE515FB1D088A2EDEC64EAF /* ChakraPetch-SemiBold.ttf */; };
 		0EE4B483378FEA62BB06A41C /* NetworkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0CE67690A500D0A9F453EF /* NetworkDetailView.swift */; };
+		0EE905EA15378C5500CB6151 /* SetTunnelIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F27F16943076D81DE6EFDC4 /* SetTunnelIntent.swift */; };
 		1317CED293FD296660DF6D62 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D1CB076E7E355518C78C3FE /* NetworkExtension.framework */; };
+		23D5544C8245F43AF5855BDB /* SetTunnelIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F27F16943076D81DE6EFDC4 /* SetTunnelIntent.swift */; };
 		31CD200C348AD2E0B9D540D2 /* IBMPlexMono-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = 67092EEC7F40EE61708C5A2F /* IBMPlexMono-OFL.txt */; };
 		32A0405A0F9597DCDA37CEC8 /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8853920C086231394A47F4E /* Protocol.swift */; };
 		3B5AA30F5F29EED42895B875 /* RayfishApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54E836340C120035FAF31E2F /* RayfishApp.swift */; };
@@ -21,9 +24,12 @@
 		4C62621009FB6E8BC6220E95 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4697C6E505B5E6961EBCA597 /* AppGroup.swift */; };
 		517485C7A3159A439B0CA00C /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8853920C086231394A47F4E /* Protocol.swift */; };
 		5BE7A7A78F920B903B6A207F /* ProviderReply.swift in Sources */ = {isa = PBXBuildFile; fileRef = B385F23AEBAA4BEAD576101F /* ProviderReply.swift */; };
+		6F21FBFF372E24F00C265FCA /* RayfishControls.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D4929EA657D40AD452FA528E /* RayfishControls.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		73345803EE12AF7B4BE6CC8D /* ChakraPetch-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1C5CD7CCAA517105B84127D7 /* ChakraPetch-Bold.ttf */; };
+		78E390F6F71D06A52E6F3748 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5D7A33747419F246C460CE7F /* SwiftUI.framework */; };
 		797BD9BCA78CE61A4DADA531 /* ray_mobile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 191F972E06E65E72D5272695 /* ray_mobile.swift */; };
 		7E98F5AD5043F7D2A49CEF19 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4697C6E505B5E6961EBCA597 /* AppGroup.swift */; };
+		8E80D6E947EF6A96127A17F1 /* VPNPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = C768E7FCBE04A95FEA731991 /* VPNPreferences.swift */; };
 		91B4587CE1FF4B3550574512 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 863C9008B6F7B930C149D543 /* PacketTunnelProvider.swift */; };
 		97D0A34D64D3EE8276AB9F17 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C084CC03F1B8F160247D616 /* WelcomeView.swift */; };
 		9BB912272827DC64EF5D163C /* ChakraPetch-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F84513862593E54A7901FFA3 /* ChakraPetch-Regular.ttf */; };
@@ -34,8 +40,12 @@
 		AA163FD2F5EA1A234F25E35A /* Telemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F35D7BDFC9C4C957648A57C3 /* Telemetry.swift */; };
 		AE6DCB47E27A6A7FFEBB1393 /* IBMPlexMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B6740B866AD744A73D20C505 /* IBMPlexMono-Regular.ttf */; };
 		B0513B50F349CC5490DF42BB /* NodeHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3140C30CD4A55D1274DD40F5 /* NodeHost.swift */; };
+		B42063E6CA403ECA5FDC5439 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3652755F19FBD0CFA5369908 /* WidgetKit.framework */; };
+		B45F01C84F3A1593095247FA /* VPNPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = C768E7FCBE04A95FEA731991 /* VPNPreferences.swift */; };
 		BD0D4FCCF4027D44D0628347 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 8B295E69DEB45BE8F1545963 /* Sentry */; };
 		BD73401F63F4205C12351271 /* RayfishTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 32459AD4AF3C4E66999DAC51 /* RayfishTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C531FEB2F2D3BF2D6F59E5B0 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D1CB076E7E355518C78C3FE /* NetworkExtension.framework */; };
+		C6239655DB64516A39B9D0CB /* TunnelControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AE873617A1C1F09D5745F8A /* TunnelControl.swift */; };
 		C9DB73C4269ED2298ABAA078 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = B556FC7D0EA1B2643AF5079B /* Sentry */; };
 		CC218C48C572A49EA4258487 /* ChakraPetch-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = B7A823F76CDEEF7D18D9DE5F /* ChakraPetch-OFL.txt */; };
 		CCF5577C4D14E6C81B961A48 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D9811626EAF807B442F325 /* Theme.swift */; };
@@ -48,6 +58,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		6A662A610D7E71D20973FC33 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DFE261A68F972C6B9DD57288 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B01F5C596591E54D08B0A6E4;
+			remoteInfo = RayfishControls;
+		};
 		DF2D1DC5219C65D4623F3E28 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = DFE261A68F972C6B9DD57288 /* Project object */;
@@ -72,6 +89,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				BD73401F63F4205C12351271 /* RayfishTunnel.appex in Embed Foundation Extensions */,
+				6F21FBFF372E24F00C265FCA /* RayfishControls.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -80,6 +98,7 @@
 
 /* Begin PBXFileReference section */
 		083BFBC61204713F52454838 /* ray_mobileFFI.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = ray_mobileFFI.modulemap; sourceTree = "<group>"; };
+		0F27F16943076D81DE6EFDC4 /* SetTunnelIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetTunnelIntent.swift; sourceTree = "<group>"; };
 		191F972E06E65E72D5272695 /* ray_mobile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ray_mobile.swift; sourceTree = "<group>"; };
 		1C084CC03F1B8F160247D616 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
 		1C5CD7CCAA517105B84127D7 /* ChakraPetch-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ChakraPetch-Bold.ttf"; sourceTree = "<group>"; };
@@ -88,13 +107,16 @@
 		2F5D3652FDCD75FEDBF133B6 /* NetworksView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworksView.swift; sourceTree = "<group>"; };
 		3140C30CD4A55D1274DD40F5 /* NodeHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeHost.swift; sourceTree = "<group>"; };
 		32459AD4AF3C4E66999DAC51 /* RayfishTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = RayfishTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		3652755F19FBD0CFA5369908 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		3D56C418C2CCB66CC3EEA18D /* Rayfish.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Rayfish.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		417C9CF54A9DAF78E58E5E6A /* QRViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRViews.swift; sourceTree = "<group>"; };
 		4697C6E505B5E6961EBCA597 /* AppGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroup.swift; sourceTree = "<group>"; };
 		49545382A1AA860D33EC5B3D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		4A2827ECD419E6C1E9EEE262 /* WalkthroughTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalkthroughTests.swift; sourceTree = "<group>"; };
+		4AE873617A1C1F09D5745F8A /* TunnelControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelControl.swift; sourceTree = "<group>"; };
 		4D5C1724BEB8C8DACF18DF10 /* PressStart2P-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "PressStart2P-Regular.ttf"; sourceTree = "<group>"; };
 		54E836340C120035FAF31E2F /* RayfishApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RayfishApp.swift; sourceTree = "<group>"; };
+		5D7A33747419F246C460CE7F /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		67092EEC7F40EE61708C5A2F /* IBMPlexMono-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "IBMPlexMono-OFL.txt"; sourceTree = "<group>"; };
 		7DC01E13E3D1AC9318ED3ABA /* RayfishUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = RayfishUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		863C9008B6F7B930C149D543 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
@@ -106,7 +128,9 @@
 		B385F23AEBAA4BEAD576101F /* ProviderReply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderReply.swift; sourceTree = "<group>"; };
 		B6740B866AD744A73D20C505 /* IBMPlexMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IBMPlexMono-Regular.ttf"; sourceTree = "<group>"; };
 		B7A823F76CDEEF7D18D9DE5F /* ChakraPetch-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "ChakraPetch-OFL.txt"; sourceTree = "<group>"; };
+		C768E7FCBE04A95FEA731991 /* VPNPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNPreferences.swift; sourceTree = "<group>"; };
 		D197B20BBFB76277D50D3BEF /* PressStart2P-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "PressStart2P-OFL.txt"; sourceTree = "<group>"; };
+		D4929EA657D40AD452FA528E /* RayfishControls.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = RayfishControls.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		DAE515FB1D088A2EDEC64EAF /* ChakraPetch-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ChakraPetch-SemiBold.ttf"; sourceTree = "<group>"; };
 		DF0CE67690A500D0A9F453EF /* NetworkDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkDetailView.swift; sourceTree = "<group>"; };
 		EA6E6748C8715BF45A6683B1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -134,6 +158,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F5EE6B50377C3B222AC4B43E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C531FEB2F2D3BF2D6F59E5B0 /* NetworkExtension.framework in Frameworks */,
+				B42063E6CA403ECA5FDC5439 /* WidgetKit.framework in Frameworks */,
+				78E390F6F71D06A52E6F3748 /* SwiftUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -153,6 +187,7 @@
 				3140C30CD4A55D1274DD40F5 /* NodeHost.swift */,
 				A8853920C086231394A47F4E /* Protocol.swift */,
 				F35D7BDFC9C4C957648A57C3 /* Telemetry.swift */,
+				C768E7FCBE04A95FEA731991 /* VPNPreferences.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -186,6 +221,7 @@
 			isa = PBXGroup;
 			children = (
 				3D56C418C2CCB66CC3EEA18D /* Rayfish.app */,
+				D4929EA657D40AD452FA528E /* RayfishControls.appex */,
 				32459AD4AF3C4E66999DAC51 /* RayfishTunnel.appex */,
 				7DC01E13E3D1AC9318ED3ABA /* RayfishUITests.xctest */,
 			);
@@ -221,6 +257,15 @@
 			path = RayfishTunnel;
 			sourceTree = "<group>";
 		};
+		779945A2BED3B45AEB98DF00 /* Controls */ = {
+			isa = PBXGroup;
+			children = (
+				0F27F16943076D81DE6EFDC4 /* SetTunnelIntent.swift */,
+				4AE873617A1C1F09D5745F8A /* TunnelControl.swift */,
+			);
+			path = Controls;
+			sourceTree = "<group>";
+		};
 		7C10C520A12E1A19A7E12797 /* UITests */ = {
 			isa = PBXGroup;
 			children = (
@@ -233,6 +278,8 @@
 			isa = PBXGroup;
 			children = (
 				2D1CB076E7E355518C78C3FE /* NetworkExtension.framework */,
+				5D7A33747419F246C460CE7F /* SwiftUI.framework */,
+				3652755F19FBD0CFA5369908 /* WidgetKit.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -240,6 +287,7 @@
 		E4870274DCC4E9944C9F835B = {
 			isa = PBXGroup;
 			children = (
+				779945A2BED3B45AEB98DF00 /* Controls */,
 				231FBC38F3A12EC0C3980CB0 /* Generated */,
 				58C2B0BC6D37097CFC55B597 /* Rayfish */,
 				5AC8A58ACDB66E92E7256E69 /* RayfishTunnel */,
@@ -267,6 +315,7 @@
 			);
 			dependencies = (
 				4DC086AF86AB678B73662593 /* PBXTargetDependency */,
+				824FC44840FBACBBD49F891E /* PBXTargetDependency */,
 			);
 			name = Rayfish;
 			packageProductDependencies = (
@@ -294,6 +343,24 @@
 			);
 			productName = RayfishTunnel;
 			productReference = 32459AD4AF3C4E66999DAC51 /* RayfishTunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		B01F5C596591E54D08B0A6E4 /* RayfishControls */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E72CB51E7A09175804AD8378 /* Build configuration list for PBXNativeTarget "RayfishControls" */;
+			buildPhases = (
+				8788326809CD750CB0E31F6B /* Sources */,
+				F5EE6B50377C3B222AC4B43E /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RayfishControls;
+			packageProductDependencies = (
+			);
+			productName = RayfishControls;
+			productReference = D4929EA657D40AD452FA528E /* RayfishControls.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 		E0FAEEBA4404BD234FDE77E7 /* RayfishUITests */ = {
@@ -331,6 +398,10 @@
 						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
+					B01F5C596591E54D08B0A6E4 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
 					E0FAEEBA4404BD234FDE77E7 = {
 						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
@@ -357,6 +428,7 @@
 			targets = (
 				161690B94F438C7C80FD6831 /* Rayfish */,
 				41FE8380D31418A0AC562E23 /* RayfishTunnel */,
+				B01F5C596591E54D08B0A6E4 /* RayfishControls */,
 				E0FAEEBA4404BD234FDE77E7 /* RayfishUITests */,
 			);
 		};
@@ -412,6 +484,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		8788326809CD750CB0E31F6B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				23D5544C8245F43AF5855BDB /* SetTunnelIntent.swift in Sources */,
+				C6239655DB64516A39B9D0CB /* TunnelControl.swift in Sources */,
+				8E80D6E947EF6A96127A17F1 /* VPNPreferences.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BFDBA1555A22DF3439A73E3F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -421,6 +503,7 @@
 				91B4587CE1FF4B3550574512 /* PacketTunnelProvider.swift in Sources */,
 				517485C7A3159A439B0CA00C /* Protocol.swift in Sources */,
 				AA163FD2F5EA1A234F25E35A /* Telemetry.swift in Sources */,
+				0780FF12AB19F677EF83099E /* VPNPreferences.swift in Sources */,
 				A42733C3675EDCEC4536CB99 /* ray_mobile.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -441,9 +524,11 @@
 				A7BF524E822B9FDE651A9476 /* QRViews.swift in Sources */,
 				3B5AA30F5F29EED42895B875 /* RayfishApp.swift in Sources */,
 				447896AC04BD5534B575D87C /* SendFilesSheet.swift in Sources */,
+				0EE905EA15378C5500CB6151 /* SetTunnelIntent.swift in Sources */,
 				089FABC140FCD4A6912A6EFC /* Telemetry.swift in Sources */,
 				CCF5577C4D14E6C81B961A48 /* Theme.swift in Sources */,
 				F0645050383165BCFBA9C32E /* Tunnel.swift in Sources */,
+				B45F01C84F3A1593095247FA /* VPNPreferences.swift in Sources */,
 				97D0A34D64D3EE8276AB9F17 /* WelcomeView.swift in Sources */,
 				43EB544D4DC1881A4A7EE5A7 /* YouView.swift in Sources */,
 				797BD9BCA78CE61A4DADA531 /* ray_mobile.swift in Sources */,
@@ -462,6 +547,11 @@
 			isa = PBXTargetDependency;
 			target = 41FE8380D31418A0AC562E23 /* RayfishTunnel */;
 			targetProxy = FF3FADEA217BC0F482A059B5 /* PBXContainerItemProxy */;
+		};
+		824FC44840FBACBBD49F891E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B01F5C596591E54D08B0A6E4 /* RayfishControls */;
+			targetProxy = 6A662A610D7E71D20973FC33 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -552,6 +642,29 @@
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
+		};
+		4A19E7B327778CB294449F05 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Support/Controls.entitlements;
+				INFOPLIST_FILE = "Support/Controls-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+				);
+				OTHER_SWIFT_FLAGS = (
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.rayfish.ios.controls;
+				PRODUCT_NAME = RayfishControls;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
 		};
 		4F2C33CC964CC1665AF7274F /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -761,6 +874,29 @@
 			};
 			name = Debug;
 		};
+		C4667BA2B5D7A41535617DD3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Support/Controls.entitlements;
+				INFOPLIST_FILE = "Support/Controls-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+				);
+				OTHER_SWIFT_FLAGS = (
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.rayfish.ios.controls;
+				PRODUCT_NAME = RayfishControls;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -796,6 +932,15 @@
 			buildConfigurations = (
 				8B904F05EB202DBE1610D1B8 /* Debug */,
 				62360D5EE31138B81888F741 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E72CB51E7A09175804AD8378 /* Build configuration list for PBXNativeTarget "RayfishControls" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4A19E7B327778CB294449F05 /* Debug */,
+				C4667BA2B5D7A41535617DD3 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

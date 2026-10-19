@@ -61,6 +61,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     Telemetry.apply()
                     RayfishLog.tunnel.info("Tunnel is ready")
                     completionHandler(nil)
+                    VPNPreferences.reloadControl()
                 }
             }
         }

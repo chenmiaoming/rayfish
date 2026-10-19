@@ -25,7 +25,8 @@ Developer Mode enabled. `just ios-run` uses the local Apple Development
 certificate's team; `IOS_TEAM_ID` overrides it. Pass a device ID or name
 to select one, for example `just ios-run "My iPhone"`.
 
-Enable these capabilities for `xyz.rayfish.ios` and `xyz.rayfish.ios.tunnel`:
+Enable these capabilities for `xyz.rayfish.ios`, `xyz.rayfish.ios.tunnel` and
+`xyz.rayfish.ios.controls` (the Control Center toggle, iOS 18 and later):
 
 - Network Extensions: Packet Tunnel
 - App Groups: `group.xyz.rayfish.ios`

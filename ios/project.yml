@@ -48,6 +48,7 @@ targets:
       - path: Rayfish
       - path: Shared
       - path: ../macos/Shared/ProviderReply.swift
+      - path: Controls/SetTunnelIntent.swift
       - path: Generated
     settings:
       base:
@@ -58,6 +59,8 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - target: RayfishTunnel
+        embed: true
+      - target: RayfishControls
         embed: true
       - package: Sentry
   RayfishTunnel:
@@ -81,6 +84,28 @@ targets:
       - name: Build the Rust core
         script: '"$SRCROOT/build-rust.sh"'
         basedOnDependencyAnalysis: false
+  RayfishControls:
+    type: app-extension
+    platform: iOS
+    # Controls need iOS 18; on 17 the app runs without this extension.
+    deploymentTarget: "18.0"
+    sources:
+      - path: Controls
+      - path: Shared/VPNPreferences.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: xyz.rayfish.ios.controls
+        PRODUCT_NAME: RayfishControls
+        INFOPLIST_FILE: Support/Controls-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/Controls.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        # No Rust core here.
+        OTHER_LDFLAGS: []
+        OTHER_SWIFT_FLAGS: []
+    dependencies:
+      - sdk: NetworkExtension.framework
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
   RayfishUITests:
     type: bundle.ui-testing
     platform: iOS

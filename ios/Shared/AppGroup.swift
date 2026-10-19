@@ -10,7 +10,6 @@ enum RayfishLog {
 /// live here, so either process can read them while the other one runs.
 enum AppGroup {
     static let identifier = "group.xyz.rayfish.ios"
-    static let tunnelBundleIdentifier = "xyz.rayfish.ios.tunnel"
 
     /// The app group container. A build without the app group entitlement (an
     /// unsigned simulator build) gets the app's own Application Support instead,
