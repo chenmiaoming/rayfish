@@ -234,10 +234,10 @@ iroh-mdns-address-lookup = { git = "https://github.com/n0-computer/iroh-address-
 # https://github.com/n0-computer/iroh/pull/4406 (socket configuration hook)
 # https://github.com/n0-computer/iroh/pull/4616 (release a removed home relay)
 # iroh-base/-dns/-relay are patched too so the fork and registry copies don't clash.
-iroh = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
-iroh-base = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
-iroh-dns = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
-iroh-relay = { git = "https://github.com/rayfish/iroh", rev = "ab80a9c8e33c55ad6934e374f39ed127da2b28d5" }
+iroh = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af273fcdc7d61daf6fc" }
+iroh-base = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af273fcdc7d61daf6fc" }
+iroh-dns = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af273fcdc7d61daf6fc" }
+iroh-relay = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af273fcdc7d61daf6fc" }
 # netwatch's socket configuration hook is merged upstream but not yet released.
 # https://github.com/n0-computer/net-tools/pull/182
 netwatch = { git = "https://github.com/n0-computer/net-tools", rev = "d73b994abce8f683d7d6dcc163eee5eaefb952f5" }
