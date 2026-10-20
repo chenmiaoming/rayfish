@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- macOS connection logs include startup timings to help diagnose slow connections.
 - iOS 18: a Rayfish control turns the VPN on and off from Control Center,
   the Lock Screen or the Action button.
 
