@@ -754,17 +754,19 @@ async fn stopped(primary: &Node, name: &'static str) -> network_registry::Regist
 }
 
 /// Have the restore supervisor of `primary` bring the network `name` back, and
-/// wait, at most 30 s, until it runs.
+/// wait, at most a minute, until that restore is over: the network runs, and
+/// the restore has dropped its claim, which it holds a while longer, through
+/// the DNS update (slow on Windows).
 async fn restored(primary: &Node, name: &'static str) {
     let registry = Arc::clone(&primary.daemon().registry);
     registry.nudge_restore();
-    for _ in 0..300 {
-        if registry.networks.contains_key(name) {
+    for _ in 0..600 {
+        if registry.networks.contains_key(name) && !registry.restoring.contains(name) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("timed out waiting for {name} to run again");
+    panic!("timed out waiting for the restore of {name}");
 }
 
 /// A notice read by the device only after it paired again: it waited on the
