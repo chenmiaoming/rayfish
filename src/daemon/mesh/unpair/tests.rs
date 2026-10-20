@@ -648,6 +648,51 @@ async fn pairing_again_is_refused_until_the_lifted_revocation_is_published() {
     primary.stop().await;
 }
 
+/// A primary refuses to pair a revoked device again while a network it
+/// coordinates is not running, as while its restore is in progress or after
+/// one failed. That network publishes nothing until it runs, so its last
+/// record still nullifies the device, which joins every saved network as soon
+/// as it has the certificate. Once the network runs again, the pairing
+/// completes. A device that is not revoked pairs regardless.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_again_is_refused_while_a_network_is_not_running() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    let mut device = Node::new(&relay).await;
+    primary.start().await;
+    device.start().await;
+    let cert = paired(&primary, &device).await;
+    let home = unpaired_from_shared_network(&primary, &device).await;
+
+    let restoring = stopped(&primary, "home").await;
+    let (primary_id, secret) = ticket(&primary).await;
+    let daemon = device.daemon();
+    let result = device
+        .run(async move { daemon.pair_with_device(primary_id, secret.to_vec()).await })
+        .await;
+    assert!(matches!(result, IpcMessage::Error { .. }), "{result:?}");
+    assert_eq!(device.cert().await, None);
+    let settings = primary.settings().await;
+    assert!(revoked(&settings, device.id()));
+    assert_eq!(settings.device_generations, []);
+
+    drop(restoring);
+    restored(&primary, "home").await;
+    assert!(primary.nullifies("home", device.id()));
+    let renewed = pair(&primary, &device).await;
+    assert_eq!(renewed.generation, cert.generation + 1);
+    rejoined(&device, home).await;
+    assert_eq!(device.cert().await, Some(renewed.clone()));
+    assert!(!revoked(&primary.settings().await, device.id()));
+    assert!(!primary.nullifies("home", device.id()));
+
+    let _restoring = stopped(&primary, "home").await;
+    let again = pair(&primary, &device).await;
+    assert_eq!(again.generation, renewed.generation + 1);
+    device.stop().await;
+    primary.stop().await;
+}
+
 /// Have `device`, paired to `primary`, unpair itself, and wait until the
 /// primary has recorded that and published the record of "home", the network
 /// it coordinates with the device on: the record a joiner reads first now
@@ -690,6 +735,36 @@ async fn rejoined(device: &Node, home: EndpointId) {
         })
         .await;
     device.unpair_settled().await;
+}
+
+/// Stop the network `name` on `primary`, claimed as a restore in progress
+/// claims it, so that the restore supervisor leaves it stopped until the claim
+/// is dropped.
+async fn stopped(primary: &Node, name: &'static str) -> network_registry::RegistrationClaim {
+    let registry = Arc::clone(&primary.daemon().registry);
+    let claim = registry
+        .claim_registration(name)
+        .expect("no restore of the network runs");
+    assert!(
+        primary
+            .run(async move { registry.teardown_network_runtime(name).await })
+            .await
+    );
+    claim
+}
+
+/// Have the restore supervisor of `primary` bring the network `name` back, and
+/// wait, at most 30 s, until it runs.
+async fn restored(primary: &Node, name: &'static str) {
+    let registry = Arc::clone(&primary.daemon().registry);
+    registry.nudge_restore();
+    for _ in 0..300 {
+        if registry.networks.contains_key(name) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("timed out waiting for {name} to run again");
 }
 
 /// A notice read by the device only after it paired again: it waited on the

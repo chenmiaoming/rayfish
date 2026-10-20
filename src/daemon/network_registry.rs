@@ -1863,7 +1863,10 @@ impl NetworkRegistry {
     ///
     /// Returns whether a revocation was lifted. If a record is not published in
     /// time, the revocation is put back, so that the next attempt lifts it and
-    /// waits again, and an error is returned. The caller holds
+    /// waits again, and an error is returned. A coordinated network that is not
+    /// running, while its restore is in progress or after one failed, publishes
+    /// nothing, and the device is told of every saved network, so a revoked
+    /// device gets an error then, before anything changes. The caller holds
     /// [`Self::revocation_lock`].
     pub(crate) async fn reauth_device_locked(
         self: &Arc<Self>,
@@ -1871,8 +1874,26 @@ impl NetworkRegistry {
     ) -> Result<bool, String> {
         // Before anything changes, so that no publication after it is missed.
         let mut published = self.records_published.subscribe();
-        // Drop from the durable nullifier seed so a later reseal won't re-add it.
         let hex = device.to_string();
+        let settings =
+            config::load().map_err(|e| format!("could not read the nullifier seed: {e:#}"))?;
+        if settings.revoked_devices.contains(&hex) {
+            let stopped: Vec<&str> = settings
+                .networks
+                .iter()
+                .filter(|net| {
+                    net.network_secret_key.is_some() && !self.networks.contains_key(&net.name)
+                })
+                .map(|net| net.name.as_str())
+                .collect();
+            if !stopped.is_empty() {
+                return Err(format!(
+                    "networks this node coordinates are not running, and their records still nullify the device: {}",
+                    stopped.join(", ")
+                ));
+            }
+        }
+        // Drop from the durable nullifier seed so a later reseal won't re-add it.
         let mut lifted = false;
         // No-op when the device was not in the seed: `update_settings` skips the
         // write when the callback changes nothing.
