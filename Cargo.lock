@@ -4050,7 +4050,7 @@ dependencies = [
 [[package]]
 name = "netdev"
 version = "0.46.3"
-source = "git+https://github.com/extrowerk/netdev.git?branch=illumos#d8d605b6b8e2a7bc7feeddca5d19015729062bc2"
+source = "git+https://github.com/extrowerk/netdev.git?branch=illumos#7e0ac1372b3f1bc95ca5da4415e2463025012a2b"
 dependencies = [
  "block2",
  "dispatch2",
@@ -4176,7 +4176,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "git+https://github.com/extrowerk/net-tools?branch=illumos#b708c7fc02da70dceaeb5d64f76404a4be445b84"
+source = "git+https://github.com/extrowerk/net-tools?branch=illumos#b9096bb9d8bca5184276704f552bca4056d96862"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -7746,7 +7746,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "tun-rs"
 version = "2.8.11"
-source = "git+https://github.com/extrowerk/tun-rs?branch=illumos#623fd57c4e67cc282286743e8d70284da2684da0"
+source = "git+https://github.com/extrowerk/tun-rs?branch=illumos#5f51c794f0d2bd5a9b1ecd2c9d62404cac74d83b"
 dependencies = [
  "blocking",
  "byteorder",
