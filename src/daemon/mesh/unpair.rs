@@ -58,7 +58,8 @@
 //! revocation put back. While a network the primary coordinates is not
 //! running, it publishes nothing and its last record still nullifies the
 //! device, so the pairing of a revoked device is refused before anything
-//! changes.
+//! changes. Creating, renaming, leaving or destroying a network waits for a
+//! pairing under way, so that none stops or appears after that check.
 
 use super::super::network_registry::networks_joined_with_certificate;
 use super::super::*;
