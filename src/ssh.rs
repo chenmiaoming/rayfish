@@ -102,7 +102,7 @@ use permissions::{account_can, hand_over};
 use session::{Exit, SessionSpec, run_pipe_session, run_pty_session, signal_number};
 use session_env::env_accepted;
 #[cfg(test)]
-use session_env::tty_name;
+use session_env::{prepare_pts, tty_name};
 
 // The port a stock `ssh` client targets (`ssh user@host.ray`) and the internal
 // port the embedded server actually binds. Both live in `crate::forward` (the
@@ -2414,6 +2414,7 @@ mod tests {
         // SSH_TTY names the pts the session runs on; `write`, `who` and
         // anything that talks to a terminal by path need it.
         let (_pty, pts) = pty_process::open().expect("open a pty");
+        prepare_pts(&pts);
         let name = tty_name(&pts).expect("the child end of a pty has a name");
         assert!(name.starts_with("/dev/"), "a terminal path, got {name:?}");
     }
