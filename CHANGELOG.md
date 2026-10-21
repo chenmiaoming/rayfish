@@ -9,7 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Linux: `ray rootless` runs without administrator privileges, with private state,
-  an authenticated SOCKS5 proxy, TCP forwarding and explicit service exposure.
+  authenticated SOCKS5 and HTTP proxies (including HTTPS through CONNECT),
+  TCP forwarding and explicit service exposure.
   Use `ray --rootless` to control it.
 
 - macOS connection logs include startup timings to help diagnose slow connections.

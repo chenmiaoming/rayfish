@@ -1,6 +1,8 @@
 //! Real unprivileged daemon lifecycle, private IPC and CLI instance selection.
 #![cfg(all(target_os = "linux", feature = "desktop"))]
 
+use base64::{Engine, engine::general_purpose::STANDARD};
+use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Output, Stdio};
@@ -29,12 +31,36 @@ fn command(directory: &Path) -> Command {
 struct Running {
     child: Child,
     logs: JoinHandle<()>,
-    socks: String,
+    socks: SocketAddr,
+    http: SocketAddr,
+}
+
+#[derive(Debug)]
+struct Addresses {
+    socks: SocketAddr,
+    http: SocketAddr,
+}
+
+fn listening_address(line: &str) -> SocketAddr {
+    line.split("address=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 async fn start(directory: &Path) -> Running {
     let mut child = command(directory)
-        .args(["rootless", "--socks5", "127.0.0.1:0"])
+        .args([
+            "rootless",
+            "--socks5",
+            "127.0.0.1:0",
+            "--http",
+            "127.0.0.1:0",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -43,28 +69,37 @@ async fn start(directory: &Path) -> Running {
     let (ready, waiting) = oneshot::channel();
     let logs = tokio::spawn(async move {
         let mut ready = Some(ready);
-        let mut address = None;
+        let mut socks = None;
+        let mut http = None;
         while let Some(line) = lines.next_line().await.unwrap() {
             if line.contains("rootless SOCKS5 listening") {
-                address = line
-                    .split("address=")
-                    .nth(1)
-                    .map(|value| value.split_whitespace().next().unwrap().to_owned());
+                socks = Some(listening_address(&line));
+            }
+            if line.contains("rootless HTTP proxy listening") {
+                http = Some(listening_address(&line));
             }
             if line.contains("rootless userspace networking ready")
                 && let Some(ready) = ready.take()
             {
                 ready
-                    .send(address.take().expect("SOCKS address precedes readiness"))
+                    .send(Addresses {
+                        socks: socks.take().unwrap(),
+                        http: http.take().unwrap(),
+                    })
                     .unwrap();
             }
         }
     });
-    let socks = timeout(Duration::from_secs(30), waiting)
+    let addresses = timeout(Duration::from_secs(30), waiting)
         .await
         .unwrap()
         .unwrap();
-    Running { child, logs, socks }
+    Running {
+        child,
+        logs,
+        socks: addresses.socks,
+        http: addresses.http,
+    }
 }
 
 async fn cli(directory: &Path, args: &[&str]) -> Output {
@@ -151,11 +186,11 @@ async fn independent_rootless_instances_have_private_state_and_safe_lifecycle() 
     .unwrap();
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already running"));
-    let mut socks = TcpStream::connect(&first.socks).await.unwrap();
+    let mut socks = TcpStream::connect(first.socks).await.unwrap();
     socks.write_all(&[5, 1, 0]).await.unwrap();
     assert_eq!(socks.read_u16().await.unwrap(), 0x05ff);
     let password = std::fs::read(first_path.join("proxy-password")).unwrap();
-    let mut socks = TcpStream::connect(&first.socks).await.unwrap();
+    let mut socks = TcpStream::connect(first.socks).await.unwrap();
     socks.write_all(&[5, 1, 2]).await.unwrap();
     assert_eq!(socks.read_u16().await.unwrap(), 0x0502);
     socks
@@ -179,6 +214,20 @@ async fn independent_rootless_instances_have_private_state_and_safe_lifecycle() 
     let mut reply = [0; 22];
     socks.read_exact(&mut reply).await.unwrap();
     assert_eq!(reply[1], 8);
+    let mut http = TcpStream::connect(first.http).await.unwrap();
+    http.write_all(b"GET http://peer.network.ray/ HTTP/1.1\r\nHost: peer.network.ray\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut response = String::new();
+    http.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 407"));
+    let mut http = TcpStream::connect(first.http).await.unwrap();
+    let credentials = STANDARD.encode([b"ray:".as_slice(), &password].concat());
+    http.write_all(format!("CONNECT 127.0.0.1:80 HTTP/1.1\r\nHost: 127.0.0.1:80\r\nProxy-Authorization: Basic {credentials}\r\n\r\n").as_bytes()).await.unwrap();
+    let mut response = String::new();
+    http.read_to_string(&mut response).await.unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 502"),
+        "HTTP must not connect through the host network"
+    );
     assert!(matches!(
         request(&first_path, IpcMessage::Down).await,
         IpcMessage::Ok { .. }

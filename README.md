@@ -104,15 +104,17 @@ request approval from the network coordinator.
 Run without sudo, a TUN device or host route/DNS changes:
 
 ```bash
-ray rootless --socks5 127.0.0.1:1080
+ray rootless --socks5 127.0.0.1:1080 --http 127.0.0.1:8080
 # In another terminal:
 ray --rootless join <network-key>
 ray --rootless status
 curl --proxy socks5h://127.0.0.1:1080 --proxy-user ray http://peer.network.ray/
+curl --proxy http://127.0.0.1:8080 --proxy-user ray http://peer.network.ray/
 ```
 
 curl prompts for the password saved in the state directory's `proxy-password`
-file. SOCKS5 requires username `ray` and that generated password. Mesh names resolve
+file. Both proxies require username `ray` and that generated password. The HTTP
+proxy supports HTTP requests and HTTPS through CONNECT. Mesh names resolve
 inside Rayfish. Only applications using the proxy or a forward use the mesh.
 TCP over mesh IPv6 is supported; UDP, exit nodes and automatic system routing
 are unavailable. Existing peers need no changes.

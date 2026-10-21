@@ -314,12 +314,15 @@ pub(crate) enum Command {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Run a rootless mesh with an authenticated SOCKS5 proxy
+    /// Run a rootless mesh with authenticated SOCKS5 and HTTP proxies
     #[cfg(target_os = "linux")]
     Rootless {
         /// SOCKS5 loopback address (default: an automatically assigned port)
         #[arg(long, default_value = "127.0.0.1:0", value_parser = rayfish::rootless::loopback_listener)]
         socks5: SocketAddr,
+        /// HTTP proxy loopback address, including HTTPS through CONNECT
+        #[arg(long, value_parser = rayfish::rootless::loopback_listener)]
+        http: Option<SocketAddr>,
         /// Forward a local TCP port to PEER:PORT (other local users can connect)
         #[arg(long, value_name = "LOCAL_PORT=PEER:PORT")]
         forward: Vec<LocalForward>,
@@ -1891,6 +1894,7 @@ async fn run() -> Result<()> {
         #[cfg(target_os = "linux")]
         Command::Rootless {
             socks5,
+            http,
             forward,
             expose,
         } => {
@@ -1898,6 +1902,7 @@ async fn run() -> Result<()> {
             daemon::run_rootless(
                 RootlessOptions {
                     socks5,
+                    http,
                     forwards: forward,
                     expose,
                 },

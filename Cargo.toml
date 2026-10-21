@@ -56,6 +56,10 @@ desktop = [
     "dep:rpassword",
     "dep:self-replace",
     "dep:smoltcp",
+    "dep:base64",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
 ]
 tor = ["dep:iroh-tor-transport"]
 # Export tracing spans to an OpenTelemetry collector over OTLP/HTTP. Activated at
@@ -191,6 +195,10 @@ harness = false
 tun-rs = { version = "2", features = ["async", "async_framed"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+base64 = { version = "0.22", optional = true }
+hyper = { version = "1", features = ["client", "server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
 smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv6", "socket-tcp"], optional = true }
 rtnetlink = "0.21.0"
 zbus = { version = "5", default-features = false, features = ["tokio"] }

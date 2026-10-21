@@ -1,5 +1,5 @@
-//! Authenticated SOCKS5 and explicit TCP forwarding. Each listener owns and
-//! drains its connection tasks; one semaphore bounds all proxy connections.
+//! Authenticated SOCKS5/HTTP proxies and explicit TCP forwarding. Each listener
+//! owns its connection tasks; one semaphore bounds all proxy connections.
 
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
@@ -26,9 +26,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 128;
 
 // Deliberately has no Debug implementation, so logging a proxy cannot reveal credentials.
-struct Password(Vec<u8>);
+pub(super) struct Password(Vec<u8>);
 
 impl Password {
+    #[cfg(test)]
+    pub(super) fn for_test(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+
     fn create(instance: &UserInstance) -> Result<Self> {
         let bytes: [u8; 32] = rand::random();
         let password = hex::encode(bytes);
@@ -44,11 +49,11 @@ impl Password {
         file.set_permissions(Permissions::from_mode(0o600))?;
         file.write_all(password.as_bytes())?;
         file.sync_all()?;
-        tracing::info!(path = %path.display(), username = "ray", "SOCKS5 password saved");
+        tracing::info!(path = %path.display(), username = "ray", "proxy password saved");
         Ok(Self(password.into_bytes()))
     }
 
-    fn matches(&self, candidate: &[u8]) -> bool {
+    pub(super) fn matches(&self, candidate: &[u8]) -> bool {
         // Always compare the complete fixed-size token, even for a wrong length.
         let mut difference = self.0.len() ^ candidate.len();
         for (index, byte) in self.0.iter().enumerate() {
@@ -60,6 +65,7 @@ impl Password {
 
 pub(crate) struct Proxy {
     socks: TcpListener,
+    http: Option<TcpListener>,
     password: Arc<Password>,
     forwards: Vec<BoundForward>,
     expose: Vec<Expose>,
@@ -80,6 +86,15 @@ impl Proxy {
             "SOCKS5 must listen on loopback"
         );
         let socks = TcpListener::bind(options.socks5).await?;
+        let http = if let Some(address) = options.http {
+            anyhow::ensure!(
+                address.ip().is_loopback(),
+                "HTTP proxy must listen on loopback"
+            );
+            Some(TcpListener::bind(address).await?)
+        } else {
+            None
+        };
         let mut forwards = Vec::new();
         for LocalForward { listen, target } in options.forwards {
             forwards.push(BoundForward {
@@ -89,11 +104,15 @@ impl Proxy {
         }
         let password = Arc::new(Password::create(instance)?);
         tracing::info!(address = %socks.local_addr()?, "rootless SOCKS5 listening (authentication required)");
+        if let Some(http) = &http {
+            tracing::info!(address = %http.local_addr()?, "rootless HTTP proxy listening (authentication required)");
+        }
         for forward in &forwards {
             tracing::info!(address = %forward.listener.local_addr()?, target = %forward.target, "local TCP forward listening (accessible to other local users)");
         }
         Ok(Self {
             socks,
+            http,
             password,
             forwards,
             expose: options.expose,
@@ -115,17 +134,24 @@ impl Proxy {
         let mut tasks = JoinSet::new();
         tasks.spawn(serve_local(
             self.socks,
-            Some(self.password),
-            None,
+            Protocol::Socks(Arc::clone(&self.password)),
             Arc::clone(&daemon),
             stack.clone(),
             Arc::clone(&slots),
         ));
+        if let Some(http) = self.http {
+            tasks.spawn(serve_local(
+                http,
+                Protocol::Http(self.password),
+                Arc::clone(&daemon),
+                stack.clone(),
+                Arc::clone(&slots),
+            ));
+        }
         for forward in self.forwards {
             tasks.spawn(serve_local(
                 forward.listener,
-                None,
-                Some(forward.target),
+                Protocol::Forward(forward.target),
                 Arc::clone(&daemon),
                 stack.clone(),
                 Arc::clone(&slots),
@@ -153,10 +179,16 @@ impl Proxy {
     }
 }
 
+#[derive(Clone)]
+enum Protocol {
+    Socks(Arc<Password>),
+    Http(Arc<Password>),
+    Forward(Target),
+}
+
 async fn serve_local(
     listener: TcpListener,
-    password: Option<Arc<Password>>,
-    target: Option<Target>,
+    protocol: Protocol,
     daemon: Arc<Daemon>,
     stack: Stack,
     slots: Arc<Semaphore>,
@@ -171,18 +203,25 @@ async fn serve_local(
                     Ok(permit) => permit,
                     Err(_) => continue,
                 };
-                let password = password.clone();
-                let target = target.clone();
+                let protocol = protocol.clone();
                 let daemon = Arc::clone(&daemon);
                 let stack = stack.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
                     anyhow::ensure!(daemon.rootless_active(), "rootless data plane is on standby");
-                    let mut remote = if let Some(password) = password {
-                        tokio::time::timeout(HANDSHAKE_TIMEOUT, socks_connect(&mut client, &password, &daemon, &stack)).await??
-                    } else {
-                        let target = target.context("forward target missing")?;
-                        stack.connect(target.resolve(&daemon).await?).await?
+                    let mut remote = match protocol {
+                        Protocol::Socks(password) => tokio::time::timeout(HANDSHAKE_TIMEOUT, socks_connect(&mut client, &password, &daemon, &stack)).await??,
+                        Protocol::Forward(target) => stack.connect(target.resolve(&daemon).await?).await?,
+                        Protocol::Http(password) => {
+                            return super::http::serve(client, password, move |target: Target| {
+                                let daemon = Arc::clone(&daemon);
+                                let stack = stack.clone();
+                                async move {
+                                    anyhow::ensure!(daemon.rootless_active(), "rootless data plane is on standby");
+                                    stack.connect(target.resolve(&daemon).await?).await
+                                }
+                            }).await;
+                        }
                     };
                     copy_bidirectional(&mut client, &mut remote).await?;
                     Ok(())

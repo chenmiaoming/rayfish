@@ -1,6 +1,7 @@
 //! Rootless Linux networking. The mesh carries ordinary IPv6 packets; smoltcp
 //! replaces the kernel stack, and only configured proxies and forwards use it.
 
+mod http;
 pub(crate) mod proxy;
 pub(crate) mod stack;
 
@@ -122,6 +123,7 @@ pub fn loopback_listener(value: &str) -> Result<SocketAddr> {
 
 pub struct Options {
     pub socks5: SocketAddr,
+    pub http: Option<SocketAddr>,
     pub forwards: Vec<LocalForward>,
     pub expose: Vec<Expose>,
 }
