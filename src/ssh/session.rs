@@ -17,7 +17,9 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::login::LoginInfo;
-use super::session_env::{drop_privs, login_env, login_program, shell_launch, tty_name};
+use super::session_env::{
+    drop_privs, login_env, login_program, prepare_pts, shell_launch, tty_name,
+};
 use super::{ChildProc, Origin, PtyReq};
 
 /// Everything a session runner needs beyond its SSH channel.
@@ -194,6 +196,7 @@ pub(super) async fn run_pty_session(
         origin,
     } = spec;
     let (pty, pts) = pty_process::open().context("opening pty")?;
+    prepare_pts(&pts);
     let _ = pty.resize(Size::new(pty_req.row, pty_req.col));
     let tty = tty_name(&pts);
     // Keep a slave fd open until the child exits. `login` briefly reopens its
