@@ -4176,7 +4176,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "git+https://github.com/extrowerk/net-tools?branch=illumos#b9096bb9d8bca5184276704f552bca4056d96862"
+source = "git+https://github.com/extrowerk/net-tools?branch=illumos-0.19#b9096bb9d8bca5184276704f552bca4056d96862"
 dependencies = [
  "atomic-waker",
  "bytes",
