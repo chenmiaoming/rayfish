@@ -268,6 +268,13 @@ pub async fn detect_and_configure(
         return Ok(Box::new(configurator));
     }
 
+    #[cfg(target_os = "illumos")]
+    {
+        let configurator = IllumosResolvConf::new().await;
+        configurator.apply().await?;
+        return Ok(Box::new(configurator));
+    }
+
     #[allow(unreachable_code)]
     {
         anyhow::bail!("DNS configuration not supported on this platform");
@@ -364,6 +371,26 @@ pub fn restore_stale_backups() {
             tracing::info!("removing stale NetworkManager dns=none drop-in from previous crash");
             if std::fs::remove_file(NM_DROPIN).is_ok() {
                 nm_reload_blocking();
+            }
+        }
+    }
+    // illumos: a hard kill leaves our resolv.conf in place with the backup
+    // beside it. Put the host's file back so the next start captures it.
+    #[cfg(target_os = "illumos")]
+    {
+        let path = std::path::Path::new("/etc/resolv.conf");
+        let backup = std::path::Path::new("/etc/resolv.conf.before-rayfish");
+        if exists_no_follow(backup) {
+            let current = std::fs::read_to_string(path).unwrap_or_default();
+            if current.lines().any(|l| l.trim() == "# Managed by rayfish.") {
+                tracing::info!("restoring stale DNS backup from previous crash");
+                if restore_resolv_backup(backup, path).is_ok() {
+                    let _ = std::fs::remove_file(backup);
+                }
+            } else {
+                // The zone regenerated the file (reboot) or someone else
+                // rewrote it: the backup is stale, leave the live file alone.
+                let _ = std::fs::remove_file(backup);
             }
         }
     }
@@ -483,6 +510,10 @@ use windows::*;
 mod freebsd;
 #[cfg(target_os = "freebsd")]
 use freebsd::FreeBsdLocalUnbound;
+#[cfg(target_os = "illumos")]
+mod illumos;
+#[cfg(target_os = "illumos")]
+use illumos::IllumosResolvConf;
 
 // ---------------------------------------------------------------------------
 // macOS: SCDynamicStore
@@ -553,7 +584,7 @@ pub fn remove_dns_config() {
 }
 
 mod linux_backend;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "illumos"))]
 mod resolv_file;
 #[cfg(target_os = "linux")]
 pub(crate) use linux_backend::nm_quiet_remove;
@@ -566,6 +597,8 @@ pub use linux_backend::{
 };
 #[cfg(target_os = "linux")]
 use resolv_file::{backup_resolv_file, exists_no_follow, restore_resolv_backup, write_resolv_file};
+#[cfg(target_os = "illumos")]
+use resolv_file::{exists_no_follow, restore_resolv_backup};
 
 /// No-op on non-Linux: only the direct `/etc/resolv.conf` takeover has artifacts
 /// to restore.
