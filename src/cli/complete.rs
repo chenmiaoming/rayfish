@@ -62,6 +62,13 @@ const DESTDIR_VAR: &str = "RAYFISH_COMPLETION_DIR";
 /// completion request is not a command line this parser would accept, and the
 /// completers below want a runtime of their own.
 pub(crate) fn intercept() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os(VAR).is_some()
+        && std::env::args_os().any(|argument| argument == "--rootless")
+        && rayfish::instance::select_rootless().is_err()
+    {
+        return;
+    }
     CompleteEnv::with_factory(Cli::command).var(VAR).complete();
 }
 

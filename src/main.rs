@@ -15,6 +15,10 @@ use anyhow::{Context, Result};
 use clap::{FromArgMatches, Parser, Subcommand};
 use iroh::EndpointId;
 use ray_proto::settings::node_key_help;
+#[cfg(target_os = "linux")]
+use rayfish::rootless::{Expose, LocalForward, Options as RootlessOptions};
+#[cfg(target_os = "linux")]
+use std::net::SocketAddr;
 
 use membership::GroupMode;
 
@@ -46,6 +50,10 @@ const ALLOW_DENY: [&str; 2] = ["allow", "deny"];
     version = FULL_VERSION
 )]
 struct Cli {
+    /// Use your private rootless instance
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true)]
+    rootless: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -305,6 +313,19 @@ pub(crate) enum Command {
         /// Keep streaming new lines until Ctrl-C, like `tail -f`
         #[arg(short, long)]
         follow: bool,
+    },
+    /// Run a rootless mesh with an authenticated SOCKS5 proxy
+    #[cfg(target_os = "linux")]
+    Rootless {
+        /// SOCKS5 loopback address (default: an automatically assigned port)
+        #[arg(long, default_value = "127.0.0.1:0", value_parser = rayfish::rootless::loopback_listener)]
+        socks5: SocketAddr,
+        /// Forward a local TCP port to PEER:PORT (other local users can connect)
+        #[arg(long, value_name = "LOCAL_PORT=PEER:PORT")]
+        forward: Vec<LocalForward>,
+        /// Expose a loopback service at a mesh port
+        #[arg(long, value_name = "MESH_PORT=LOOPBACK_ADDRESS:PORT")]
+        expose: Vec<Expose>,
     },
     /// Run the daemon in the foreground (invoked by the system service)
     #[command(hide = true)]
@@ -1752,6 +1773,23 @@ async fn run() -> Result<()> {
     // template that renders the grouping in place of clap's flat list.
     let cli =
         Cli::from_arg_matches(&cli::help::command().get_matches()).unwrap_or_else(|e| e.exit());
+    #[cfg(target_os = "linux")]
+    if cli.rootless || matches!(cli.command, Command::Rootless { .. }) {
+        rayfish::instance::select_rootless()?;
+        anyhow::ensure!(
+            !matches!(
+                cli.command,
+                Command::Daemon { .. }
+                    | Command::Start
+                    | Command::Restart
+                    | Command::Install { .. }
+                    | Command::Uninstall
+                    | Command::SetOperator { .. }
+                    | Command::Update { .. }
+            ),
+            "rootless instances run in the foreground with ray rootless; system service operations are unavailable"
+        );
+    }
     if json_requested(&cli.command) {
         JSON_FLAG.store(true, atomic::Ordering::Relaxed);
         // JSON output must never be colorized or interrupted by spinners.
@@ -1768,7 +1806,21 @@ async fn run() -> Result<()> {
         return rayfish::ssh::app_helper::run().await;
     }
     // Keep the appender guard alive for the whole process so file logs flush.
-    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon { .. }));
+    #[cfg(target_os = "linux")]
+    let rootless_daemon = matches!(cli.command, Command::Rootless { .. });
+    #[cfg(not(target_os = "linux"))]
+    let rootless_daemon = false;
+    if rootless_daemon && let Some(instance) = rayfish::instance::user_instance() {
+        #[cfg(unix)]
+        for directory in [
+            &instance.directory,
+            &instance.runtime,
+            &rayfish::logdir::log_dir(),
+        ] {
+            rayfish::instance::ensure_private_dir(directory, instance.owner_uid)?;
+        }
+    }
+    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon { .. }) || rootless_daemon);
 
     match cli.command {
         Command::Leave { name, delegate } => match delegate {
@@ -1836,6 +1888,23 @@ async fn run() -> Result<()> {
         } => ipc_status(machines, with_ips).await,
         Command::Report => ipc_report().await,
         Command::Logs { since, follow } => ipc_logs(since, follow).await,
+        #[cfg(target_os = "linux")]
+        Command::Rootless {
+            socks5,
+            forward,
+            expose,
+        } => {
+            install_panic_hook();
+            daemon::run_rootless(
+                RootlessOptions {
+                    socks5,
+                    forwards: forward,
+                    expose,
+                },
+                shutdown::token(),
+            )
+            .await
+        }
         Command::Daemon { cleanup: true } => {
             check_root();
             cmd_daemon_cleanup()

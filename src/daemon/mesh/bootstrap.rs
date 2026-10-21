@@ -126,6 +126,62 @@ pub async fn run_daemon(token: CancellationToken, stats: Arc<ForwardMetrics>) ->
     result
 }
 
+/// Run a private userspace instance without touching host network configuration.
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub async fn run_rootless(
+    options: crate::rootless::Options,
+    token: CancellationToken,
+) -> Result<()> {
+    use crate::instance::{ensure_private_dir, user_instance};
+    use crate::rootless::{proxy::Proxy, stack};
+    let instance = user_instance().context("rootless instance was not selected")?;
+    ensure_private_dir(&instance.directory, instance.owner_uid)?;
+    ensure_private_dir(&instance.runtime, instance.owner_uid)?;
+    ensure_private_dir(&crate::logdir::log_dir(), instance.owner_uid)?;
+    let socket = bind_ipc_socket(&ipc::socket_path()).await?;
+    let proxy = Proxy::bind(options, instance).await?;
+    let daemon = build_daemon(
+        token.clone(),
+        Arc::new(ForwardMetrics::default()),
+        Overrides::default(),
+    )
+    .await?;
+    let result = async {
+        let mut network = stack::new(daemon.transport.identity.local_ipv6(), &proxy.ports())?;
+        network.set_active(Arc::clone(&daemon.active));
+        daemon.fatal.arm();
+        daemon.attach_tun(network.reader, network.writer).await;
+        daemon.registry.connect_all_networks().await;
+        // This supervisor is owned by the shutdown token and the registry.
+        let restore = tokio::spawn(Arc::clone(&daemon.registry).run_restore_supervisor());
+        if let IpcMessage::Error { message } = daemon.activate(None).await {
+            restore.abort();
+            anyhow::bail!("{message}");
+        }
+        tracing::info!("rootless userspace networking ready");
+        let result = tokio::select! {
+            result = network.driver.run(token.clone()) => result,
+            result = proxy.run(Arc::clone(&daemon), network.stack, network.listeners, token.clone()) => result,
+            result = accept_ipc(socket, &daemon, token.clone(), IpcHost::Rootless { owner_uid: instance.owner_uid }) => result,
+        };
+        daemon.detach_tun();
+        token.cancel();
+        restore.abort();
+        match restore.await {
+            Ok(()) => {},
+            Err(error) if error.is_cancelled() => {},
+            Err(error) => tracing::warn!(%error, "rootless restore supervisor failed"),
+        }
+        result
+    }.await;
+    daemon.detach_tun();
+    daemon.shutdown_and_close().await;
+    if let Some(reason) = daemon.fatal.take() {
+        anyhow::bail!("{reason}");
+    }
+    result
+}
+
 /// Construct all always-on daemon infrastructure: identity, iroh endpoint, blob
 /// store, TUN device, forwarding loop, DNS resolver, mDNS discovery, protocol
 /// router, and metrics server. Returns the shared [`Daemon`] (still on
@@ -837,11 +893,15 @@ pub async fn start_embedded_ipc(daemon: &Arc<Daemon>, owner_uid: u32) -> Result<
 enum IpcHost {
     Daemon,
     PacketTunnel { owner_uid: u32 },
+    Rootless { owner_uid: u32 },
 }
 
 #[cfg(unix)]
 impl IpcHost {
     fn check_authorized(self, req: &IpcMessage, peer: Option<&PeerIdentity>) -> Option<IpcMessage> {
+        if let Self::Rootless { owner_uid } = self {
+            return authorize_rootless(owner_uid, peer);
+        }
         let Self::PacketTunnel { owner_uid } = self else {
             return Daemon::check_authorized(req, peer);
         };
@@ -860,6 +920,19 @@ impl IpcHost {
         }
         Some(ipc_err(
             "permission denied: run ray as the macOS user who connected the Rayfish app",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn authorize_rootless(owner_uid: u32, peer: Option<&PeerIdentity>) -> Option<IpcMessage> {
+    if peer.is_some_and(
+        |peer| matches!(peer, PeerIdentity::Unix { uid, .. } if *uid == owner_uid || *uid == 0),
+    ) {
+        None
+    } else {
+        Some(ipc_err(
+            "permission denied: this rootless instance belongs to another user",
         ))
     }
 }
@@ -982,7 +1055,12 @@ async fn bind_ipc_socket(path: &Path) -> Result<IpcSocket> {
     }
     let listener = UnixListener::bind(path).context("failed to bind IPC socket")?;
     let inode = std::fs::symlink_metadata(path)?.ino();
-    set_socket_permissions(path);
+    if crate::instance::is_rootless() {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    } else {
+        set_socket_permissions(path);
+    }
     tracing::info!(path = %path.display(), "IPC socket listening");
     Ok(IpcSocket {
         listener,
@@ -1072,6 +1150,37 @@ mod embedded_ipc_tests {
     use super::*;
     use socket2::{Domain, SockAddr, Socket, Type};
     use std::ffi::OsString;
+
+    #[test]
+    fn rootless_ipc_restricts_reads_and_writes_to_the_owner_and_root() {
+        let host = IpcHost::Rootless { owner_uid: 1001 };
+        for request in [
+            IpcMessage::Status,
+            IpcMessage::Logs {
+                since: None,
+                follow: false,
+            },
+            IpcMessage::Up { hostname: None },
+        ] {
+            for uid in [0, 1001] {
+                assert!(
+                    host.check_authorized(&request, Some(&PeerIdentity::Unix { uid, gid: uid }))
+                        .is_none()
+                );
+            }
+            assert!(
+                host.check_authorized(
+                    &request,
+                    Some(&PeerIdentity::Unix {
+                        uid: 1002,
+                        gid: 1002
+                    })
+                )
+                .is_some()
+            );
+            assert!(host.check_authorized(&request, None).is_some());
+        }
+    }
 
     #[test]
     fn packet_tunnel_uses_session_owner_not_daemon_operator() {
@@ -1372,7 +1481,7 @@ async fn handle_ipc_client(
     } else {
         match host {
             IpcHost::Daemon => daemon.handle_request(req, peer_cred, fds).await,
-            IpcHost::PacketTunnel { .. } => {
+            IpcHost::PacketTunnel { .. } | IpcHost::Rootless { .. } => {
                 daemon.handle_authorized_request(req, peer_cred, fds).await
             }
         }

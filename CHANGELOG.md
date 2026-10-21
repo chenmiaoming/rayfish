@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Linux: `ray rootless` runs without administrator privileges, with private state,
+  an authenticated SOCKS5 proxy, TCP forwarding and explicit service exposure.
+  Use `ray --rootless` to control it.
+
 - macOS connection logs include startup timings to help diagnose slow connections.
 - iOS 18: a Rayfish control turns the VPN on and off from Control Center,
   the Lock Screen or the Action button.

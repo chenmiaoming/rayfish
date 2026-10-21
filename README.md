@@ -99,6 +99,35 @@ ray status
 Networks are closed by default. Invite codes are single-use, and peers can also
 request approval from the network coordinator.
 
+## Rootless Linux
+
+Run without sudo, a TUN device or host route/DNS changes:
+
+```bash
+ray rootless --socks5 127.0.0.1:1080
+# In another terminal:
+ray --rootless join <network-key>
+ray --rootless status
+curl --proxy socks5h://127.0.0.1:1080 --proxy-user ray http://peer.network.ray/
+```
+
+curl prompts for the password saved in the state directory's `proxy-password`
+file. SOCKS5 requires username `ray` and that generated password. Mesh names resolve
+inside Rayfish. Only applications using the proxy or a forward use the mesh.
+TCP over mesh IPv6 is supported; UDP, exit nodes and automatic system routing
+are unavailable. Existing peers need no changes.
+
+`--forward 8080=peer.network.ray:80` opens a local TCP forward. Other local
+users can access that port; use authenticated SOCKS5 for private access.
+`--expose 8022=127.0.0.1:22` exposes only that local service on mesh port 8022,
+subject to the mesh firewall. No other host listeners are exposed.
+
+State and logs live under `${XDG_DATA_HOME:-$HOME/.local/share}/rayfish/rootless`.
+IPC is private to the owning Unix user and root. `RAYFISH_ROOTLESS_DIR` selects
+another private state directory for both daemon and CLI. Use Ctrl-C or
+`ray --rootless stop` to stop; `ray --rootless down` pauses packet forwarding.
+The system daemon can run alongside it.
+
 ## Documentation
 
 The [official Rayfish documentation](https://rayfish.xyz/docs) covers setup,

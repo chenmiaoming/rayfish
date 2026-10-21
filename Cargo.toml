@@ -55,6 +55,7 @@ desktop = [
     "dep:uzers",
     "dep:rpassword",
     "dep:self-replace",
+    "dep:smoltcp",
 ]
 tor = ["dep:iroh-tor-transport"]
 # Export tracing spans to an OpenTelemetry collector over OTLP/HTTP. Activated at
@@ -190,6 +191,7 @@ harness = false
 tun-rs = { version = "2", features = ["async", "async_framed"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ip", "proto-ipv6", "socket-tcp"], optional = true }
 rtnetlink = "0.21.0"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Watch /etc/resolv.conf for trampling (NetworkManager/dhclient) in direct mode
