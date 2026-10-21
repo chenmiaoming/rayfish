@@ -665,6 +665,44 @@ pub async fn route_peer_range(tun_name: &str) -> Result<()> {
     .await
 }
 
+#[cfg(target_os = "illumos")]
+pub async fn route_peer_range(tun_name: &str) -> Result<()> {
+    // Same range as the Linux version: 200::/7 covers all mesh addresses.
+    const PREFIX: &str = "200::/7";
+
+    // The gateway is the interface's own IPv6 address (point-to-point).
+    let ifc = tokio::process::Command::new("/sbin/ifconfig")
+        .args([tun_name, "inet6"])
+        .output()
+        .await?;
+    let text = String::from_utf8_lossy(&ifc.stdout);
+    let gw = text
+        .split_whitespace()
+        .skip_while(|w| *w != "inet6")
+        .nth(1)
+        .map(|a| a.split('/').next().unwrap_or(a).to_owned())
+        .ok_or_else(|| anyhow::anyhow!("no inet6 address on {tun_name}"))?;
+
+    // Idempotent: drop any stale route first, ignore the result.
+    let _ = tokio::process::Command::new("/sbin/route")
+        .args(["delete", "-inet6", PREFIX, &gw])
+        .output()
+        .await;
+
+    let out = tokio::process::Command::new("/sbin/route")
+        .args(["add", "-inet6", PREFIX, &gw, "-interface"])
+        .output()
+        .await?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "route add {PREFIX} via {tun_name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub async fn route_peer_range(tun_name: &str) -> Result<()> {
     // utun is point-to-point, so the address prefix alone does not reliably
@@ -911,6 +949,20 @@ async fn set_link_state(tun_name: &str, up: bool) -> Result<()> {
                 .context("set TUN link state via netlink")
         })
         .await?;
+    }
+    #[cfg(target_os = "illumos")]
+    {
+        // The TUN is IPv6-only, so only the inet6 stream exists; a plain
+        // `ifconfig tunN up` would address the unplumbed IPv4 side and fail.
+        let state = if up { "up" } else { "down" };
+        let status = std::process::Command::new("/sbin/ifconfig")
+            .args([tun_name, "inet6", state])
+            .status()
+            .context("run ifconfig")?;
+        anyhow::ensure!(
+            status.success(),
+            "ifconfig inet6 {state} failed with {status}"
+        );
     }
     #[cfg(target_os = "windows")]
     {

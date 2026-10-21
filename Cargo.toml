@@ -86,7 +86,7 @@ ahash = "0.8"
 clap_complete = { version = "4.6.9", features = ["unstable-dynamic"] }
 # Token-bucket rate limiter guarding inbound control streams against floods
 # (src/ratelimit.rs). One per control-listener task; no shared state.
-ratelimit = "0.10"
+ratelimit = "2.0.0"
 dashmap = "6"
 dirs = "6.0.0"
 futures = "0.3"
@@ -248,6 +248,9 @@ iroh = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af
 iroh-base = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af273fcdc7d61daf6fc" }
 iroh-dns = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af273fcdc7d61daf6fc" }
 iroh-relay = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caeddde67af273fcdc7d61daf6fc" }
-# netwatch's socket configuration hook is merged upstream but not yet released.
-# https://github.com/n0-computer/net-tools/pull/182
-netwatch = { git = "https://github.com/n0-computer/net-tools", rev = "d73b994abce8f683d7d6dcc163eee5eaefb952f5" }
+# illumos forks, until upstream support lands. The netwatch fork carries the
+# configure-socket hook (n0-computer/net-tools#182) plus illumos support.
+netdev = { git = "https://github.com/extrowerk/netdev.git", branch = "illumos" }
+netwatch = { git = "https://github.com/extrowerk/net-tools", branch = "illumos-0.19" }
+swarm-discovery = { git = "https://github.com/extrowerk/swarm-discovery", branch = "illumos" }
+tun-rs = { git = "https://github.com/extrowerk/tun-rs", branch = "illumos" }

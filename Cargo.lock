@@ -944,17 +944,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "clocksource"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46a4f8c23584e9dc6e40de1406e8c776ae727c49f7cb85c0bb23fb8c2096f7e0"
-dependencies = [
- "libc",
- "time",
- "winapi",
-]
-
-[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4122,9 +4111,8 @@ dependencies = [
 
 [[package]]
 name = "netdev"
-version = "0.46.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4db4135b187ddae3b6813c4f9d9ac9d5181859fa6a08b4e006c63a130974ed62"
+version = "0.46.3"
+source = "git+https://github.com/extrowerk/netdev.git?branch=illumos#7e0ac1372b3f1bc95ca5da4415e2463025012a2b"
 dependencies = [
  "block2",
  "dispatch2",
@@ -4250,7 +4238,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "git+https://github.com/n0-computer/net-tools?rev=d73b994abce8f683d7d6dcc163eee5eaefb952f5#d73b994abce8f683d7d6dcc163eee5eaefb952f5"
+source = "git+https://github.com/extrowerk/net-tools?branch=illumos-0.19#b9096bb9d8bca5184276704f552bca4056d96862"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -4264,7 +4252,7 @@ dependencies = [
  "n0-future",
  "n0-watcher",
  "netdev 0.45.0",
- "netdev 0.46.2",
+ "netdev 0.46.3",
  "netlink-packet-core 0.8.2",
  "netlink-packet-route 0.31.0",
  "netlink-proto",
@@ -5736,12 +5724,10 @@ dependencies = [
 
 [[package]]
 name = "ratelimit"
-version = "0.10.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dc94ed8e3de45f6d8d052869d48c0dbeebcaa7a6c345ec7f0f917e10347428e"
+checksum = "e78b08065c51c82ff8c4a0d88e3dce3edfce39c375e946c3464210fff3433fb8"
 dependencies = [
- "clocksource",
- "parking_lot",
  "thiserror 2.0.20",
 ]
 
@@ -7091,8 +7077,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "swarm-discovery"
 version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b4877f20f064de34b77d79237c9caa37c393590af8ef5a2f3253d59be5a338b"
+source = "git+https://github.com/extrowerk/swarm-discovery?branch=illumos#e1a4406c97d1f3d2d91f13a3d288c9273ce15c0b"
 dependencies = [
  "acto",
  "hickory-proto",
@@ -7841,9 +7826,8 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tun-rs"
-version = "2.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a459772235a7c74f58c7a6479c43cc9ee64d6edb4af831364ebb152c978a97fd"
+version = "2.8.11"
+source = "git+https://github.com/extrowerk/tun-rs?branch=illumos#5f51c794f0d2bd5a9b1ecd2c9d62404cac74d83b"
 dependencies = [
  "blocking",
  "byteorder",
