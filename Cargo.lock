@@ -6995,8 +6995,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swarm-discovery"
-version = "0.6.3"
-source = "git+https://github.com/extrowerk/swarm-discovery?branch=illumos#e1a4406c97d1f3d2d91f13a3d288c9273ce15c0b"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7e56b7e93eaffb9baba3e64936a5912540847516fc5f26d66ad18044b8d4a14"
 dependencies = [
  "acto",
  "hickory-proto",
