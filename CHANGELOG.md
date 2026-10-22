@@ -21,6 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Direct connections keep retrying after approval if joining the network fails
+  temporarily.
 - illumos: remove stale tunnel interfaces after shutdown and before restarting
   after a crash.
 - Unpairing no longer depends on the device and its primary being connected at
