@@ -381,16 +381,40 @@ pub fn restore_stale_backups() {
         let path = std::path::Path::new("/etc/resolv.conf");
         let backup = std::path::Path::new("/etc/resolv.conf.before-rayfish");
         if exists_no_follow(backup) {
-            let current = std::fs::read_to_string(path).unwrap_or_default();
-            if current.lines().any(|l| l.trim() == "# Managed by rayfish.") {
-                tracing::info!("restoring stale DNS backup from previous crash");
-                if restore_resolv_backup(backup, path).is_ok() {
-                    let _ = std::fs::remove_file(backup);
+            match std::fs::read_to_string(path) {
+                Ok(current) => {
+                    if current.lines().any(|l| l.trim() == "# Managed by rayfish.") {
+                        tracing::info!("restoring stale DNS backup from previous crash");
+                        match restore_resolv_backup(backup, path) {
+                            Ok(()) => {
+                                let _ = std::fs::remove_file(backup);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to restore DNS backup; keeping it");
+                            }
+                        }
+                    } else {
+                        // Something else rewrote the file (zone reboot, another
+                        // program): the backup is stale, leave the live file alone.
+                        let _ = std::fs::remove_file(backup);
+                    }
                 }
-            } else {
-                // The zone regenerated the file (reboot) or someone else
-                // rewrote it: the backup is stale, leave the live file alone.
-                let _ = std::fs::remove_file(backup);
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // The live file is gone: the backup is all that is left.
+                    tracing::info!("resolv.conf is missing; restoring the DNS backup");
+                    match restore_resolv_backup(backup, path) {
+                        Ok(()) => {
+                            let _ = std::fs::remove_file(backup);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to restore DNS backup; keeping it");
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Unreadable is not evidence that it was replaced.
+                    tracing::warn!(error = %e, "cannot read /etc/resolv.conf; keeping the DNS backup");
+                }
             }
         }
     }

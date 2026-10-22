@@ -61,10 +61,11 @@ fn render(search: &[String], fallbacks: &[IpAddr]) -> String {
     out
 }
 
-/// The file without the lines we wrote: marker, our nameserver and the search line.
-fn strip_ours(contents: &str) -> String {
+/// The file without the lines we wrote: marker and our nameserver. The search
+/// line is rebuilt from the host's own domains, since ours share it.
+fn strip_ours(contents: &str, host_search: &[String]) -> String {
     let ours = resolver_addr();
-    contents
+    let mut out: String = contents
         .lines()
         .filter(|l| {
             let t = l.trim();
@@ -74,7 +75,11 @@ fn strip_ours(contents: &str) -> String {
                     && t["nameserver ".len()..].trim().parse::<IpAddr>().ok() == Some(ours))
         })
         .map(|l| format!("{l}\n"))
-        .collect()
+        .collect();
+    if !host_search.is_empty() {
+        out.push_str(&format!("search {}\n", host_search.join(" ")));
+    }
+    out
 }
 
 fn merge_search(host: &[String], ours: &[SearchDomain]) -> Vec<String> {
@@ -158,7 +163,7 @@ impl DnsConfigurator for IllumosResolvConf {
         if let Ok(current) = tokio::fs::read_to_string(path).await
             && is_ours(&current)
         {
-            write_resolv_file(path, strip_ours(&current).as_bytes())
+            write_resolv_file(path, strip_ours(&current, &self.captured_search).as_bytes())
                 .context("removing our entries from /etc/resolv.conf")?;
         }
         Ok(())
