@@ -61,7 +61,15 @@ impl Node {
 
     /// Run `task` on this node, where config reads go to its tree.
     async fn run<T: Send + 'static>(&self, task: impl Future<Output = T> + Send + 'static) -> T {
-        self.runtime.as_ref().unwrap().spawn(task).await.unwrap()
+        self.spawn(task).await.unwrap()
+    }
+
+    /// Start `task` on this node, as [`Node::run`] does, without waiting for it.
+    fn spawn<T: Send + 'static>(
+        &self,
+        task: impl Future<Output = T> + Send + 'static,
+    ) -> tokio::task::JoinHandle<T> {
+        self.runtime.as_ref().unwrap().spawn(task)
     }
 
     async fn start(&mut self) {
@@ -648,6 +656,250 @@ async fn pairing_again_is_refused_until_the_lifted_revocation_is_published() {
     primary.stop().await;
 }
 
+/// A primary refuses to pair a revoked device again while a network it
+/// coordinates is not running, as while its restore is in progress or after
+/// one failed. That network publishes nothing until it runs, so its last
+/// record still nullifies the device, which joins every saved network as soon
+/// as it has the certificate. Once the network runs again, the pairing
+/// completes. A device that is not revoked pairs regardless.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_again_is_refused_while_a_network_is_not_running() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    let mut device = Node::new(&relay).await;
+    primary.start().await;
+    device.start().await;
+    let cert = paired(&primary, &device).await;
+    let home = unpaired_from_shared_network(&primary, &device).await;
+
+    let restoring = stopped(&primary, "home").await;
+    let (primary_id, secret) = ticket(&primary).await;
+    let daemon = device.daemon();
+    let result = device
+        .run(async move { daemon.pair_with_device(primary_id, secret.to_vec()).await })
+        .await;
+    assert!(matches!(result, IpcMessage::Error { .. }), "{result:?}");
+    assert_eq!(device.cert().await, None);
+    let settings = primary.settings().await;
+    assert!(revoked(&settings, device.id()));
+    assert_eq!(settings.device_generations, []);
+
+    drop(restoring);
+    restored(&primary, "home").await;
+    assert!(primary.nullifies("home", device.id()));
+    let renewed = pair(&primary, &device).await;
+    assert_eq!(renewed.generation, cert.generation + 1);
+    rejoined(&device, home).await;
+    assert_eq!(device.cert().await, Some(renewed.clone()));
+    assert!(!revoked(&primary.settings().await, device.id()));
+    assert!(!primary.nullifies("home", device.id()));
+
+    let _restoring = stopped(&primary, "home").await;
+    let again = pair(&primary, &device).await;
+    assert_eq!(again.generation, renewed.generation + 1);
+    device.stop().await;
+    primary.stop().await;
+}
+
+/// A rename of a network the primary coordinates waits for a pairing that
+/// lifts the revocation of the device. Were it to stop the network after the
+/// pairing checked that every network it coordinates runs, the pairing would
+/// skip that network, which would come back under its new name still
+/// nullifying the device (#258 review).
+// The held state is what holds the pairing; nothing else the test awaits
+// reads it.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rename_waits_for_a_pairing_that_lifts_a_revocation() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    let mut device = Node::new(&relay).await;
+    primary.start().await;
+    device.start().await;
+    revoked_on_two_networks(&primary, &device).await;
+
+    let registry = Arc::clone(&primary.daemon().registry);
+    let state = Arc::clone(&registry.networks.get("home").unwrap().state);
+    let held = state.write().unwrap();
+    let pairing = lifting(&primary, device.id()).await;
+    // Not restored under the new name until the test lets it.
+    let restoring = registry
+        .claim_registration("office")
+        .expect("no restore of the network runs");
+    let renaming = {
+        let registry = Arc::clone(&registry);
+        primary.spawn(async move { registry.rename_network("work", "office").await })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!renaming.is_finished());
+    assert!(registry.networks.contains_key("work"));
+    drop(held);
+    pairing
+        .await
+        .unwrap()
+        .expect("the pairing lifted the revocation");
+    let result = renaming.await.unwrap();
+    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
+
+    drop(restoring);
+    restored(&primary, "office").await;
+    assert!(!primary.nullifies("office", device.id()));
+    assert!(!primary.nullifies("home", device.id()));
+    assert!(!revoked(&primary.settings().await, device.id()));
+    device.stop().await;
+    primary.stop().await;
+}
+
+/// Leaving a network the primary coordinates waits for a pairing that lifts
+/// the revocation of the device. Were it to stop the network after the pairing
+/// checked that every network it coordinates runs, the pairing would skip that
+/// network, yet share it with the device until it is deleted, and the record
+/// the device reads first would still nullify it (#258 review).
+// The held state is what holds the pairing; nothing else the test awaits
+// reads it.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leaving_a_network_waits_for_a_pairing_that_lifts_a_revocation() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    let mut device = Node::new(&relay).await;
+    primary.start().await;
+    device.start().await;
+    revoked_on_two_networks(&primary, &device).await;
+
+    let registry = Arc::clone(&primary.daemon().registry);
+    let state = Arc::clone(&registry.networks.get("home").unwrap().state);
+    let held = state.write().unwrap();
+    let pairing = lifting(&primary, device.id()).await;
+    let leaving = {
+        let registry = Arc::clone(&registry);
+        primary.spawn(async move { registry.leave_network("work").await })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!leaving.is_finished());
+    assert!(registry.networks.contains_key("work"));
+    drop(held);
+    pairing
+        .await
+        .unwrap()
+        .expect("the pairing lifted the revocation");
+    let result = leaving.await.unwrap();
+    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
+    assert!(!primary.has_network("work").await);
+    assert!(!primary.nullifies("home", device.id()));
+    device.stop().await;
+    primary.stop().await;
+}
+
+/// A pairing that lifts the revocation of the device waits while a network the
+/// primary coordinates is destroyed, until the network is no longer saved.
+/// Once the network gives up its key the pairing would skip it, yet share it
+/// with the device while it is saved, and its record still nullifies the
+/// device until the destruction is published (#258 review).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pairing_waits_for_a_network_being_destroyed() {
+    let relay = Relay::start().await;
+    let mut primary = Node::new(&relay).await;
+    let mut device = Node::new(&relay).await;
+    primary.start().await;
+    device.start().await;
+    revoked_on_two_networks(&primary, &device).await;
+    // A member of "work" that never answers, so telling the members that the
+    // network is destroyed takes as long as the primary waits for it.
+    let member = unanswering_member().await;
+    let registry = Arc::clone(&primary.daemon().registry);
+    {
+        let handle = registry.networks.get("work").unwrap();
+        let mut state = handle.state.write().unwrap();
+        let template = state.members.all()[0].clone();
+        state.members.add(Member {
+            identity: member.id(),
+            is_coordinator: false,
+            hostname: Some("laptop".to_string()),
+            ..template
+        });
+    }
+    primary
+        .daemon()
+        .transport
+        .warm_lookup
+        .add_endpoint_info(member.addr());
+
+    let destroying = {
+        let registry = Arc::clone(&registry);
+        primary.spawn(async move { registry.nuke_network("work", true).await })
+    };
+    let mut gave_up_its_key = false;
+    for _ in 0..300 {
+        gave_up_its_key = registry
+            .networks
+            .get("work")
+            .is_some_and(|handle| handle.state.read().unwrap().destroyed);
+        if gave_up_its_key {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(gave_up_its_key, "the destruction did not start");
+    let pairing = {
+        let registry = Arc::clone(&registry);
+        let device = device.id();
+        primary.spawn(async move { registry.save_new_pairing(device).await })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!pairing.is_finished());
+    pairing
+        .await
+        .unwrap()
+        .expect("the pairing lifted the revocation");
+    assert!(!primary.has_network("work").await);
+    let result = destroying.await.unwrap();
+    assert!(matches!(result, IpcMessage::Ok { .. }), "{result:?}");
+    assert!(!primary.nullifies("home", device.id()));
+    member.close().await;
+    device.stop().await;
+    primary.stop().await;
+}
+
+/// Pair `device` with `primary`, which coordinates "work" as well as "home",
+/// and have the device unpair itself, so that the published records of both
+/// networks nullify the device.
+async fn revoked_on_two_networks(primary: &Node, device: &Node) {
+    paired(primary, device).await;
+    let daemon = primary.daemon();
+    primary
+        .run(async move { create(&daemon, "work").await })
+        .await;
+    unpaired_from_shared_network(primary, device).await;
+    primary
+        .eventually("the record of work to be published", |cfg| {
+            cfg.networks
+                .iter()
+                .any(|net| net.name == "work" && net.last_group_hash_published)
+        })
+        .await;
+    assert!(primary.nullifies("work", device.id()));
+}
+
+/// Start lifting the revocation of `device` on `primary`, as a pairing of the
+/// device does before the primary signs its certificate, and wait until the
+/// saved revocation is lifted. By then the pairing has checked that every
+/// network the primary coordinates runs, and goes on to read the state of each:
+/// a caller holding the state of one holds the pairing there.
+async fn lifting(
+    primary: &Node,
+    device: EndpointId,
+) -> tokio::task::JoinHandle<Result<u64, String>> {
+    let registry = Arc::clone(&primary.daemon().registry);
+    let pairing = primary.spawn(async move { registry.save_new_pairing(device).await });
+    primary
+        .eventually("the saved revocation to be lifted", move |cfg| {
+            !revoked(cfg, device)
+        })
+        .await;
+    pairing
+}
+
 /// Have `device`, paired to `primary`, unpair itself, and wait until the
 /// primary has recorded that and published the record of "home", the network
 /// it coordinates with the device on: the record a joiner reads first now
@@ -690,6 +942,38 @@ async fn rejoined(device: &Node, home: EndpointId) {
         })
         .await;
     device.unpair_settled().await;
+}
+
+/// Stop the network `name` on `primary`, claimed as a restore in progress
+/// claims it, so that the restore supervisor leaves it stopped until the claim
+/// is dropped.
+async fn stopped(primary: &Node, name: &'static str) -> network_registry::RegistrationClaim {
+    let registry = Arc::clone(&primary.daemon().registry);
+    let claim = registry
+        .claim_registration(name)
+        .expect("no restore of the network runs");
+    assert!(
+        primary
+            .run(async move { registry.teardown_network_runtime(name).await })
+            .await
+    );
+    claim
+}
+
+/// Have the restore supervisor of `primary` bring the network `name` back, and
+/// wait, at most a minute, until that restore is over: the network runs, and
+/// the restore has dropped its claim, which it holds a while longer, through
+/// the DNS update (slow on Windows).
+async fn restored(primary: &Node, name: &'static str) {
+    let registry = Arc::clone(&primary.daemon().registry);
+    registry.nudge_restore();
+    for _ in 0..600 {
+        if registry.networks.contains_key(name) && !registry.restoring.contains(name) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("timed out waiting for the restore of {name}");
 }
 
 /// A notice read by the device only after it paired again: it waited on the
@@ -1249,6 +1533,21 @@ async fn notice_taker(
         }
     });
     (device, told, accept)
+}
+
+/// An endpoint that never takes a connection, so a peer dialing it waits for
+/// the handshake until the peer gives up. One that took the connection would
+/// acknowledge what is sent on it, read or not.
+async fn unanswering_member() -> Endpoint {
+    Endpoint::builder(presets::N0)
+        .relay_mode(RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .alpns(vec![transport::mesh_alpn()])
+        .bind()
+        .await
+        .unwrap()
 }
 
 /// The next message a [`notice_taker`] passes on.

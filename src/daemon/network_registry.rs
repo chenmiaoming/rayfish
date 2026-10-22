@@ -282,7 +282,12 @@ pub(crate) struct NetworkRegistry {
     /// Held across each revocation of a device and each re-authorization of a
     /// device that paired again, so neither runs in the middle of the other: a
     /// revocation still under way when the device pairs again would put back
-    /// the nullifiers the re-authorization clears.
+    /// the nullifiers the re-authorization clears. Creating, renaming, leaving
+    /// and destroying a network hold it too, until the network is saved, saved
+    /// under its new name, or gone. A re-authorization checks that every
+    /// network this node coordinates runs, then clears the device from each
+    /// and waits for their records, and a network that stopped or appeared in
+    /// between would keep a record that still nullifies the device.
     pub(crate) revocation_lock: AsyncMutex<()>,
     /// Signalled each time a network's record is confirmed published here, for
     /// a caller waiting until one is ([`Self::reauth_device_locked`]).
@@ -751,7 +756,9 @@ impl NetworkRegistry {
     /// entries, unregister its accept handler, and refresh DNS search domains.
     /// Returns whether the network was actually active. The mesh ALPN set is
     /// static, so (unlike the old `refresh_alpns`) only the search domains need
-    /// updating here.
+    /// updating here. A caller that stops a network this node coordinates holds
+    /// [`Self::revocation_lock`] until the network is gone or saved under its
+    /// new name.
     pub(crate) async fn teardown_network_runtime(&self, name: &str) -> bool {
         self.teardown_network_runtime_closing(name, forward::LEAVE_CODE, b"leave")
             .await
@@ -898,6 +905,10 @@ impl NetworkRegistry {
     }
 
     async fn remove_network_locally(&self, name: &str) -> bool {
+        // Stopped and deleted under [`Self::revocation_lock`]: a pairing that
+        // lifts a revocation meanwhile would skip the network, yet share it with
+        // the device until it is deleted.
+        let _revoking = self.revocation_lock.lock().await;
         let was_active = self.teardown_network_runtime(name).await;
         let removed_from_config = match config::delete_network(name) {
             Ok(removed) => removed,
@@ -971,6 +982,12 @@ impl NetworkRegistry {
                 "network '{from}' is still being restored; try again once it is up"
             ));
         };
+        // Stopped and moved under [`Self::revocation_lock`]: a pairing that
+        // lifts a revocation meanwhile would skip the network, which then comes
+        // back under the new name from a record that still nullifies the device.
+        // Once moved, the network is saved and not running, which such a
+        // pairing refuses.
+        let revoking = self.revocation_lock.lock().await;
         // The network's invite ledger moves with the name. Its invites are
         // redeemed and delivered under its invite lock, so hold that across the
         // move: a write already under way would otherwise land under the old
@@ -988,6 +1005,7 @@ impl NetworkRegistry {
             };
             config::rename_network(from, to)
         };
+        drop(revoking);
         drop(claim);
         let net = match renamed {
             Ok(Some(net)) => net,
@@ -1266,6 +1284,11 @@ impl NetworkRegistry {
         let mut net_state =
             self.build_initial_roster(&name, &my_hostname, mode, &net_secret_key, pre_approve)?;
 
+        // Sealed and saved under [`Self::revocation_lock`]: the seal copies the
+        // device revocations saved here into the network, and a pairing that
+        // lifts one in between would find the network neither saved nor running,
+        // and leave it nullifying the device.
+        let revoking = self.revocation_lock.lock().await;
         let last_group_hash = self.seal_group_snapshot(&mut net_state).await?;
 
         let member_entries = to_member_entries(net_state.members.all());
@@ -1300,6 +1323,7 @@ impl NetworkRegistry {
             exit_allow: vec![],
             exit_node_use: None,
         })?;
+        drop(revoking);
         dns::update_hostname(
             &self.dns.hostname_table,
             &self.dns.reverse_table,
@@ -1863,16 +1887,38 @@ impl NetworkRegistry {
     ///
     /// Returns whether a revocation was lifted. If a record is not published in
     /// time, the revocation is put back, so that the next attempt lifts it and
-    /// waits again, and an error is returned. The caller holds
-    /// [`Self::revocation_lock`].
+    /// waits again, and an error is returned. A coordinated network that is not
+    /// running, while its restore is in progress or after one failed, publishes
+    /// nothing, and the device is told of every saved network, so a revoked
+    /// device gets an error then, before anything changes. The caller holds
+    /// [`Self::revocation_lock`], which keeps the networks this node
+    /// coordinates from stopping or appearing until this returns.
     pub(crate) async fn reauth_device_locked(
         self: &Arc<Self>,
         device: EndpointId,
     ) -> Result<bool, String> {
         // Before anything changes, so that no publication after it is missed.
         let mut published = self.records_published.subscribe();
-        // Drop from the durable nullifier seed so a later reseal won't re-add it.
         let hex = device.to_string();
+        let settings =
+            config::load().map_err(|e| format!("could not read the nullifier seed: {e:#}"))?;
+        if settings.revoked_devices.contains(&hex) {
+            let stopped: Vec<&str> = settings
+                .networks
+                .iter()
+                .filter(|net| {
+                    net.network_secret_key.is_some() && !self.networks.contains_key(&net.name)
+                })
+                .map(|net| net.name.as_str())
+                .collect();
+            if !stopped.is_empty() {
+                return Err(format!(
+                    "networks this node coordinates are not running, and their records still nullify the device: {}",
+                    stopped.join(", ")
+                ));
+            }
+        }
+        // Drop from the durable nullifier seed so a later reseal won't re-add it.
         let mut lifted = false;
         // No-op when the device was not in the seed: `update_settings` skips the
         // write when the callback changes nothing.
