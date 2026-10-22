@@ -21,3 +21,13 @@ failure cleanup stops both daemons and deletes their state. Diagnostics report
 stages and error counts without credentials or raw daemon logs.
 
 `tests/e2e.sh rootless provision` and `teardown` are no-ops.
+
+For an isolated Docker run:
+
+```bash
+E2E_BACKEND=docker tests/e2e.sh rootless
+```
+
+Both daemons run in one container as an ordinary user, with a read-only root
+filesystem, no capabilities and no TUN device. The binary and test are mounted
+read-only. Docker is required on the runner; nothing runs through sudo.

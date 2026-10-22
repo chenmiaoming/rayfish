@@ -58,6 +58,8 @@ Build with `cargo -q build`, then run `tests/e2e.sh rootless` as an ordinary Lin
 user. This needs only Python 3.10+ and the binary. `RAY_BIN` overrides the binary;
 otherwise it uses `${CARGO_TARGET_DIR:-target}/debug/ray`. It owns temporary state,
 cleans up both daemons, and does no provisioning. See [rootless/](rootless).
+Use `E2E_BACKEND=docker tests/e2e.sh rootless` to run both daemons inside an
+unprivileged container, with no capabilities or TUN device.
 
 ## Prerequisites (host backends)
 

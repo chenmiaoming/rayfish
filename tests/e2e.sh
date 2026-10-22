@@ -51,7 +51,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # This scenario owns local temporary state and never provisions a backend.
 if [[ "${1:-}" == rootless ]]; then
   case "${2:-run}" in
-    run) exec python3 "$ROOT/tests/e2e/rootless/run.py" ;;
+    run)
+      if [[ "${E2E_BACKEND:-}" == docker ]]; then
+        exec bash "$ROOT/tests/e2e/rootless/docker.sh"
+      fi
+      exec python3 "$ROOT/tests/e2e/rootless/run.py"
+      ;;
     provision|teardown) exit 0 ;;
     *) echo "unknown rootless action: $2" >&2; exit 2 ;;
   esac
