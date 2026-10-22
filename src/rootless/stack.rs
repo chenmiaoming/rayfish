@@ -662,8 +662,12 @@ mod tests {
         peers.note_receive_mtu(&remote.id(), &connection, TUN_MTU);
         peers.add_inbound_handle_by_id(&remote.id(), &connection, 1, SmolStr::new("mesh"));
         let firewall = SharedFirewall::new(FirewallConfig {
-            default_inbound: Action::Allow,
-            default_outbound: Action::Allow,
+            // The service accepts test connections; the client keeps inbound denial.
+            default_inbound: if node.network.driver.listeners.is_empty() {
+                Action::Deny
+            } else {
+                Action::Allow
+            },
             ..Default::default()
         });
         let stats = Arc::new(ForwardMetrics::default());

@@ -26,6 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- TCP replies remain allowed after closing the write half of a connection.
+  Tracking expires after both sides close, while resets remove it immediately.
+
 - Linux rootless mode preserves GUI instance selection, reports SOCKS failures
   and adapts TCP traffic to smaller mesh paths. Network changes leave host DNS
   untouched, and private instances do not expose peer metrics.
