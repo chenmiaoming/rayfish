@@ -42,6 +42,11 @@ impl NetworkRegistry {
             destruction::is_destroyed(&packet),
             "not a destruction record"
         );
+        // Until the network is gone, under [`Self::revocation_lock`]: a pairing
+        // that lifts a revocation skips a network that no longer holds its key,
+        // yet shares it with the device while it is saved, and its record still
+        // nullifies the device until the destruction is published.
+        let revoking = self.revocation_lock.lock().await;
         let network = packet.public_key();
         let state = self.networks.get(name).map(|h| Arc::clone(&h.state));
         let commit = match &state {
@@ -162,6 +167,7 @@ impl NetworkRegistry {
         let removal = config::delete_network(name);
         let pending_removal = config::remove_pending_join(&network.to_string());
         self.teardown_network_runtime(name).await;
+        drop(revoking);
         let publication = async {
             let client = dht::create_pkarr_client(
                 &self.transport.endpoint,

@@ -23,6 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The mesh protocol is now version 7, so that a device is told which pairing
   an unpair ends. Peers on versions 6 and 5 still connect.
+- macOS: Install shell command shows a green confirmation when it succeeds and
+  highlights the error when it fails.
 
 ### Fixed
 
@@ -45,8 +47,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   earlier one arrives late. Pairing a device again now completes only once the
   primary's networks have stopped listing it as revoked, so that joining them
   right away does not undo the new pairing; if that takes longer than 10
-  seconds, the pairing fails and can be tried again. A primary on an older
-  release gets the earlier one-shot request.
+  seconds, or one of those networks is not running, the pairing fails and can
+  be tried again. A primary on an older release gets the earlier one-shot
+  request.
 
 ## [0.5.10] - 2026-10-19
 
