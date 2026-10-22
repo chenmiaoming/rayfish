@@ -12,6 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - iOS 18: a Rayfish control turns the VPN on and off from Control Center,
   the Lock Screen or the Action button.
 
+### Changed
+
+- macOS: Install shell command shows a green confirmation when it succeeds and
+  highlights the error when it fails.
+
 ## [0.5.10] - 2026-10-19
 
 ### Added
