@@ -253,5 +253,4 @@ iroh-relay = { git = "https://github.com/rayfish/iroh", rev = "9dab676bb935caedd
 # configure-socket hook (n0-computer/net-tools#182) plus illumos support.
 netdev = { git = "https://github.com/extrowerk/netdev.git", branch = "illumos" }
 netwatch = { git = "https://github.com/extrowerk/net-tools", branch = "illumos-0.19" }
-swarm-discovery = { git = "https://github.com/extrowerk/swarm-discovery", branch = "illumos" }
 tun-rs = { git = "https://github.com/extrowerk/tun-rs", branch = "illumos" }

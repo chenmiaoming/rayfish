@@ -35,6 +35,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and adapts TCP traffic to smaller mesh paths. Network changes leave host DNS
   untouched, and private instances do not expose peer metrics.
 
+- illumos: remove stale tunnel interfaces after shutdown and before restarting
+  after a crash.
 - Unpairing no longer depends on the device and its primary being connected at
   that moment, which on-demand mode makes rare. A device that unpairs itself,
   such as a phone in the Android app, keeps asking its primary to revoke it,

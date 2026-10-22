@@ -7076,8 +7076,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swarm-discovery"
-version = "0.6.3"
-source = "git+https://github.com/extrowerk/swarm-discovery?branch=illumos#e1a4406c97d1f3d2d91f13a3d288c9273ce15c0b"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7e56b7e93eaffb9baba3e64936a5912540847516fc5f26d66ad18044b8d4a14"
 dependencies = [
  "acto",
  "hickory-proto",
@@ -7827,7 +7828,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "tun-rs"
 version = "2.8.11"
-source = "git+https://github.com/extrowerk/tun-rs?branch=illumos#98b12e9868732f904b2a7820067e1fb093d86aef"
+source = "git+https://github.com/extrowerk/tun-rs?branch=illumos#de333faa6b44f55d3f4ed2101e09441b4cb688a4"
 dependencies = [
  "blocking",
  "byteorder",
