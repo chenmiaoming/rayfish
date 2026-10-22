@@ -158,12 +158,15 @@ pub async fn run_rootless(
             restore.abort();
             anyhow::bail!("{message}");
         }
-        tracing::info!("rootless userspace networking ready");
-        let result = tokio::select! {
-            result = network.driver.run(token.clone()) => result,
-            result = proxy.run(Arc::clone(&daemon), network.stack, network.listeners, token.clone()) => result,
-            result = accept_ipc(socket, &daemon, token.clone(), IpcHost::Rootless { owner_uid: instance.owner_uid }) => result,
-        };
+        let result = async {
+            proxy.print_instructions(instance).await?;
+            tracing::info!("rootless userspace networking ready");
+            tokio::select! {
+                result = network.driver.run(token.clone()) => result,
+                result = proxy.run(Arc::clone(&daemon), network.stack, network.listeners, token.clone()) => result,
+                result = accept_ipc(socket, &daemon, token.clone(), IpcHost::Rootless { owner_uid: instance.owner_uid }) => result,
+            }
+        }.await;
         daemon.detach_tun();
         token.cancel();
         restore.abort();

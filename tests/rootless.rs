@@ -33,12 +33,14 @@ struct Running {
     logs: JoinHandle<()>,
     socks: SocketAddr,
     http: SocketAddr,
+    stdout: String,
 }
 
 #[derive(Debug)]
 struct Addresses {
     socks: SocketAddr,
     http: SocketAddr,
+    stdout: String,
 }
 
 fn listening_address(line: &str) -> SocketAddr {
@@ -71,7 +73,12 @@ async fn start(directory: &Path) -> Running {
         let mut ready = Some(ready);
         let mut socks = None;
         let mut http = None;
+        let mut stdout = String::new();
         while let Some(line) = lines.next_line().await.unwrap() {
+            if ready.is_some() {
+                stdout.push_str(&line);
+                stdout.push('\n');
+            }
             if line.contains("rootless SOCKS5 listening") {
                 socks = Some(listening_address(&line));
             }
@@ -85,6 +92,7 @@ async fn start(directory: &Path) -> Running {
                     .send(Addresses {
                         socks: socks.take().unwrap(),
                         http: http.take().unwrap(),
+                        stdout: std::mem::take(&mut stdout),
                     })
                     .unwrap();
             }
@@ -99,6 +107,7 @@ async fn start(directory: &Path) -> Running {
         logs,
         socks: addresses.socks,
         http: addresses.http,
+        stdout: addresses.stdout,
     }
 }
 
@@ -173,6 +182,54 @@ async fn independent_rootless_instances_have_private_state_and_safe_lifecycle() 
     let first_status = cli(&first_path, &["status", "--json"]).await;
     assert!(first_status.status.success());
     let first_status: serde_json::Value = serde_json::from_slice(&first_status.stdout).unwrap();
+    let automatic = timeout(
+        Duration::from_secs(15),
+        command(&first_path).args(["status", "--json"]).output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(automatic.status.success());
+    let automatic: serde_json::Value = serde_json::from_slice(&automatic.stdout).unwrap();
+    assert_eq!(automatic["endpoint"], first_status["endpoint"]);
+    assert_eq!(automatic["rootless"], true);
+    let system = timeout(
+        Duration::from_secs(15),
+        command(&first_path)
+            .args(["--system", "status", "--json"])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    if system.status.success() {
+        let system: serde_json::Value = serde_json::from_slice(&system.stdout).unwrap();
+        assert_ne!(system["rootless"], true);
+        assert_ne!(system["endpoint"], first_status["endpoint"]);
+    }
+    for running in [&first, &second] {
+        assert!(running.stdout.contains("ray join <network-key>"));
+        assert!(running.stdout.contains("ray status"));
+        assert!(running.stdout.contains("ray --system status"));
+        assert!(running.stdout.contains(&format!(
+            "curl --proxy socks5h://{} --proxy-user ray",
+            running.socks
+        )));
+        assert!(running.stdout.contains(&format!(
+            "curl --proxy http://{} --proxy-user ray",
+            running.http
+        )));
+    }
+    assert!(
+        first
+            .stdout
+            .contains(&first_path.join("proxy-password").display().to_string())
+    );
+    let secret = std::fs::read_to_string(first_path.join("proxy-password")).unwrap();
+    assert!(
+        !first.stdout.contains(&secret),
+        "startup must never print the password"
+    );
     let second_status = cli(&second_path, &["status", "--json"]).await;
     let second_status: serde_json::Value = serde_json::from_slice(&second_status.stdout).unwrap();
     assert_eq!(first_status["rootless"], true);
@@ -275,4 +332,54 @@ async fn independent_rootless_instances_have_private_state_and_safe_lifecycle() 
     );
     stop(restarted, &first_path).await;
     stop(second, &second_path).await;
+}
+
+#[tokio::test]
+async fn automatic_selection_falls_back_without_creating_user_state() {
+    if uzers::get_effective_uid() == 0 {
+        return;
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("instance");
+    async fn status(directory: &Path, system: bool) -> Output {
+        let mut cmd = command(directory);
+        if system {
+            cmd.arg("--system");
+        }
+        timeout(
+            Duration::from_secs(15),
+            cmd.args(["status", "--json"]).output(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+    fn assert_system_result(automatic: &Output, system: &Output) {
+        assert_eq!(automatic.status.success(), system.status.success());
+        if automatic.status.success() {
+            let automatic: serde_json::Value = serde_json::from_slice(&automatic.stdout).unwrap();
+            let system: serde_json::Value = serde_json::from_slice(&system.stdout).unwrap();
+            assert_eq!(automatic["endpoint"], system["endpoint"]);
+            assert_ne!(automatic["rootless"], true);
+        }
+    }
+    let system = status(&directory, true).await;
+    assert_system_result(&status(&directory, false).await, &system);
+    assert!(!directory.exists(), "discovery must not create state");
+
+    let runtime = directory.join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = runtime.join("rayfish.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    assert_system_result(&status(&directory, false).await, &system);
+    assert!(!directory.join("secret_key").exists());
+
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let rejected = status(&directory, false).await;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("rootless runtime directory"));
+    assert_system_result(&status(&directory, true).await, &system);
 }

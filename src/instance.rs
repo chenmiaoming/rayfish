@@ -23,6 +23,11 @@ pub fn is_rootless() -> bool {
 
 #[cfg(all(target_os = "linux", feature = "desktop"))]
 pub fn select_rootless() -> anyhow::Result<()> {
+    select_user_instance(rootless_instance()?)
+}
+
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+fn rootless_instance() -> anyhow::Result<UserInstance> {
     use anyhow::Context;
     let uid = uzers::get_effective_uid();
     anyhow::ensure!(
@@ -44,14 +49,77 @@ pub fn select_rootless() -> anyhow::Result<()> {
             .map(|path| path.join("rayfish-rootless"))
             .unwrap_or_else(|| directory.join("run")),
     };
-    crate::ipc::set_socket_path(runtime.join("rayfish.sock"))?;
+    Ok(UserInstance {
+        directory,
+        runtime,
+        owner_uid: uid,
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+fn select_user_instance(instance: UserInstance) -> anyhow::Result<()> {
+    crate::ipc::set_socket_path(instance.runtime.join("rayfish.sock"))?;
     USER_INSTANCE
-        .set(UserInstance {
-            directory,
-            runtime,
-            owner_uid: uid,
-        })
+        .set(instance)
         .map_err(|_| anyhow::anyhow!("instance already selected"))
+}
+
+/// Prefer the current user's live rootless daemon without creating any state.
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub async fn detect_rootless() -> anyhow::Result<bool> {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::time::Duration;
+    use tokio::fs::symlink_metadata;
+    use tokio::net::UnixStream;
+    use tokio::time::timeout;
+
+    if is_rootless() {
+        return Ok(true);
+    }
+    if uzers::get_effective_uid() == 0 || uzers::get_effective_uid() != uzers::get_current_uid() {
+        return Ok(false);
+    }
+    let instance = rootless_instance()?;
+    let metadata = match symlink_metadata(&instance.runtime).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.is_dir() && metadata.uid() == instance.owner_uid && metadata.mode() & 0o077 == 0,
+        "rootless runtime directory must be owned by the current user with mode 0700"
+    );
+    let path = instance.runtime.join("rayfish.sock");
+    let metadata = match symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_socket()
+            && metadata.uid() == instance.owner_uid
+            && metadata.mode() & 0o077 == 0,
+        "rootless IPC must be a private socket owned by the current user"
+    );
+    let stream = match timeout(Duration::from_secs(1), UnixStream::connect(path)).await? {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        stream.peer_cred()?.uid() == instance.owner_uid,
+        "rootless daemon must run as the current user"
+    );
+    select_user_instance(instance)?;
+    Ok(true)
 }
 
 #[cfg(unix)]

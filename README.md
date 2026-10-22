@@ -106,8 +106,8 @@ Run without sudo, a TUN device or host route/DNS changes:
 ```bash
 ray rootless --socks5 127.0.0.1:1080 --http 127.0.0.1:8080
 # In another terminal:
-ray --rootless join <network-key>
-ray --rootless status
+ray join <network-key>
+ray status
 curl --proxy socks5h://127.0.0.1:1080 --proxy-user ray http://peer.network.ray/
 curl --proxy http://127.0.0.1:8080 --proxy-user ray http://peer.network.ray/
 ```
@@ -127,8 +127,11 @@ subject to the mesh firewall. No other host listeners are exposed.
 State and logs live under `${XDG_DATA_HOME:-$HOME/.local/share}/rayfish/rootless`.
 IPC is private to the owning Unix user and root. `RAYFISH_ROOTLESS_DIR` selects
 another private state directory for both daemon and CLI. Use Ctrl-C or
-`ray --rootless stop` to stop; `ray --rootless down` pauses packet forwarding.
-The system daemon can run alongside it.
+`ray stop` to stop; `ray down` pauses packet forwarding. Commands prefer your
+running rootless instance, otherwise they use the system daemon. Use `--system`
+to select the system daemon or `--rootless` to select your private instance
+explicitly. System service commands such as `install` and `restart` always target
+the system daemon. Startup prints the actual proxy addresses and usage commands.
 
 ## Documentation
 

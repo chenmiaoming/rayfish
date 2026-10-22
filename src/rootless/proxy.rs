@@ -119,6 +119,41 @@ impl Proxy {
         })
     }
 
+    pub(crate) async fn print_instructions(&self, instance: &UserInstance) -> Result<()> {
+        let socks = self.socks.local_addr()?;
+        let mut text = format!(
+            "\nRayfish rootless is ready. Keep this terminal open.\n\n\
+             In another terminal (use the same RAYFISH_ROOTLESS_DIR if set):\n\
+               ray join <network-key>\n\
+               ray status\n\n\
+             Proxy username: ray\n\
+             Password file: {}\n\
+             Read this file for the password when curl prompts.\n\n\
+             SOCKS5 proxy: socks5h://{socks}\n\
+               curl --proxy socks5h://{socks} --proxy-user ray http://peer.network.ray/\n",
+            instance.directory.join("proxy-password").display()
+        );
+        if let Some(http) = &self.http {
+            let http = http.local_addr()?;
+            text.push_str(&format!(
+                "\nHTTP proxy: http://{http} (HTTPS uses CONNECT)\n\
+                   curl --proxy http://{http} --proxy-user ray http://peer.network.ray/\n"
+            ));
+        } else {
+            text.push_str("\nTo enable HTTP/HTTPS proxying, restart with --http 127.0.0.1:0.\n");
+        }
+        text.push_str(
+            "\nOnly applications using a proxy or TCP forward use the mesh.\n\
+             Commands automatically use this instance while it is running.\n\
+             Use ray --system status for the system daemon, or --rootless to select this instance explicitly.\n\
+             Stop with Ctrl-C or ray stop.\n\n"
+        );
+        let mut stdout = tokio::io::stdout();
+        stdout.write_all(text.as_bytes()).await?;
+        stdout.flush().await?;
+        Ok(())
+    }
+
     pub(crate) fn ports(&self) -> Vec<u16> {
         self.expose.iter().map(|e| e.port.get()).collect()
     }

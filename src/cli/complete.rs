@@ -499,6 +499,10 @@ fn status() -> Option<(Vec<NetworkStatus>, Vec<String>)> {
 /// users it answers for are the ones who can run the command anyway.
 fn ask<T>(request: IpcMessage, reply: impl FnOnce(IpcMessage) -> Option<T>) -> Option<T> {
     blocking(BUDGET, async {
+        #[cfg(target_os = "linux")]
+        if !std::env::args_os().any(|argument| argument == "--system") {
+            rayfish::instance::detect_rootless().await.ok()?;
+        }
         // No socket means no daemon. Connecting would not start one, but
         // `ipc::connect`'s error path is slower than an existence check and
         // this runs on a keystroke.

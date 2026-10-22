@@ -54,6 +54,10 @@ struct Cli {
     #[cfg(target_os = "linux")]
     #[arg(long, global = true)]
     rootless: bool,
+    /// Use the system daemon
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true, conflicts_with = "rootless")]
+    system: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -1777,21 +1781,31 @@ async fn run() -> Result<()> {
     let cli =
         Cli::from_arg_matches(&cli::help::command().get_matches()).unwrap_or_else(|e| e.exit());
     #[cfg(target_os = "linux")]
-    if cli.rootless || matches!(cli.command, Command::Rootless { .. }) {
-        rayfish::instance::select_rootless()?;
-        anyhow::ensure!(
-            !matches!(
-                cli.command,
-                Command::Daemon { .. }
-                    | Command::Start
-                    | Command::Restart
-                    | Command::Install { .. }
-                    | Command::Uninstall
-                    | Command::SetOperator { .. }
-                    | Command::Update { .. }
-            ),
-            "rootless instances run in the foreground with ray rootless; system service operations are unavailable"
+    {
+        let system_operation = matches!(
+            cli.command,
+            Command::Daemon { .. }
+                | Command::Start
+                | Command::Restart
+                | Command::Install { .. }
+                | Command::Uninstall
+                | Command::SetOperator { .. }
+                | Command::Update { .. }
         );
+        let rootless_daemon = matches!(cli.command, Command::Rootless { .. });
+        anyhow::ensure!(
+            !cli.system || !rootless_daemon,
+            "ray rootless cannot use --system"
+        );
+        if cli.rootless || rootless_daemon {
+            anyhow::ensure!(
+                !system_operation,
+                "rootless instances run in the foreground with ray rootless; system service operations are unavailable"
+            );
+            rayfish::instance::select_rootless()?;
+        } else if !cli.system && !system_operation {
+            rayfish::instance::detect_rootless().await?;
+        }
     }
     if json_requested(&cli.command) {
         JSON_FLAG.store(true, atomic::Ordering::Relaxed);
