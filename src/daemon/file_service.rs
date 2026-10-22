@@ -259,6 +259,38 @@ fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     black_box(diff) == 0
 }
 
+/// How long a primary waits, after sending a device its certificate, for the
+/// device to confirm it saved it.
+const CERTIFICATE_SAVED_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait for the device that was just sent its certificate at `generation` to
+/// confirm it saved it (`PairMsg::CertificateSaved`), save that, then close the
+/// connection, which the device waits for. Until a device confirms, an unpair
+/// request about its earlier pairing still revokes it.
+async fn await_certificate_saved(conn: &Connection, device: EndpointId, generation: u64) {
+    let confirmation = async {
+        let (_send, mut recv) = conn.accept_bi().await?;
+        control::recv_framed::<control::PairMsg>(&mut recv).await
+    };
+    match tokio::time::timeout(CERTIFICATE_SAVED_TIMEOUT, confirmation).await {
+        Ok(Ok(control::PairMsg::CertificateSaved { generation: saved })) if saved == generation => {
+            if let Err(error) = save_certificate_saved(device, generation) {
+                tracing::warn!(device = %device.fmt_short(), error = %format!("{error:#}"), "could not save that the device saved its certificate");
+            }
+            conn.close(VarInt::from_u32(0), b"saved");
+        }
+        Ok(Ok(_)) => {
+            tracing::warn!(device = %device.fmt_short(), "unexpected message after pairing");
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(device = %device.fmt_short(), error = %format!("{error:#}"), "device did not confirm it saved its certificate");
+        }
+        Err(_) => {
+            tracing::debug!(device = %device.fmt_short(), "timed out waiting for the device to confirm it saved its certificate");
+        }
+    }
+}
+
 /// Outcome of checking a presented pairing secret. Separate from the stored value
 /// so the lock is dropped before the (slow) success path runs.
 enum PairCheck {
@@ -1141,7 +1173,9 @@ impl FileService {
 
     /// `PAIR_ALPN`: complete a device-pairing handshake. Verifies the dialer's
     /// secret against the active pairing session and, on match, signs and returns
-    /// a `DeviceCert` binding the new device key to our identity.
+    /// a `DeviceCert` binding the new device key to our identity. Also answers a
+    /// paired device's network list request and, over version 3 only, its
+    /// unpair request.
     pub(crate) async fn accept_pair_request(&self, conn: Connection) {
         let remote_id = conn.remote_id();
         match conn.accept_bi().await {
@@ -1212,22 +1246,37 @@ impl FileService {
                                     tracing::warn!(%error, "could not record existing memberships before pairing");
                                     return;
                                 }
+                                // The pairing's generation, one above the device's
+                                // last, saved before it gets the cert signed at it,
+                                // in the same write that ends the notices `ray
+                                // unpair` left it. A notice or request about an
+                                // earlier pairing names a lower generation, so
+                                // neither undoes this one if it is acted on late.
+                                // A deliberate (re-)pair also re-authorizes this
+                                // device first, clearing any nullifier for it
+                                // (durable seed + every coordinated blob) with
+                                // the records published: the device joins the
+                                // networks shared below at once, and a record
+                                // still nullifying it would end the new pairing.
+                                let generation = match self
+                                    .registry
+                                    .save_new_pairing(device_pubkey)
+                                    .await
+                                {
+                                    Ok(generation) => generation,
+                                    Err(message) => {
+                                        tracing::warn!(device = %device_pubkey.fmt_short(), %message, "could not save the pairing; refusing it");
+                                        conn.close(
+                                            VarInt::from_u32(0),
+                                            b"the primary could not save the pairing; pair again",
+                                        );
+                                        return;
+                                    }
+                                };
                                 // Sign the device's public key
                                 // Share our saved networks so the new device can auto-join them. Only
                                 // networks with a known public key (skips freshly created, unsynced ones).
                                 let networks = saved_pair_networks().unwrap_or_default();
-                                // A deliberate (re-)pair re-authorizes this device.
-                                // Clear any nullifier for it (durable seed + every
-                                // coordinated blob) so admission stops rejecting the
-                                // fresh cert; otherwise the device would reconnect-
-                                // loop. Spawned so the reseal/publish doesn't delay
-                                // the cert response the joiner is waiting on.
-                                let registry = Arc::clone(&self.registry);
-                                tokio::spawn(async move {
-                                    registry.reauth_device(device_pubkey).await;
-                                });
-                                let generation =
-                                    config::load().map(|c| c.cert_generation).unwrap_or(0);
                                 let cert = control::DeviceCert::create(
                                     &self.secret_key,
                                     &device_pubkey,
@@ -1244,6 +1293,12 @@ impl FileService {
                                 // "connection lost" and never receives the cert even though we
                                 // logged success below.
                                 let _ = send.finish();
+                                // A device on version 3 confirms once the cert is
+                                // saved, which is what makes a request about its
+                                // earlier pairing obsolete.
+                                if conn.alpn() == PAIR_ALPN {
+                                    await_certificate_saved(&conn, device_pubkey, generation).await;
+                                }
                                 let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed())
                                     .await;
                                 tracing::info!(device = %device_pubkey.fmt_short(), "device paired successfully");
@@ -1274,6 +1329,53 @@ impl FileService {
                         };
                         let response = control::PairMsg::NetworkListResponse { networks };
                         if control::send_framed(&mut send, &response).await.is_ok() {
+                            let _ = send.finish();
+                            let _ =
+                                tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+                        }
+                    }
+                    control::PairMsg::UnpairRequest { cert } => {
+                        // New in version 3; a version 2 peer never sends it.
+                        if conn.alpn() != PAIR_ALPN {
+                            tracing::warn!(device = %remote_id.fmt_short(), "unpair request over pairing version 2; ignoring");
+                            return;
+                        }
+                        // The certificate is the evidence of the pairing, checked in
+                        // place of the rosters, which a device that left its
+                        // networks is no longer on: it must be ours, and for the
+                        // key that dialed.
+                        if !cert.verify()
+                            || cert.user_identity != self.transport.endpoint.id()
+                            || cert.device_key != remote_id
+                        {
+                            tracing::warn!(device = %remote_id.fmt_short(), "refused unpair request without a certificate we issued to it");
+                            return;
+                        }
+                        // Answered only once the revocation is saved, and again
+                        // when it already was, so a lost answer is safe to ask for.
+                        // A pairing the device has replaced since, and confirmed
+                        // the replacement of, is answered without a revocation,
+                        // which would end the new one.
+                        match self
+                            .registry
+                            .record_unpair(remote_id, cert.generation)
+                            .await
+                        {
+                            Ok(true) => {
+                                tracing::info!(device = %remote_id.fmt_short(), "recorded unpair requested by the device");
+                            }
+                            Ok(false) => {
+                                tracing::info!(device = %remote_id.fmt_short(), "unpair request for a pairing the device has since replaced; nothing to revoke");
+                            }
+                            Err(error) => {
+                                tracing::warn!(device = %remote_id.fmt_short(), %error, "could not record unpair request");
+                                return;
+                            }
+                        }
+                        if control::send_framed(&mut send, &control::PairMsg::UnpairRecorded)
+                            .await
+                            .is_ok()
+                        {
                             let _ = send.finish();
                             let _ =
                                 tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;

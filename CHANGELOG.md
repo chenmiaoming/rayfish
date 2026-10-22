@@ -14,8 +14,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The mesh protocol is now version 7, so that a device is told which pairing
+  an unpair ends. Peers on versions 6 and 5 still connect.
 - macOS: Install shell command shows a green confirmation when it succeeds and
   highlights the error when it fails.
+
+### Fixed
+
+- Unpairing no longer depends on the device and its primary being connected at
+  that moment, which on-demand mode makes rare. A device that unpairs itself,
+  such as a phone in the Android app, keeps asking its primary to revoke it,
+  across restarts, until the primary confirms that the revocation is saved.
+  `ray unpair <device>` keeps telling the device to delete its certificate until
+  the device confirms, so a device that was offline gets the message later. An
+  unpair interrupted by a restart is finished at the next start. A missed
+  message used to leave the device's certificate unrevoked, or still on the
+  device. A device paired again keeps the new pairing when a message about the
+  earlier one arrives late. Pairing a device again now completes only once the
+  primary's networks have stopped listing it as revoked, so that joining them
+  right away does not undo the new pairing; if that takes longer than 10
+  seconds, or one of those networks is not running, the pairing fails and can
+  be tried again. A primary on an older release gets the earlier one-shot
+  request.
 
 ## [0.5.10] - 2026-10-19
 
