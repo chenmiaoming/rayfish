@@ -9,6 +9,7 @@ use std::net::Ipv6Addr;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -1719,7 +1720,19 @@ pub type IpcFramed = Framed<UnixStream, MsgpackCodec<IpcMessage>>;
 #[cfg(windows)]
 pub type IpcFramed = Framed<NamedPipeClient, MsgpackCodec<IpcMessage>>;
 
+static SOCKET_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Select an instance before making or serving any IPC connections.
+pub fn set_socket_path(path: PathBuf) -> Result<()> {
+    SOCKET_PATH
+        .set(path)
+        .map_err(|_| anyhow::anyhow!("IPC instance already selected"))
+}
+
 pub fn socket_path() -> PathBuf {
+    if let Some(path) = SOCKET_PATH.get() {
+        return path.clone();
+    }
     if cfg!(windows) {
         PathBuf::from(r"\\.\pipe\rayfish")
     } else if cfg!(target_os = "macos") {

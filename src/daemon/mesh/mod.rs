@@ -51,6 +51,8 @@ pub(crate) use runtime::SavedMemberNetwork;
 pub(crate) use select::*;
 // `run_daemon` is the public process entry point (called by `ray daemon`).
 pub use bootstrap::run_daemon;
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub use bootstrap::run_rootless;
 // `build_headless` is the embedder (mobile) construction entry point.
 pub use bootstrap::build_headless;
 #[cfg(unix)]
