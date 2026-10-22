@@ -1827,8 +1827,8 @@ async fn run() -> Result<()> {
     let rootless_daemon = matches!(cli.command, Command::Rootless { .. });
     #[cfg(not(target_os = "linux"))]
     let rootless_daemon = false;
+    #[cfg(target_os = "linux")]
     if rootless_daemon && let Some(instance) = rayfish::instance::user_instance() {
-        #[cfg(unix)]
         for directory in [
             &instance.directory,
             &instance.runtime,

@@ -125,6 +125,20 @@ async fn cli(directory: &Path, args: &[&str]) -> Output {
     .unwrap()
 }
 
+fn live_status(output: &Output) -> Option<serde_json::Value> {
+    let stdout = std::str::from_utf8(&output.stdout).unwrap();
+    // A missing daemon currently renders human output even with --json.
+    if stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        == Some("\u{2717} daemon not running")
+    {
+        return None;
+    }
+    Some(serde_json::from_str(stdout).expect("a running daemon must return valid status JSON"))
+}
+
 async fn request(directory: &Path, message: IpcMessage) -> IpcMessage {
     let stream = UnixStream::connect(directory.join("run/rayfish.sock"))
         .await
@@ -167,6 +181,7 @@ async fn independent_rootless_instances_have_private_state_and_safe_lifecycle() 
     let missing_path = temporary.path().join("missing");
     let missing = cli(&missing_path, &["status", "--json"]).await;
     assert!(String::from_utf8_lossy(&missing.stdout).contains("daemon not running"));
+    assert!(live_status(&missing).is_none());
     assert!(!missing_path.exists(), "a CLI read must not create state");
     let first = start(&first_path).await;
     let second = start(&second_path).await;
@@ -206,8 +221,9 @@ async fn independent_rootless_instances_have_private_state_and_safe_lifecycle() 
     .await
     .unwrap()
     .unwrap();
-    if system.status.success() {
-        let system: serde_json::Value = serde_json::from_slice(&system.stdout).unwrap();
+    if system.status.success()
+        && let Some(system) = live_status(&system)
+    {
         assert_ne!(system["rootless"], true);
         assert_ne!(system["endpoint"], first_status["endpoint"]);
     }
@@ -363,10 +379,14 @@ async fn automatic_selection_falls_back_without_creating_user_state() {
     fn assert_system_result(automatic: &Output, system: &Output) {
         assert_eq!(automatic.status.success(), system.status.success());
         if automatic.status.success() {
-            let automatic: serde_json::Value = serde_json::from_slice(&automatic.stdout).unwrap();
-            let system: serde_json::Value = serde_json::from_slice(&system.stdout).unwrap();
-            assert_eq!(automatic["endpoint"], system["endpoint"]);
-            assert_ne!(automatic["rootless"], true);
+            match (live_status(automatic), live_status(system)) {
+                (Some(automatic), Some(system)) => {
+                    assert_eq!(automatic["endpoint"], system["endpoint"]);
+                    assert_ne!(automatic["rootless"], true);
+                }
+                (None, None) => assert_eq!(automatic.stdout, system.stdout),
+                _ => panic!("automatic selection must use the same system daemon"),
+            }
         }
     }
     let system = status(&directory, true).await;

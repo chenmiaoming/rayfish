@@ -911,13 +911,19 @@ pub async fn start_embedded_ipc(daemon: &Arc<Daemon>, owner_uid: u32) -> Result<
 #[derive(Clone, Copy)]
 enum IpcHost {
     Daemon,
-    PacketTunnel { owner_uid: u32 },
-    Rootless { owner_uid: u32 },
+    PacketTunnel {
+        owner_uid: u32,
+    },
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    Rootless {
+        owner_uid: u32,
+    },
 }
 
 #[cfg(unix)]
 impl IpcHost {
     fn check_authorized(self, req: &IpcMessage, peer: Option<&PeerIdentity>) -> Option<IpcMessage> {
+        #[cfg(all(target_os = "linux", feature = "desktop"))]
         if let Self::Rootless { owner_uid } = self {
             return authorize_rootless(owner_uid, peer);
         }
@@ -943,7 +949,7 @@ impl IpcHost {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(target_os = "linux", feature = "desktop"))]
 fn authorize_rootless(owner_uid: u32, peer: Option<&PeerIdentity>) -> Option<IpcMessage> {
     if peer.is_some_and(
         |peer| matches!(peer, PeerIdentity::Unix { uid, .. } if *uid == owner_uid || *uid == 0),
@@ -1170,6 +1176,7 @@ mod embedded_ipc_tests {
     use socket2::{Domain, SockAddr, Socket, Type};
     use std::ffi::OsString;
 
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
     #[test]
     fn rootless_ipc_restricts_reads_and_writes_to_the_owner_and_root() {
         let host = IpcHost::Rootless { owner_uid: 1001 };
@@ -1500,9 +1507,11 @@ async fn handle_ipc_client(
     } else {
         match host {
             IpcHost::Daemon => daemon.handle_request(req, peer_cred, fds).await,
-            IpcHost::PacketTunnel { .. } | IpcHost::Rootless { .. } => {
+            IpcHost::PacketTunnel { .. } => {
                 daemon.handle_authorized_request(req, peer_cred, fds).await
             }
+            #[cfg(all(target_os = "linux", feature = "desktop"))]
+            IpcHost::Rootless { .. } => daemon.handle_authorized_request(req, peer_cred, fds).await,
         }
     };
     let mut framed = ipc::framed(stream);
