@@ -49,22 +49,32 @@ fn is_ours(contents: &str) -> bool {
     contents.lines().any(|l| l.trim() == MARKER)
 }
 
+/// Renders the file with the live resolver address.
 fn render(search: &[String], fallbacks: &[IpAddr]) -> String {
+    render_with(resolver_addr(), search, fallbacks)
+}
+
+fn render_with(resolver: IpAddr, search: &[String], fallbacks: &[IpAddr]) -> String {
     let mut out = format!("{MARKER}\n");
     if !search.is_empty() {
         out.push_str(&format!("search {}\n", search.join(" ")));
     }
-    out.push_str(&format!("nameserver {}\n", resolver_addr()));
+    out.push_str(&format!("nameserver {resolver}\n"));
     for ip in fallbacks {
         out.push_str(&format!("nameserver {ip}\n"));
     }
     out
 }
 
-/// The file without the lines we wrote: marker and our nameserver. The search
-/// line is rebuilt from the host's own domains, since ours share it.
+/// See [`strip_ours_with`]; uses the live resolver address.
 fn strip_ours(contents: &str, host_search: &[String]) -> String {
-    let ours = resolver_addr();
+    strip_ours_with(resolver_addr(), contents, host_search)
+}
+
+/// The file without the lines we wrote: marker and our nameserver. The search
+/// line is rebuilt from the host's own domains, since ours share it; with no
+/// host domains known it is left out rather than guessed.
+fn strip_ours_with(ours: IpAddr, contents: &str, host_search: &[String]) -> String {
     let mut out: String = contents
         .lines()
         .filter(|l| {
@@ -192,5 +202,149 @@ impl DnsConfigurator for IllumosResolvConf {
         }
         write_resolv_file(path, render(&merged, &self.captured_upstreams).as_bytes())
             .context("writing search domains to /etc/resolv.conf")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn sd(s: &str) -> SearchDomain {
+        // The field is private to `config`, which is an ancestor of this module.
+        SearchDomain(smol_str::SmolStr::new(s))
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_nameservers_handles_comments_ipv6_and_junk() {
+        let c = "# Auto-generated\n\
+                 nameserver 10.0.0.2\n\
+                 nameserver   fd00::53   # trailing comment\n\
+                 nameserver not-an-ip\n\
+                 nameserver\n\
+                 options ndots:2\n\
+                 # nameserver 1.1.1.1\n";
+        assert_eq!(parse_nameservers(c), vec![ip("10.0.0.2"), ip("fd00::53")]);
+    }
+
+    #[test]
+    fn parse_search_takes_the_last_search_or_domain_line() {
+        assert_eq!(
+            parse_search("search a.example b.example\n"),
+            strs(&["a.example", "b.example"])
+        );
+        assert_eq!(
+            parse_search("domain old.example\nsearch new.example\n"),
+            strs(&["new.example"])
+        );
+        assert_eq!(
+            parse_search("search first.example\ndomain last.example\n"),
+            strs(&["last.example"])
+        );
+        assert!(parse_search("nameserver 10.0.0.1\n").is_empty());
+    }
+
+    #[test]
+    fn is_ours_needs_the_marker_line() {
+        assert!(is_ours("# Managed by rayfish.\nnameserver 200::53\n"));
+        assert!(is_ours("  # Managed by rayfish.  \n"));
+        assert!(!is_ours(
+            "# Auto-generated from zone configuration\nnameserver 10.0.0.2\n"
+        ));
+    }
+
+    #[test]
+    fn render_puts_marker_search_ours_then_fallbacks() {
+        let out = render_with(
+            ip("200::53"),
+            &strs(&["east.ray", "ray"]),
+            &[ip("10.0.0.2"), ip("10.0.0.1")],
+        );
+        assert_eq!(
+            out,
+            "# Managed by rayfish.\n\
+             search east.ray ray\n\
+             nameserver 200::53\n\
+             nameserver 10.0.0.2\n\
+             nameserver 10.0.0.1\n"
+        );
+    }
+
+    #[test]
+    fn render_omits_an_empty_search_line() {
+        let out = render_with(ip("200::53"), &[], &[ip("10.0.0.2")]);
+        assert!(!out.contains("search"));
+        assert!(out.starts_with("# Managed by rayfish.\n"));
+    }
+
+    #[test]
+    fn rendered_file_is_recognised_as_ours_and_reparses() {
+        let out = render_with(ip("200::53"), &strs(&["a", "b"]), &[ip("10.0.0.2")]);
+        assert!(is_ours(&out));
+        assert_eq!(parse_nameservers(&out), vec![ip("200::53"), ip("10.0.0.2")]);
+        assert_eq!(parse_search(&out), strs(&["a", "b"]));
+    }
+
+    #[test]
+    fn strip_ours_removes_marker_and_our_nameserver_keeps_the_rest() {
+        let ours = ip("200::53");
+        let file = render_with(ours, &strs(&["east.ray", "ray"]), &[ip("10.0.0.2")]);
+        let out = strip_ours_with(ours, &file, &[]);
+        assert!(!is_ours(&out));
+        assert_eq!(parse_nameservers(&out), vec![ip("10.0.0.2")]);
+        assert!(parse_search(&out).is_empty());
+    }
+
+    // Regression: a merged search line holds mesh and host domains together;
+    // the revert must not drop the host's.
+    #[test]
+    fn strip_ours_keeps_the_host_search_domains() {
+        let ours = ip("200::53");
+        let host = strs(&["corp.example"]);
+        let merged = merge_search(&host, &[sd("east.ray"), sd("ray")]);
+        let file = render_with(ours, &merged, &[ip("10.0.0.2")]);
+        assert!(parse_search(&file).contains(&"corp.example".to_string()));
+
+        let out = strip_ours_with(ours, &file, &host);
+        assert_eq!(parse_search(&out), host);
+        assert_eq!(parse_nameservers(&out), vec![ip("10.0.0.2")]);
+        assert!(!is_ours(&out));
+    }
+
+    #[test]
+    fn strip_ours_leaves_other_resolvers_alone() {
+        let ours = ip("200::53");
+        let file =
+            "# Managed by rayfish.\nnameserver 200::53\nnameserver 200::54\nnameserver 10.0.0.2\n";
+        let out = strip_ours_with(ours, file, &[]);
+        assert_eq!(parse_nameservers(&out), vec![ip("200::54"), ip("10.0.0.2")]);
+    }
+
+    #[test]
+    fn merge_search_puts_ours_first_and_dedups() {
+        let host = strs(&["corp.example", "ray"]);
+        let out = merge_search(&host, &[sd("east.ray"), sd("ray")]);
+        assert_eq!(out, strs(&["east.ray", "ray", "corp.example"]));
+    }
+
+    #[test]
+    fn merge_search_truncates_to_the_resolver_limit() {
+        let host = strs(&["h1", "h2", "h3", "h4", "h5", "h6"]);
+        let out = merge_search(&host, &[sd("n1"), sd("n2")]);
+        assert_eq!(out.len(), MAX_SEARCH);
+        assert_eq!(&out[..2], &strs(&["n1", "n2"])[..]);
+    }
+
+    #[test]
+    fn merge_search_skips_empty_entries() {
+        let out = merge_search(&strs(&[""]), &[sd("x")]);
+        assert_eq!(out, strs(&["x"]));
     }
 }
