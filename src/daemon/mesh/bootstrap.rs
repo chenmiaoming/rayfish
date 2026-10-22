@@ -758,13 +758,17 @@ async fn build_daemon_inner(
     // stops the export); built here from the local handles so it can be a plain
     // owned field. `None` if it failed to bind.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let metrics_server = spawn_metrics_server(
-        Arc::clone(&stats),
-        peers.clone(),
-        &transport.endpoint,
-        token.clone(),
-    )
-    .await;
+    let metrics_server = if crate::instance::is_rootless() {
+        None
+    } else {
+        spawn_metrics_server(
+            Arc::clone(&stats),
+            peers.clone(),
+            &transport.endpoint,
+            token.clone(),
+        )
+        .await
+    };
     // A phone has no Prometheus scraper and no way to reach one, and the server
     // brings a 60s per-peer sampling loop with it (`PeerMetrics::spawn_collector`):
     // a wakeup a minute, forever, for an endpoint nobody reads.

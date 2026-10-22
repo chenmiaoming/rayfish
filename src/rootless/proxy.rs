@@ -2,6 +2,7 @@
 //! owns its connection tasks; one semaphore bounds all proxy connections.
 
 use std::fs::{OpenOptions, Permissions};
+use std::future::Future;
 use std::io::Write;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::os::unix::fs::OpenOptionsExt;
@@ -23,6 +24,7 @@ use crate::daemon::Daemon;
 use crate::instance::UserInstance;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 128;
 
 // Deliberately has no Debug implementation, so logging a proxy cannot reveal credentials.
@@ -245,7 +247,9 @@ async fn serve_local(
                     let _permit = permit;
                     anyhow::ensure!(daemon.rootless_active(), "rootless data plane is on standby");
                     let mut remote = match protocol {
-                        Protocol::Socks(password) => tokio::time::timeout(HANDSHAKE_TIMEOUT, socks_connect(&mut client, &password, &daemon, &stack)).await??,
+                        Protocol::Socks(password) => socks_connect(&mut client, &password, move |target: Target| async move {
+                            stack.connect(target.resolve(&daemon).await?).await
+                        }).await?,
                         Protocol::Forward(target) => stack.connect(target.resolve(&daemon).await?).await?,
                         Protocol::Http(password) => {
                             return super::http::serve(client, password, move |target: Target| {
@@ -329,12 +333,35 @@ async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn socks_connect<S: AsyncRead + AsyncWrite + Unpin>(
+async fn socks_connect<S, D, F, R>(stream: &mut S, password: &Password, dial: D) -> Result<R>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    D: FnOnce(Target) -> F,
+    F: Future<Output = Result<R>>,
+{
+    let target = tokio::time::timeout(HANDSHAKE_TIMEOUT, socks_target(stream, password))
+        .await
+        .context("SOCKS5 handshake timed out")??;
+    let result = tokio::time::timeout(CONNECT_TIMEOUT, dial(target))
+        .await
+        .context("SOCKS5 mesh connection timed out")
+        .and_then(|result| result);
+    match result {
+        Ok(remote) => {
+            reply(stream, 0).await?;
+            Ok(remote)
+        }
+        Err(error) => {
+            reply(stream, 4).await?;
+            Err(error)
+        }
+    }
+}
+
+async fn socks_target<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     password: &Password,
-    daemon: &Daemon,
-    stack: &Stack,
-) -> Result<DuplexStream> {
+) -> Result<Target> {
     authenticate(stream, password).await?;
     let mut header = [0; 4];
     stream.read_exact(&mut header).await?;
@@ -346,29 +373,26 @@ async fn socks_connect<S: AsyncRead + AsyncWrite + Unpin>(
         4 => {
             let mut octets = [0; 16];
             stream.read_exact(&mut octets).await?;
-            Target::ipv6(Ipv6Addr::from(octets), stream.read_u16().await?)?
+            Target::ipv6(Ipv6Addr::from(octets), stream.read_u16().await?)
         }
         3 => {
             let length = stream.read_u8().await?;
             let mut name = vec![0; usize::from(length)];
             stream.read_exact(&mut name).await?;
-            let name = std::str::from_utf8(&name)?;
             let port = stream.read_u16().await?;
-            format!("{name}:{port}").parse::<Target>()?
+            std::str::from_utf8(&name)
+                .context("invalid SOCKS5 hostname")
+                .and_then(|name| format!("{name}:{port}").parse())
         }
         _ => {
             reply(stream, 8).await?;
             anyhow::bail!("SOCKS5 requires a mesh hostname or IPv6 address");
         }
     };
-    let result = async { stack.connect(target.resolve(daemon).await?).await }.await;
-    match result {
-        Ok(remote) => {
-            reply(stream, 0).await?;
-            Ok(remote)
-        }
+    match target {
+        Ok(target) => Ok(target),
         Err(error) => {
-            reply(stream, 4).await?;
+            reply(stream, 8).await?;
             Err(error)
         }
     }
@@ -387,7 +411,88 @@ async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, code: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::pending;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::duplex;
+
+    async fn authenticate_client(client: &mut DuplexStream) {
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        assert_eq!(client.read_u16().await.unwrap(), 0x0502);
+        client.write_all(b"\x01\x03ray\x08password").await.unwrap();
+        assert_eq!(client.read_u16().await.unwrap(), 0x0100);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn socks_destination_timeout_returns_a_failure_reply() {
+        let (mut client, mut server) = duplex(1024);
+        let proxy = tokio::spawn(async move {
+            socks_connect(&mut server, &Password(b"password".to_vec()), |target| {
+                assert_eq!(target.to_string(), "[200::1]:443");
+                pending::<Result<()>>()
+            })
+            .await
+        });
+        authenticate_client(&mut client).await;
+        let mut request = vec![5, 1, 0, 4];
+        request.extend_from_slice(&"200::1".parse::<Ipv6Addr>().unwrap().octets());
+        request.extend_from_slice(&443u16.to_be_bytes());
+        let started = tokio::time::Instant::now();
+        client.write_all(&request).await.unwrap();
+        assert_eq!(client.read_u16().await.unwrap(), 0x0504);
+        assert_eq!(started.elapsed(), CONNECT_TIMEOUT);
+        assert!(proxy.await.unwrap().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_socks_authentication_keeps_the_handshake_deadline() {
+        let (mut client, mut server) = duplex(1024);
+        let proxy = tokio::spawn(async move {
+            socks_connect(&mut server, &Password(b"password".to_vec()), |_| {
+                pending::<Result<()>>()
+            })
+            .await
+        });
+        let started = tokio::time::Instant::now();
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        assert_eq!(client.read_u16().await.unwrap(), 0x0502);
+        let mut remaining = Vec::new();
+        tokio::time::timeout(
+            HANDSHAKE_TIMEOUT + Duration::from_secs(1),
+            client.read_to_end(&mut remaining),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(started.elapsed(), HANDSHAKE_TIMEOUT);
+        assert!(proxy.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_socks_targets_return_a_failure_before_dialling() {
+        let mut zero_port = vec![5, 1, 0, 4];
+        zero_port.extend_from_slice(&"200::1".parse::<Ipv6Addr>().unwrap().octets());
+        zero_port.extend_from_slice(&0u16.to_be_bytes());
+        let mut invalid_host = b"\x05\x01\x00\x03\x08bad/host".to_vec();
+        invalid_host.extend_from_slice(&443u16.to_be_bytes());
+        for request in [zero_port, invalid_host] {
+            let (mut client, mut server) = duplex(1024);
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&attempts);
+            let proxy = tokio::spawn(async move {
+                socks_connect(&mut server, &Password(b"password".to_vec()), move |_| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(()) }
+                })
+                .await
+            });
+            authenticate_client(&mut client).await;
+            client.write_all(&request).await.unwrap();
+            assert_eq!(client.read_u16().await.unwrap(), 0x0508);
+            assert!(proxy.await.unwrap().is_err());
+            assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        }
+    }
 
     #[tokio::test]
     async fn explicit_inbound_mapping_streams_to_a_loopback_service() {

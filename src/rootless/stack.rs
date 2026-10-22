@@ -15,10 +15,13 @@ use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use futures::task::AtomicWaker;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp::{Socket, SocketBuffer, State};
 use smoltcp::time::Instant as StackInstant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
+use smoltcp::wire::{
+    HardwareAddress, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpProtocol,
+    Ipv6Packet, TcpPacket,
+};
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf, duplex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, Sleep, sleep};
@@ -90,6 +93,7 @@ impl TunWrite for PacketWriter {
 struct PacketDevice {
     incoming: VecDeque<Bytes>,
     outgoing: mpsc::Sender<Bytes>,
+    mtu: usize,
 }
 
 struct ReceiveToken(Bytes);
@@ -128,7 +132,7 @@ impl Device for PacketDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ip;
-        caps.max_transmission_unit = usize::from(TUN_MTU);
+        caps.max_transmission_unit = self.mtu;
         caps
     }
 }
@@ -213,6 +217,18 @@ fn socket() -> Socket<'static> {
     socket
 }
 
+fn interface(ip: Ipv6Addr, device: &mut PacketDevice, now: StackInstant) -> Result<Interface> {
+    let mut config = Config::new(HardwareAddress::Ip);
+    config.random_seed = rand::random();
+    let mut interface = Interface::new(config, device, now);
+    let mut address_set = false;
+    interface.update_ip_addrs(|addrs| {
+        address_set = addrs.push(IpCidr::new(IpAddress::Ipv6(ip), 7)).is_ok();
+    });
+    anyhow::ensure!(address_set, "userspace stack address table is full");
+    Ok(interface)
+}
+
 pub(crate) fn new(ip: Ipv6Addr, ports: &[u16]) -> Result<NetworkStack> {
     anyhow::ensure!(ports.len() <= 16, "at most 16 exposed ports are supported");
     let (outgoing, packets) = mpsc::channel(PACKETS);
@@ -223,15 +239,9 @@ pub(crate) fn new(ip: Ipv6Addr, ports: &[u16]) -> Result<NetworkStack> {
     let mut device = PacketDevice {
         incoming: VecDeque::new(),
         outgoing,
+        mtu: usize::from(TUN_MTU),
     };
-    let mut config = Config::new(HardwareAddress::Ip);
-    config.random_seed = rand::random();
-    let mut interface = Interface::new(config, &mut device, StackInstant::ZERO);
-    let mut address_set = false;
-    interface.update_ip_addrs(|addrs| {
-        address_set = addrs.push(IpCidr::new(IpAddress::Ipv6(ip), 7)).is_ok();
-    });
-    anyhow::ensure!(address_set, "userspace stack address table is full");
+    let interface = interface(ip, &mut device, StackInstant::ZERO)?;
     let mut sockets = SocketSet::new(Vec::new());
     let mut listeners = Vec::new();
     let mut bound = Vec::new();
@@ -354,14 +364,75 @@ impl Driver {
         });
     }
 
+    fn path_mtu(&self, packet: &[u8]) -> Option<usize> {
+        let packet = Ipv6Packet::new_checked(packet).ok()?;
+        if packet.next_header() != IpProtocol::Icmpv6
+            || !self
+                .interface
+                .has_ip_addr(IpAddress::Ipv6(packet.dst_addr()))
+        {
+            return None;
+        }
+        let icmp = Icmpv6Packet::new_checked(packet.payload()).ok()?;
+        let Icmpv6Repr::PktTooBig { mtu, header, data } = Icmpv6Repr::parse(
+            &packet.src_addr(),
+            &packet.dst_addr(),
+            &icmp,
+            &ChecksumCapabilities::default(),
+        )
+        .ok()?
+        else {
+            return None;
+        };
+        let mtu = usize::try_from(mtu).ok()?;
+        // Leave room for IPv6 and the largest TCP header. This is a TCP
+        // segmentation limit, not an OS link MTU; legacy QUIC paths can be smaller
+        // than IPv6's minimum link MTU.
+        if mtu <= 100
+            || mtu >= self.device.mtu
+            || mtu >= header.buffer_len() + header.payload_len
+            || header.next_header != IpProtocol::Tcp
+            || header.src_addr != packet.dst_addr()
+            || header.dst_addr != packet.src_addr()
+        {
+            return None;
+        }
+        let quoted = TcpPacket::new_checked(data).ok()?;
+        let local = IpEndpoint::new(IpAddress::Ipv6(header.src_addr), quoted.src_port());
+        let remote = IpEndpoint::new(IpAddress::Ipv6(header.dst_addr), quoted.dst_port());
+        self.sockets
+            .iter()
+            .any(|(_, socket)| {
+                let smoltcp::socket::Socket::Tcp(tcp) = socket;
+                tcp.local_endpoint() == Some(local) && tcp.remote_endpoint() == Some(remote)
+            })
+            .then_some(mtu)
+    }
+
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
         self.wake.register(cx.waker());
         if self.device.outgoing.is_closed() {
             return Poll::Ready(Err(anyhow::anyhow!("packet reader stopped")));
         }
+        let elapsed = self.start.elapsed().as_micros();
+        let now = StackInstant::from_micros(i64::try_from(elapsed).unwrap_or(i64::MAX));
         while self.device.incoming.len() < PACKETS {
             match self.input.poll_recv(cx) {
-                Poll::Ready(Some(packet)) => self.device.incoming.push_back(packet),
+                Poll::Ready(Some(packet)) => {
+                    if let Some(mtu) = self.path_mtu(&packet) {
+                        self.device.mtu = mtu;
+                        let ip = self.interface.ip_addrs()[0].address();
+                        let IpAddress::Ipv6(ip) = ip;
+                        // smoltcp caches capabilities when constructing an interface.
+                        // An IP-only interface has no neighbor or link state; retain
+                        // the existing sockets and refresh only its segmentation cap.
+                        self.interface = match interface(ip, &mut self.device, now) {
+                            Ok(interface) => interface,
+                            Err(error) => return Poll::Ready(Err(error)),
+                        };
+                    }
+                    self.device.incoming.push_back(packet);
+                }
                 Poll::Ready(None) => {
                     return Poll::Ready(Err(anyhow::anyhow!("packet writer stopped")));
                 }
@@ -374,8 +445,6 @@ impl Driver {
                 _ => break,
             }
         }
-        let elapsed = self.start.elapsed().as_micros();
-        let now = StackInstant::from_micros(i64::try_from(elapsed).unwrap_or(i64::MAX));
         let incoming_count = self.device.incoming.len();
         self.interface.poll_maintenance(now);
         self.interface
@@ -550,7 +619,6 @@ mod tests {
     use iroh::Endpoint;
     use iroh::endpoint::presets;
     use smol_str::SmolStr;
-    use smoltcp::wire::TcpPacket;
     use std::sync::atomic::AtomicBool;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinSet;
@@ -754,5 +822,115 @@ mod tests {
         let tcp = TcpPacket::new_checked(&reset[40..]).unwrap();
         assert!(tcp.rst());
         assert!(network.driver.retired.is_empty());
+    }
+    #[tokio::test]
+    async fn tcp_reduces_packet_sizes_after_path_mtu_errors() {
+        for mtu in [1280, 1160] {
+            let mut client = new("200::1".parse().unwrap(), &[]).unwrap();
+            let mut server = new("200::2".parse().unwrap(), &[80]).unwrap();
+            let (reply, mut connected) = oneshot::channel();
+            client.driver.open(Open {
+                remote: "[200::2]:80".parse().unwrap(),
+                reply,
+            });
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            let request = vec![42; 4096];
+            let mut remote = None;
+            let mut service = None;
+            let mut received = Vec::new();
+            let mut injected = 0;
+            for tick in 0..500 {
+                for network in [&mut client, &mut server] {
+                    // Advance the stack's clock deterministically, including retransmissions.
+                    network.driver.start = Instant::now() - Duration::from_millis(tick * 10);
+                    assert!(network.driver.poll(&mut context).is_pending());
+                }
+                if let Ok(Ok(mut stream)) = connected.try_recv() {
+                    stream.write_all(&request).await.unwrap();
+                    // Keep the sending half alive until every byte is acknowledged.
+                    remote = Some(stream);
+                }
+                while let Ok(packet) = client.reader.packets.try_recv() {
+                    client.reader.wake.wake();
+                    if packet.len() > mtu {
+                        let info = crate::firewall::parse_packet_info(&packet).unwrap();
+                        let reply = crate::reject::build_packet_too_big(
+                            &packet,
+                            &info,
+                            u16::try_from(mtu).unwrap(),
+                        )
+                        .unwrap();
+                        client.writer.0.try_send(reply).unwrap();
+                        injected += 1;
+                    } else {
+                        server.writer.0.try_send(packet).unwrap();
+                    }
+                }
+                while let Ok(packet) = server.reader.packets.try_recv() {
+                    server.reader.wake.wake();
+                    client.writer.0.try_send(packet).unwrap();
+                }
+                if let Ok(stream) = server.listeners[0].accepted.try_recv() {
+                    service = Some(stream);
+                }
+                if let Some(stream) = service.as_mut() {
+                    let mut data = [0; 4096];
+                    let mut buffer = ReadBuf::new(&mut data);
+                    if let Poll::Ready(Ok(())) =
+                        Pin::new(stream).poll_read(&mut context, &mut buffer)
+                    {
+                        received.extend_from_slice(buffer.filled());
+                    }
+                }
+                if received.len() == request.len() {
+                    break;
+                }
+            }
+            assert!(
+                injected > 0,
+                "the transfer must encounter the smaller path MTU"
+            );
+            assert_eq!(
+                received, request,
+                "TCP must recover after a path MTU error ({mtu})"
+            );
+            drop(remote);
+        }
+    }
+
+    #[tokio::test]
+    async fn path_mtu_errors_require_a_valid_checksum_and_live_outgoing_tuple() {
+        let mut network = new("200::1".parse().unwrap(), &[]).unwrap();
+        let (reply, _connected) = oneshot::channel();
+        network.driver.open(Open {
+            remote: "[200::2]:80".parse().unwrap(),
+            reply,
+        });
+        let waker = futures::task::noop_waker();
+        assert!(
+            network
+                .driver
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let mut quoted = network.reader.packets.try_recv().unwrap().to_vec();
+        quoted.resize(1500, 0);
+        quoted[4..6].copy_from_slice(&1460u16.to_be_bytes());
+        let info = crate::firewall::parse_packet_info(&quoted).unwrap();
+        let reply = crate::reject::build_packet_too_big(&quoted, &info, 1280).unwrap();
+        assert_eq!(network.driver.path_mtu(&reply), Some(1280));
+
+        let mut invalid = reply.to_vec();
+        invalid[42] ^= 1;
+        assert_eq!(network.driver.path_mtu(&invalid), None);
+        for mtu in [0, 100, TUN_MTU] {
+            let reply = crate::reject::build_packet_too_big(&quoted, &info, mtu).unwrap();
+            assert_eq!(network.driver.path_mtu(&reply), None);
+        }
+        quoted[40..42].copy_from_slice(&1u16.to_be_bytes());
+        let info = crate::firewall::parse_packet_info(&quoted).unwrap();
+        let reply = crate::reject::build_packet_too_big(&quoted, &info, 1280).unwrap();
+        assert_eq!(network.driver.path_mtu(&reply), None);
     }
 }

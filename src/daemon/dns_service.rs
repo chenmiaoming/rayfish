@@ -450,6 +450,9 @@ impl DnsService {
     /// the data plane comes up) it still tries the manager path, which is what
     /// it always did, and the list is remembered for whatever gets adopted next.
     pub(crate) async fn set_search_domains(&self, network_names: &[String], tun_name: &str) {
+        if crate::instance::is_rootless() {
+            return;
+        }
         let mode = config::load().map(|c| c.dns_mode).unwrap_or_default();
         let domains = search_domains_for_mode(network_names, mode);
         *self.search_domains.lock().unwrap() = domains.clone();

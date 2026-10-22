@@ -55,7 +55,11 @@ fn listening_address(line: &str) -> SocketAddr {
 }
 
 async fn start(directory: &Path) -> Running {
-    let mut child = command(directory)
+    start_with_command(command(directory)).await
+}
+
+async fn start_with_command(mut command: Command) -> Running {
+    let mut child = command
         .args([
             "rootless",
             "--socks5",
@@ -208,6 +212,8 @@ async fn independent_rootless_instances_have_private_state_and_safe_lifecycle() 
         assert_ne!(system["endpoint"], first_status["endpoint"]);
     }
     for running in [&first, &second] {
+        assert!(!running.stdout.contains("metrics server started"));
+        assert!(!running.stdout.contains("failed to start metrics server"));
         assert!(running.stdout.contains("ray join <network-key>"));
         assert!(running.stdout.contains("ray status"));
         assert!(running.stdout.contains("ray --system status"));
@@ -382,4 +388,60 @@ async fn automatic_selection_falls_back_without_creating_user_state() {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("rootless runtime directory"));
     assert_system_result(&status(&directory, true).await, &system);
+}
+
+#[tokio::test]
+async fn rootless_network_changes_leave_host_dns_untouched() {
+    use std::ffi::OsString;
+
+    if uzers::get_effective_uid() == 0 {
+        return;
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("state");
+    let bin = temporary.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let resolvectl = bin.join("resolvectl");
+    std::fs::write(
+        &resolvectl,
+        "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$ROOTLESS_DNS_CALLS\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&resolvectl, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let calls = temporary.path().join("dns-calls");
+    let mut path = OsString::from(bin.as_os_str());
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let mut daemon = command(&directory);
+    daemon
+        .env("PATH", path)
+        .env("ROOTLESS_DNS_CALLS", &calls)
+        // Disable access to the real system bus even when a host TUN is present.
+        .env(
+            "DBUS_SYSTEM_BUS_ADDRESS",
+            format!(
+                "unix:path={}",
+                temporary.path().join("no-system-bus").display()
+            ),
+        );
+    let running = start_with_command(daemon).await;
+    let created = cli(
+        &directory,
+        &["create", "--name", "mesh", "--hostname", "peer"],
+    )
+    .await;
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(
+        !calls.exists(),
+        "rootless startup and network creation must not configure host DNS"
+    );
+    stop(running, &directory).await;
+    assert!(
+        !calls.exists(),
+        "rootless shutdown must not configure host DNS"
+    );
 }
