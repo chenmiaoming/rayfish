@@ -3067,6 +3067,59 @@ mod accept_handler_tests {
         (endpoint, connect)
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn approved_connect_retries_after_join_failure() {
+        use iroh::address_lookup::memory::MemoryLookup;
+
+        let env = TestConfigDir::new();
+        let lookup = MemoryLookup::new();
+        let dialer = loopback_endpoint(lookup.clone()).await;
+        let receiver = loopback_endpoint(MemoryLookup::new()).await;
+        lookup.add_endpoint_info(receiver.addr());
+        let mut registry = registry_on(&dialer, &env.dir.path().join("blobs")).await;
+        let mut transport = (*registry.transport).clone();
+        transport.pkarr_relay_url = "http://127.0.0.1:1/pkarr".parse().unwrap();
+        Arc::get_mut(&mut registry).unwrap().transport = Arc::new(transport);
+        let connect = Arc::new(ConnectService::new(registry));
+        connect.outgoing_connects.insert(receiver.id());
+        connect.spawn_connect_retry(receiver.id(), None);
+
+        let retried = tokio::time::timeout(Duration::from_secs(10), async {
+            for attempt in 0..2 {
+                let conn = receiver.accept().await.unwrap().await.unwrap();
+                let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+                assert!(matches!(
+                    control::recv_framed::<control::ConnectMsg>(&mut recv)
+                        .await
+                        .unwrap(),
+                    control::ConnectMsg::Request { .. }
+                ));
+                assert!(connect.outgoing_connects.contains(&receiver.id()));
+                let reply = if attempt == 0 {
+                    control::ConnectMsg::Approved {
+                        room_id: SecretKey::from_bytes(&[26; 32]).public(),
+                        coordinator: receiver.id(),
+                    }
+                } else {
+                    control::ConnectMsg::Denied {
+                        reason: "request withdrawn".into(),
+                    }
+                };
+                control::send_framed(&mut send, &reply).await.unwrap();
+                conn.closed().await;
+            }
+        })
+        .await;
+        connect.registry.shutdown_token.cancel();
+        receiver.close().await;
+        dialer.close().await;
+        assert!(
+            retried.is_ok(),
+            "an approved request must retry a failed join"
+        );
+    }
+
     fn sample_net() -> ipc::NetworkName {
         ipc::NetworkName::new("sample-net".into())
     }
