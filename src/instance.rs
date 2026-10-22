@@ -131,7 +131,7 @@ pub fn ensure_private_dir(path: &Path, owner_uid: u32) -> anyhow::Result<()> {
     }
     let metadata = symlink_metadata(path)?;
     anyhow::ensure!(
-        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        metadata.is_dir(),
         "instance directory must be a real directory"
     );
     anyhow::ensure!(

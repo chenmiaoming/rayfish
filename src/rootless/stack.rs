@@ -1,5 +1,6 @@
 //! Bounded IPv6 TCP stack. Its packet queues implement the existing TUN contract.
 //! One task owns every smoltcp socket; local streams supply ordinary async I/O.
+//! Validated path MTU errors lower the shared TCP segmentation limit until restart.
 
 use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
@@ -229,13 +230,12 @@ fn interface(ip: Ipv6Addr, device: &mut PacketDevice, now: StackInstant) -> Resu
     Ok(interface)
 }
 
-pub(crate) fn new(ip: Ipv6Addr, ports: &[u16]) -> Result<NetworkStack> {
+pub(crate) fn new(ip: Ipv6Addr, ports: &[u16], active: Arc<AtomicBool>) -> Result<NetworkStack> {
     anyhow::ensure!(ports.len() <= 16, "at most 16 exposed ports are supported");
     let (outgoing, packets) = mpsc::channel(PACKETS);
     let (writer, input) = mpsc::channel(PACKETS);
     let (commands, requests) = mpsc::channel(64);
     let wake = Arc::new(AtomicWaker::new());
-    let active = Arc::new(AtomicBool::new(true));
     let mut device = PacketDevice {
         incoming: VecDeque::new(),
         outgoing,
@@ -291,13 +291,6 @@ pub(crate) fn new(ip: Ipv6Addr, ports: &[u16]) -> Result<NetworkStack> {
         },
         listeners: bound,
     })
-}
-
-impl NetworkStack {
-    pub(crate) fn set_active(&mut self, active: Arc<AtomicBool>) {
-        self.reader.active = Arc::clone(&active);
-        self.driver.active = active;
-    }
 }
 
 impl Driver {
@@ -631,6 +624,10 @@ mod tests {
     use crate::peers::{DeviceUserMap, PeerTable};
     use crate::stats::ForwardMetrics;
 
+    fn active_stack(ip: Ipv6Addr, ports: &[u16]) -> NetworkStack {
+        new(ip, ports, Arc::new(AtomicBool::new(true))).unwrap()
+    }
+
     struct MeshNode {
         endpoint: Endpoint,
         network: NetworkStack,
@@ -642,7 +639,7 @@ mod tests {
             .bind()
             .await
             .unwrap();
-        let network = new(derive_ipv6(&endpoint.id()), ports).unwrap();
+        let network = active_stack(derive_ipv6(&endpoint.id()), ports);
         MeshNode { endpoint, network }
     }
 
@@ -802,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_a_dial_releases_its_slot() {
-        let mut network = new("200::1".parse().unwrap(), &[]).unwrap();
+        let mut network = active_stack("200::1".parse().unwrap(), &[]);
         let (reply, result) = oneshot::channel();
         drop(result);
         network.driver.open(Open {
@@ -826,8 +823,8 @@ mod tests {
     #[tokio::test]
     async fn tcp_reduces_packet_sizes_after_path_mtu_errors() {
         for mtu in [1280, 1160] {
-            let mut client = new("200::1".parse().unwrap(), &[]).unwrap();
-            let mut server = new("200::2".parse().unwrap(), &[80]).unwrap();
+            let mut client = active_stack("200::1".parse().unwrap(), &[]);
+            let mut server = active_stack("200::2".parse().unwrap(), &[80]);
             let (reply, mut connected) = oneshot::channel();
             client.driver.open(Open {
                 remote: "[200::2]:80".parse().unwrap(),
@@ -901,7 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn path_mtu_errors_require_a_valid_checksum_and_live_outgoing_tuple() {
-        let mut network = new("200::1".parse().unwrap(), &[]).unwrap();
+        let mut network = active_stack("200::1".parse().unwrap(), &[]);
         let (reply, _connected) = oneshot::channel();
         network.driver.open(Open {
             remote: "[200::2]:80".parse().unwrap(),

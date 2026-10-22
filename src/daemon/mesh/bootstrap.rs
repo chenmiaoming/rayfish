@@ -147,8 +147,11 @@ pub async fn run_rootless(
     )
     .await?;
     let result = async {
-        let mut network = stack::new(daemon.transport.identity.local_ipv6(), &proxy.ports())?;
-        network.set_active(Arc::clone(&daemon.active));
+        let mut network = stack::new(
+            daemon.transport.identity.local_ipv6(),
+            &proxy.ports(),
+            Arc::clone(&daemon.active),
+        )?;
         daemon.fatal.arm();
         daemon.attach_tun(network.reader, network.writer).await;
         daemon.registry.connect_all_networks().await;

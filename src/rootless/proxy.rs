@@ -345,7 +345,7 @@ where
     let result = tokio::time::timeout(CONNECT_TIMEOUT, dial(target))
         .await
         .context("SOCKS5 mesh connection timed out")
-        .and_then(|result| result);
+        .flatten();
     match result {
         Ok(remote) => {
             reply(stream, 0).await?;

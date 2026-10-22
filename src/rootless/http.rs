@@ -153,19 +153,12 @@ where
         Some(host) => host,
         None => return failure(StatusCode::BAD_REQUEST, "Invalid HTTP authority\n"),
     };
-    let uri = Uri::builder()
-        .path_and_query(
-            request
-                .uri()
-                .path_and_query()
-                .map(|value| value.as_str())
-                .unwrap_or("/"),
-        )
-        .build();
-    *request.uri_mut() = match uri {
-        Ok(uri) => uri,
-        Err(_) => return failure(StatusCode::BAD_REQUEST, "Invalid request path\n"),
-    };
+    *request.uri_mut() = request
+        .uri()
+        .path_and_query()
+        .cloned()
+        .map(Uri::from)
+        .unwrap_or_default();
     strip_hop_headers(request.headers_mut());
     request.headers_mut().insert(HOST, host);
     request
