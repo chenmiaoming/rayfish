@@ -21,6 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SSH connections denied by the mesh firewall fail immediately instead of hanging.
+
 - Direct connections keep retrying after approval if joining the network fails
   temporarily.
 - illumos: remove stale tunnel interfaces after shutdown and before restarting

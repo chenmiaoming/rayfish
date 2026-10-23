@@ -264,9 +264,10 @@ pub struct FirewallConfig {
     /// "Fail fast" REJECT mode. When `true`, a denied packet gets a synthetic
     /// reply (TCP RST or ICMP unreachable, see [`crate::reject`]) so the initiator
     /// fails immediately instead of hanging; when `false` (the default), denied
-    /// packets are silently dropped (stealthy, no reply). Opt-in via
+    /// packets other than SSH are silently dropped. Denied TCP connections to
+    /// port 22 or the configured mesh SSH port always receive a reset. Opt-in via
     /// `ray firewall reject on`; `#[serde(default)]` keeps existing
-    /// `firewall.toml` files on the silent-drop posture.
+    /// `firewall.toml` files on the silent-drop posture for other traffic.
     #[serde(default)]
     pub reject: bool,
     /// Global kill switch. When `true`, the firewall stops enforcing: every packet
@@ -318,6 +319,13 @@ impl Default for FirewallConfig {
 }
 
 impl FirewallConfig {
+    fn rejects_denied(&self, info: &PacketInfo) -> bool {
+        self.reject
+            || (info.protocol == 6
+                && (info.dst_port == crate::forward::SSH_PORT
+                    || info.dst_port == crate::forward::ssh_port()))
+    }
+
     /// Follow a network renamed on this node from `from` to `to`: rules scoped
     /// to it and rules installed from its suggestions name it by its local name,
     /// and without this a scoped rule would stop matching while the suggested
@@ -482,6 +490,11 @@ impl SharedFirewall {
         self.inner.load().reject
     }
 
+    /// Denied SSH always fails fast, including when general REJECT mode is off.
+    pub(crate) fn rejects_denied(&self, info: &PacketInfo) -> bool {
+        self.inner.load().rejects_denied(info)
+    }
+
     /// Stateful evaluation of a fully-parsed packet against the peer's shared
     /// networks. Rules keep their configured order across networks, so an
     /// explicit deny cannot be bypassed by choosing another transport handle.
@@ -602,7 +615,7 @@ impl SharedFirewall {
                     index,
                     rule: rule.clone(),
                 },
-                reject: config.reject && rule.action.is_deny(),
+                reject: config.rejects_denied(info) && rule.action.is_deny(),
                 return_traffic: false,
             };
         }
@@ -610,7 +623,7 @@ impl SharedFirewall {
         Verdict {
             action,
             decided_by: DecidedBy::Default,
-            reject: config.reject && action.is_deny(),
+            reject: config.rejects_denied(info) && action.is_deny(),
             return_traffic: direction == Direction::In
                 && action.is_deny()
                 && conntrack_eligible(info),
@@ -3057,7 +3070,7 @@ mod tests {
         assert_eq!(verdict.action, Action::Deny);
         assert_eq!(verdict.decided_by, DecidedBy::Default);
         assert!(verdict.return_traffic);
-        assert!(!verdict.reject);
+        assert!(verdict.reject);
 
         let web = probe(Direction::Out, Protocol::Tcp, Some(443));
         let verdict = fw.explain(Direction::Out, &web, &peer, |_| false);
@@ -3114,6 +3127,18 @@ mod tests {
         let elsewhere = fw.explain(Direction::In, &info, &peer, |net| net == "work");
         assert_eq!(elsewhere.decided_by, DecidedBy::Default);
         assert_eq!(elsewhere.action, Action::Deny);
+    }
+
+    #[test]
+    fn explain_reports_ssh_reject_without_general_reject() {
+        let peer = test_id(1);
+        let fw = SharedFirewall::new(FirewallConfig::default());
+        let ssh = probe(Direction::In, Protocol::Tcp, Some(22));
+        assert!(fw.explain(Direction::In, &ssh, &peer, |_| false).reject);
+        let https = probe(Direction::In, Protocol::Tcp, Some(443));
+        assert!(!fw.explain(Direction::In, &https, &peer, |_| false).reject);
+        let udp = probe(Direction::In, Protocol::Udp, Some(22));
+        assert!(!fw.explain(Direction::In, &udp, &peer, |_| false).reject);
     }
 
     #[test]

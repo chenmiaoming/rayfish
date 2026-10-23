@@ -834,9 +834,10 @@ async fn prepare_datagrams(
     {
         tracing::debug!(dst = %info.dst_ip, port = info.dst_port, "firewall denied outbound");
         ctx.stats.record_drop(DropReason::Firewall);
-        // Fail fast (opt-in): inject a RST / ICMP-unreachable back into our own TUN
+        // Denied SSH always fails fast; other traffic follows REJECT mode.
+        // Inject a RST / ICMP-unreachable back into our own TUN
         // so the local app's socket fails immediately instead of hanging.
-        if ctx.firewall.reject_enabled()
+        if ctx.firewall.rejects_denied(info)
             && let Some(reply) = crate::reject::build_reject(&pkt, info)
         {
             ctx.stats.record_reject();
@@ -1135,12 +1136,13 @@ pub fn spawn_peer_reader(
                     }
                     InboundDecision::DropFirewall(info) => {
                         stats.record_drop(DropReason::Firewall);
-                        // Fail fast (opt-in): send a RST / ICMP-unreachable back over
+                        // Denied SSH always fails fast; other traffic follows REJECT mode.
+                        // Send a RST / ICMP-unreachable back over
                         // this connection so the initiator on the other host fails
                         // immediately. Its conntrack admits the reply (a RST matches
                         // its outbound flow; the seeded `allow in icmp` rule admits an
                         // ICMP error), so the initiator's app sees "connection refused".
-                        if firewall.reject_enabled()
+                        if firewall.rejects_denied(&info)
                             && let Some(reply) = crate::reject::build_reject(&datagram, &info)
                         {
                             stats.record_reject();
@@ -1646,6 +1648,8 @@ mod tests {
                 .await
                 .is_none()
         );
+        let reset = crate::reject::build_reject(&packet, &info).expect("denied SSH has a reset");
+        assert_eq!(feedback_rx.try_recv().expect("local SSH reset"), reset);
         sender_peers.add(b_ip, send.clone(), b.id(), "z-allowed");
         receiver_peers.remove_peer_from_network(&a_ip, "z-allowed");
         send_over_route(&ctx, &route, &info, packet.clone()).await;
@@ -1657,6 +1661,11 @@ mod tests {
         .await
         .unwrap();
         assert!(tun_rx.try_recv().is_err());
+        let wire = timeout(Duration::from_secs(5), send.read_datagram())
+            .await
+            .expect("remote SSH reset arrives")
+            .expect("read remote SSH reset");
+        assert_eq!(untag_datagram(&wire).expect("tagged SSH reset").1, reset);
         receiver_peers.add(a_ip, recv.clone(), a.id(), "z-allowed");
 
         if packet_len > usize::from(crate::tun::MIN_TUN_MTU) {
