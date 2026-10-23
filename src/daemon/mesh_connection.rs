@@ -40,6 +40,26 @@ pub(crate) struct MeshConnection {
     pre_registered: bool,
 }
 
+/// A missing handler can be a restore still in progress, so joining remains
+/// retryable. Grants need an explicit failure because their sender records success.
+async fn reply_network_unavailable(mut send: SendStream, net: EndpointId, msg: &ControlMsg) {
+    let reply = match msg {
+        ControlMsg::JoinRequest { .. } | ControlMsg::MeshHello { .. } => {
+            ControlMsg::JoinUnavailable {
+                reason: "network is not active on this peer".to_string(),
+            }
+        }
+        ControlMsg::AdminGrant { .. } => ControlMsg::AdminGrantResult {
+            network_pubkey: net,
+            error: Some("network is not active on this peer".to_string()),
+        },
+        _ => return,
+    };
+    if let Err(error) = control::send_msg(&mut send, Some(net), &reply).await {
+        tracing::debug!(%error, "could not reply for unavailable network");
+    }
+}
+
 /// Bounds [`ControlMsg::NotSupported`] nacks on one connection: each unknown
 /// kind is nacked once, at most [`NackGate::LIMIT`] distinct kinds, and never a
 /// `NotSupported` itself, so two mismatched builds cannot ping-pong.
@@ -279,6 +299,7 @@ impl MeshConnection {
                             net = %frame.net.fmt_short(),
                             "network gone before its queued control frame ran; dropping"
                         );
+                        reply_network_unavailable(frame.send, frame.net, &frame.msg).await;
                         return;
                     };
                     // The reachability wall for the control plane, mirroring
@@ -553,10 +574,10 @@ impl MeshConnection {
                 // A peer talking to us about a network we have saved but never
                 // registered means our restore of it is still owed: the network
                 // is plainly reachable, since its traffic just arrived. Nudge the
-                // supervisor to retry now rather than at its next tick. This
-                // frame is still dropped (there is no handler to give it to), but
-                // the peer's own reconnect loop will be back.
+                // supervisor to retry now rather than at its next tick.
+                // Joining remains pending until the handler is restored.
                 self.ctx.registry.nudge_restore();
+                reply_network_unavailable(send, net_pubkey, &frame.msg).await;
                 continue;
             }
             drop(recv); // one message per stream; the reply rides `send`

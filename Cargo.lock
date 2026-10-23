@@ -5881,6 +5881,7 @@ dependencies = [
  "system-configuration 0.7.0",
  "tar",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "toml 1.1.4+spec-1.1.0",

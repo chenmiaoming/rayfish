@@ -238,6 +238,7 @@ struct StatusJson<'a> {
     daemon_version: &'a str,
     networks: &'a [ipc::NetworkStatus],
     inactive_networks: &'a [ipc::InactiveNetwork],
+    connection_errors: &'a [ipc::ConnectionErrorInfo],
     controllers: &'a [ipc::ControllerInfo],
     traffic: StatusTraffic,
     pending: StatusPending,
@@ -336,6 +337,14 @@ impl DisplayOut for StatusOutput<'_> {
         for net in inactive_networks {
             println!();
             print!("{}", inactive_network_block(net, with_ips));
+        }
+
+        for error in self.json.connection_errors {
+            println!(
+                "\n  {}: {}",
+                style::value(&error.peer.fmt_short().to_string()),
+                style::red(&error.message)
+            );
         }
 
         print_nearby(lan_peers, with_ips);
@@ -457,6 +466,7 @@ pub(crate) async fn ipc_status(show_machines: bool, with_ips: bool) -> Result<()
             pending_files,
             pending_connects,
             inactive_networks,
+            connection_errors,
             lan_peers,
             ..
         } => {
@@ -481,6 +491,7 @@ pub(crate) async fn ipc_status(show_machines: bool, with_ips: bool) -> Result<()
                     daemon_version: &daemon_version,
                     networks: &networks,
                     inactive_networks: &inactive_networks,
+                    connection_errors: &connection_errors,
                     controllers: &controllers,
                     traffic: StatusTraffic {
                         packets_rx,

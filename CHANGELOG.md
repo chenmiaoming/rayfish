@@ -28,6 +28,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Denied network join requests stop retrying, including after restart, and show
+  the coordinator denial in status. Invalid credentials and unavailable networks
+  receive explicit replies.
+- Rejected direct connections stop retrying. Refused and declined invitations
+  report their outcome to the sender.
+- Admin grants succeed only after the recipient confirms the key was saved.
+- File offers acknowledge receipt, and declining a file tells its sender why the
+  transfer stopped. File transfers require peers using file protocol version 3.
+
 - SSH connections denied by the mesh firewall fail immediately instead of hanging.
 - TCP replies remain allowed after closing the write half of a connection.
   Tracking expires after both sides close, while resets remove it immediately.

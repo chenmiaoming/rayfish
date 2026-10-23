@@ -432,7 +432,7 @@ impl Daemon {
         // which resolves the *calling user's* config directory and so finds an
         // empty one wherever the daemon's is root-owned, turning every failed
         // restore into a network that simply is not mentioned.
-        let inactive_networks: Vec<InactiveNetwork> = saved
+        let mut inactive_networks: Vec<InactiveNetwork> = saved
             .as_ref()
             .map(|c| {
                 c.networks
@@ -451,6 +451,20 @@ impl Daemon {
             })
             .unwrap_or_default();
 
+        for error in self.registry.restore_errors.iter() {
+            if !self.registry.networks.contains_key(error.key())
+                && !inactive_networks
+                    .iter()
+                    .any(|network| network.name == *error.key())
+            {
+                inactive_networks.push(InactiveNetwork {
+                    name: error.key().clone(),
+                    reason: Some(error.value().clone()),
+                    saved: None,
+                });
+            }
+        }
+
         IpcMessage::StatusResponse {
             endpoint_id: self.transport.endpoint.id(),
             mdns_enabled: self.mdns.enabled(),
@@ -465,6 +479,19 @@ impl Daemon {
             bytes_tx: self.stats.bytes_tx.get(),
             pending_files: self.files.pending_files.lock().unwrap().len(),
             pending_connects: self.connect.pending_connects.len(),
+            connection_errors: {
+                let mut errors: Vec<_> = self
+                    .connect
+                    .connection_errors
+                    .iter()
+                    .map(|entry| ipc::ConnectionErrorInfo {
+                        peer: *entry.key(),
+                        message: entry.value().clone(),
+                    })
+                    .collect();
+                errors.sort_by_key(|error| error.peer);
+                errors
+            },
             pending_networks,
             inactive_networks,
             // Only the neighbours you could still link up with: peers already on

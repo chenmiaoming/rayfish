@@ -166,13 +166,36 @@ pub enum ConnectMsg {
     Denied { reason: String },
     /// Private invitation from a network's coordinator. Receipt only stores it;
     /// joining needs the recipient's explicit accept. Acked with `Pending`;
-    /// a refused offer gets no reply. Sent only on `rayfish/invite/1`, which
+    /// a refused offer gets `Denied`. Sent only on `rayfish/invite/1`, which
     /// older peers lack, so they fail the handshake rather than the decode.
     InviteOffer {
         /// The sender's label for the network, display only.
         network: NetworkName,
         code: InviteCode,
     },
+}
+
+/// Stable identity for one offered file, retained across delivery retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileOfferId(pub [u8; 32]);
+
+impl FileOfferId {
+    pub fn new() -> Self {
+        Self(rand::random())
+    }
+}
+
+impl Default for FileOfferId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileReply {
+    Received,
+    Completed,
+    Declined { reason: String },
 }
 
 /// Control messages exchanged between peers over QUIC bidirectional streams.
@@ -193,6 +216,10 @@ pub enum ControlMsg {
     /// Coordinator response telling the joiner it has been queued for live
     /// approval (closed network, no invite). The joiner retries until accepted.
     JoinPending,
+    /// The requested network or coordinator is temporarily unavailable.
+    JoinUnavailable {
+        reason: String,
+    },
     JoinApproved {
         members: Vec<Member>,
     },
@@ -290,12 +317,32 @@ pub enum ControlMsg {
         /// 32-byte per-network secret key (`SecretKey::to_bytes`).
         secret_key: [u8; 32],
     },
+    /// Sent after an admin grant has either been saved or refused.
+    AdminGrantResult {
+        network_pubkey: EndpointId,
+        error: Option<String>,
+    },
     FileOffer {
+        offer_id: FileOfferId,
         from: EndpointId,
         filename: String,
         size: u64,
         mime_type: String,
         blob_hash: blake3::Hash,
+    },
+    /// File protocol receipt, including the outcome of a retried offer.
+    FileOfferReply {
+        offer_id: FileOfferId,
+        reply: FileReply,
+    },
+    /// A recipient declined an offer after acknowledging its receipt.
+    FileDeclined {
+        offer_id: FileOfferId,
+        reason: String,
+    },
+    /// The recipient saved a complete copy, including a copy already cached.
+    FileCompleted {
+        offer_id: FileOfferId,
     },
     /// Coordinator → coordinators: share a minted single-use invite's hash so any
     /// coordinator can redeem it. Carries the hash only, never the secret.
@@ -1011,6 +1058,7 @@ mod tests {
     #[test]
     fn test_roundtrip_file_offer() {
         let msg = ControlMsg::FileOffer {
+            offer_id: FileOfferId([7; 32]),
             from: test_id(1),
             filename: "report.pdf".to_string(),
             size: 1_048_576,

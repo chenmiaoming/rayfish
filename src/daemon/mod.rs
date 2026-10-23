@@ -608,13 +608,14 @@ pub(crate) struct NetworkState {
     /// node that did not opt into `--auto-accept-firewall`. Empty when
     /// auto-accepting.
     pending_suggestions: Vec<firewall::FirewallRule>,
-    /// Peers awaiting live operator approval on a closed network (coordinator
+    /// Join requests and undelivered denials on a closed network (coordinator
     /// only, in-memory, never persisted or published).
     pending: HashMap<EndpointId, PendingJoin>,
 }
 
-/// A join request held pending live approval on a closed network.
+/// A join request and its undelivered operator decision on a closed network.
 pub(crate) struct PendingJoin {
+    pub(crate) denied: bool,
     pub(crate) hostname: Option<String>,
     pub(crate) device_cert: Option<control::DeviceCert>,
     pub(crate) requested_at: Instant,
@@ -2077,7 +2078,7 @@ mod absent_member_tests {
 }
 
 #[cfg(test)]
-mod accept_handler_tests {
+pub(crate) mod accept_handler_tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
@@ -2134,6 +2135,7 @@ mod accept_handler_tests {
             state.pending.insert(
                 identity,
                 PendingJoin {
+                    denied: false,
                     hostname: None,
                     device_cert: None,
                     requested_at: Instant::now(),
@@ -2344,7 +2346,7 @@ mod accept_handler_tests {
 
     /// Throwaway [`NetworkRegistry`] for accept-handler tests: empty networks map
     /// and dummy foundation handles, none of which the constructed handlers touch.
-    fn sample_registry(
+    pub(crate) fn sample_registry(
         endpoint: Endpoint,
         identity: IrohIdentityProvider,
         blob_store: FsStore,
@@ -2936,7 +2938,10 @@ mod accept_handler_tests {
         .unwrap();
         let reply = control::recv_framed::<control::ConnectMsg>(&mut recv).await;
         server.await.unwrap();
-        assert!(reply.is_err(), "{reply:?}");
+        assert!(
+            matches!(reply, Ok(control::ConnectMsg::Denied { .. })),
+            "{reply:?}"
+        );
         assert!(connect.pending_connects.is_empty());
         receiver.close().await;
         dialer.close().await;
@@ -3042,12 +3047,15 @@ mod accept_handler_tests {
                 control::recv_framed::<control::ConnectMsg>(&mut recv).await
             }
         };
-        // The blocked endpoint gets no reply bytes, whatever it claims to be.
+        // The blocked endpoint receives a refusal, whatever it claims to be.
         let refused = ask(&blocked, allowed.id()).await;
         // A different endpoint claiming the blocked key is judged on itself.
         let admitted = ask(&allowed, blocked.id()).await;
         server.await.unwrap();
-        assert!(refused.is_err(), "{refused:?}");
+        assert!(
+            matches!(refused, Ok(control::ConnectMsg::Denied { .. })),
+            "{refused:?}"
+        );
         assert_eq!(admitted.unwrap(), control::ConnectMsg::Pending);
         assert!(connect.pending_connects.contains_key(&allowed.id()));
         assert!(!connect.pending_connects.contains_key(&blocked.id()));
@@ -3117,6 +3125,12 @@ mod accept_handler_tests {
         assert!(
             retried.is_ok(),
             "an approved request must retry a failed join"
+        );
+        assert!(
+            connect
+                .connection_errors
+                .get(&receiver.id())
+                .is_some_and(|error| error.contains("request withdrawn"))
         );
     }
 
@@ -4584,6 +4598,88 @@ mod accept_handler_tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn denied_request_is_delivered_on_retry_instead_of_being_queued_again() {
+        use iroh::address_lookup::memory::MemoryLookup;
+
+        let env = TestConfigDir::new();
+        let alpn = transport::mesh_alpn();
+        let coordinator = loopback_endpoint_on(MemoryLookup::new(), vec![alpn.clone()]).await;
+        let joiner = loopback_endpoint_on(MemoryLookup::new(), vec![alpn.clone()]).await;
+        let store = FsStore::load(env.dir.path().join("blobs")).await.unwrap();
+        let registry = sample_registry(
+            coordinator.clone(),
+            IrohIdentityProvider::new(coordinator.id()),
+            store.clone(),
+        );
+        let state = make_network_state();
+        let network_key = state.read().unwrap().network_public_key;
+        registry.networks.insert(
+            "test-net".into(),
+            NetworkHandle {
+                name: "test-net".into(),
+                network_key,
+                role: NetworkRole::Coordinator,
+                state: Arc::clone(&state),
+                dht_notify: None,
+                cancel: CancellationToken::new(),
+                tasks: Vec::new(),
+                invite_lock: Arc::new(AsyncMutex::new(())),
+                incompatible: None,
+            },
+        );
+        let accepting = serve_coordinator(
+            &coordinator,
+            &store,
+            &registry,
+            vec![ServedNetwork {
+                key: network_key,
+                name: "test-net",
+                state: Arc::clone(&state),
+            }],
+        );
+        let connection = joiner.connect(coordinator.addr(), &alpn).await.unwrap();
+        for attempt in 0..2 {
+            let (mut send, mut recv) = connection.open_bi().await.unwrap();
+            control::send_msg(
+                &mut send,
+                Some(network_key),
+                &ControlMsg::JoinRequest {
+                    invite_secret: None,
+                    hostname: Some("joining-peer".into()),
+                    device_cert: None,
+                },
+            )
+            .await
+            .unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(5), control::recv_msg(&mut recv))
+                .await
+                .unwrap()
+                .unwrap();
+            // Consume FIN so the handler knows the decision reached the joiner.
+            assert!(recv.read_to_end(0).await.unwrap().is_empty());
+            if attempt == 1 {
+                assert!(matches!(reply, ControlMsg::JoinDenied { .. }), "{reply:?}");
+            } else {
+                assert!(matches!(reply, ControlMsg::JoinPending), "{reply:?}");
+                assert!(matches!(
+                    registry.deny_request("test-net", "joining-peer"),
+                    IpcMessage::Ok { .. }
+                ));
+                let IpcMessage::PendingRequests { requests } = registry.list_requests("test-net")
+                else {
+                    panic!("expected pending requests");
+                };
+                assert!(requests.is_empty());
+            }
+        }
+        accepting.abort();
+        joiner.close().await;
+        coordinator.close().await;
+        store.shutdown().await.unwrap();
+    }
+
     /// Pairing sends one join per shared network over a single connection to
     /// the primary. A frame that is slow on one network (here: waiting on that
     /// network's snapshot commit) must not hold up another network's frame on
@@ -4737,6 +4833,9 @@ mod accept_handler_tests {
         // No blob entry yet: not satisfied.
         assert!(!super::rename_satisfied("alice", None));
     }
+
+    include!("mesh_request_replies_tests.rs");
+    include!("protocol_replies_tests.rs");
 
     #[test]
     fn promote_is_idempotent_decision() {

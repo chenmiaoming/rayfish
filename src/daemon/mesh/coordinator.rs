@@ -487,7 +487,10 @@ impl NetworkRegistry {
                 hostname: outgoing_hostname(&t.network),
                 device_cert: device_cert.clone(),
             };
-            if send_mesh_hello(&conn, t.network_key, &hello).await.is_err() {
+            if send_mesh_hello(&conn, t.network_key, &t.network, &hello)
+                .await
+                .is_err()
+            {
                 continue;
             }
             let conn_changed = self

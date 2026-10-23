@@ -1138,6 +1138,7 @@ mod tests {
             outbox: Vec::new(),
             transfers: vec![
                 TransferFileInfo {
+                    error: None,
                     id: 2,
                     outgoing: false,
                     peer: "sender".into(),
@@ -1148,6 +1149,7 @@ mod tests {
                     destination: Some(PathBuf::from("/path/to/work/received.txt")),
                 },
                 TransferFileInfo {
+                    error: None,
                     id: 5,
                     outgoing: false,
                     peer: "sender".into(),
@@ -1158,6 +1160,7 @@ mod tests {
                     destination: None,
                 },
                 TransferFileInfo {
+                    error: None,
                     id: 3,
                     outgoing: true,
                     peer: "receiver".into(),
@@ -1168,6 +1171,7 @@ mod tests {
                     destination: None,
                 },
                 TransferFileInfo {
+                    error: None,
                     id: 4,
                     outgoing: false,
                     peer: "sender".into(),

@@ -600,6 +600,9 @@ pub enum IpcMessage {
         /// (global). Shown in the status "pending" summary.
         #[serde(default)]
         pending_connects: usize,
+        /// Refused outgoing direct connections, cleared by a new attempt.
+        #[serde(default)]
+        connection_errors: Vec<ConnectionErrorInfo>,
         /// Networks this node has asked to join but has not yet been admitted
         /// to (persisted `AppConfig.pending_joins`), minus any that are now
         /// active. Shown in the UI as "waiting for approval".
@@ -1376,6 +1379,8 @@ pub struct PendingFileInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TransferFileInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub id: u64,
     pub outgoing: bool,
     pub peer: String,
@@ -1385,6 +1390,13 @@ pub struct TransferFileInfo {
     pub state: TransferFileState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<PathBuf>,
+}
+
+/// An outgoing connection's terminal refusal, reported by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionErrorInfo {
+    pub peer: EndpointId,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2729,6 +2741,10 @@ mod tests {
             bytes_tx: 0,
             pending_files: 0,
             pending_connects: 0,
+            connection_errors: vec![ConnectionErrorInfo {
+                peer: peer_id,
+                message: "connection denied by recipient".into(),
+            }],
             pending_networks: vec![],
             inactive_networks: vec![],
             lan_peers: vec![LanPeerInfo {
@@ -2749,6 +2765,7 @@ mod tests {
                 endpoint_id,
                 networks,
                 lan_peers,
+                connection_errors,
                 ..
             } => {
                 assert_eq!(endpoint_id, ep_id);
@@ -2756,6 +2773,11 @@ mod tests {
                 assert_eq!(networks[0].peers[0].endpoint_id, peer_id);
                 assert_eq!(lan_peers.len(), 1);
                 assert_eq!(lan_peers[0].endpoint_id, peer_id);
+                assert_eq!(connection_errors[0].peer, peer_id);
+                assert_eq!(
+                    connection_errors[0].message,
+                    "connection denied by recipient"
+                );
             }
             _ => panic!("wrong variant"),
         }

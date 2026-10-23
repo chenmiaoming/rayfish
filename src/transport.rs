@@ -27,12 +27,12 @@ mod congestion;
 use congestion::LossTolerantConfig;
 use std::sync::Arc;
 
-/// ALPN for the file-transfer protocol. The trailing `/1` is its protocol
-/// version, **bump it (`/2`, …) on any breaking change to the file wire
-/// protocol** (`FileOffer`/blob handshake). iroh negotiates the ALPN at the QUIC
+/// ALPN for the file-transfer protocol. Version 3 adds offer identities,
+/// receipt replies, and acknowledged decline notifications. Bump on a breaking
+/// change to the file wire protocol. iroh negotiates the ALPN at the QUIC
 /// handshake, so a peer on a different version shares no common ALPN and the
 /// transfer simply can't connect: the version gate needs no in-band check.
-pub const FILES_ALPN: &[u8] = b"rayfish/files/2";
+pub const FILES_ALPN: &[u8] = b"rayfish/files/3";
 
 /// Identity-level ALPN for the `ray connect` friend-request handshake. Unlike
 /// `network_alpn`, this is not per-network: it accepts connection requests
