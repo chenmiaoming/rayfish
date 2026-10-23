@@ -1066,6 +1066,9 @@ fn owner_gid(secret: bool) -> u32 {
 /// still starts if the group is missing.
 #[cfg(target_os = "linux")]
 fn set_owner(path: &Path, secret: bool) {
+    if crate::instance::is_rootless() {
+        return;
+    }
     if let Err(e) = std::os::unix::fs::chown(path, Some(0), Some(owner_gid(secret))) {
         tracing::debug!(path = %path.display(), error = %e, "chown failed (non-fatal)");
     }
@@ -1087,6 +1090,10 @@ fn ensure_dir(dir: &Path) -> Result<()> {
 /// Unix. Idempotent.
 #[cfg(not(windows))]
 fn ensure_dir(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(instance) = crate::instance::user_instance() {
+        return crate::instance::ensure_private_dir(dir, instance.owner_uid);
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     #[cfg(target_os = "linux")]
     {
@@ -1156,12 +1163,16 @@ pub(crate) fn set_thread_config_dir(dir: PathBuf) {
     THREAD_CONFIG_DIR.with(|cell| *cell.borrow_mut() = Some(dir));
 }
 
-/// The override in effect: the embedder's [`set_config_dir_override`] first,
-/// then `RAYFISH_CONFIG_DIR`. `None` means the platform default applies.
+/// The rootless instance directory, or the embedder's [`set_config_dir_override`]
+/// followed by `RAYFISH_CONFIG_DIR`. Tests can override these per thread.
+/// `None` means the platform default applies.
 fn effective_override() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(dir) = THREAD_CONFIG_DIR.with(|cell| cell.borrow().clone()) {
         return Some(dir);
+    }
+    if let Some(instance) = crate::instance::user_instance() {
+        return Some(instance.directory.clone());
     }
     resolve_override(
         CONFIG_DIR_OVERRIDE

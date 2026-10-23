@@ -219,6 +219,8 @@ use report::*;
 pub(crate) use mesh::*;
 // `run_daemon` (the `ray daemon` entry point) stays public for the binary.
 pub use mesh::run_daemon;
+#[cfg(all(target_os = "linux", feature = "desktop"))]
+pub use mesh::run_rootless;
 // `build_headless` is the embedder (mobile) construction entry point.
 pub use mesh::build_headless;
 #[cfg(unix)]
@@ -239,6 +241,9 @@ pub use mesh::{CleanupOutcome, cleanup_after_exit};
 /// - Remove the client full-tunnel rules, which would otherwise outlive the TUN
 ///   they point at.
 pub fn restore_host_state() {
+    if crate::instance::is_rootless() {
+        return;
+    }
     crate::dns::config::emergency_restore_resolv_conf();
     crate::dns::config::emergency_withdraw_resolvconf();
     crate::exit_node::disable();
@@ -1105,6 +1110,19 @@ impl Daemon {
             elapsed_ms = started.elapsed().as_millis(),
             "shutdown: router stopped, blob store released, endpoint closed"
         );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    pub(crate) async fn rootless_resolve(&self, name: &str) -> Option<Ipv6Addr> {
+        self.registry
+            .resolve_peer_name(name.trim_end_matches('.'))
+            .await
+            .map(|id| derive_ipv6(&id))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    pub(crate) fn rootless_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
     }
 
     /// Bundle the daemon-wide shared handles into a [`MeshCtx`] for the accept

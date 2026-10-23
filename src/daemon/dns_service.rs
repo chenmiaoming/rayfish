@@ -111,7 +111,7 @@ impl DnsService {
         // Android's VpnService and iOS NetworkExtension configure DNS. Desktop
         // backend detection is permanently unsupported there; retrying it only
         // creates a timer and a misleading warning.
-        if cfg!(embedded_tun) {
+        if cfg!(embedded_tun) || crate::instance::is_rootless() {
             return;
         }
         if !config::load().map(|c| c.dns_mode.enabled()).unwrap_or(true) {
@@ -450,6 +450,9 @@ impl DnsService {
     /// the data plane comes up) it still tries the manager path, which is what
     /// it always did, and the list is remembered for whatever gets adopted next.
     pub(crate) async fn set_search_domains(&self, network_names: &[String], tun_name: &str) {
+        if crate::instance::is_rootless() {
+            return;
+        }
         let mode = config::load().map(|c| c.dns_mode).unwrap_or_default();
         let domains = search_domains_for_mode(network_names, mode);
         *self.search_domains.lock().unwrap() = domains.clone();
@@ -568,6 +571,9 @@ impl DnsService {
     /// re-assert watcher, restore the captured configurator, and clear the TUN's
     /// search domains. Idempotent (no-op if never configured).
     pub(crate) async fn revert(&self, tun_name: &str) {
+        if crate::instance::is_rootless() {
+            return;
+        }
         self.shutdown_background();
 
         // Revert system DNS (extract the configurator before reverting so the

@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Linux: `ray rootless` runs without administrator privileges, with private state,
+  authenticated SOCKS5 and HTTP proxies (including HTTPS through CONNECT),
+  TCP forwarding and explicit service exposure.
+  Startup prints connection instructions. Commands automatically use your running
+  rootless instance; `--system` selects the system daemon and `--rootless` selects
+  your private instance explicitly.
+
 - macOS connection logs include startup timings to help diagnose slow connections.
 - iOS 18: a Rayfish control turns the VPN on and off from Control Center,
   the Lock Screen or the Action button.
@@ -22,6 +29,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - SSH connections denied by the mesh firewall fail immediately instead of hanging.
+- TCP replies remain allowed after closing the write half of a connection.
+  Tracking expires after both sides close, while resets remove it immediately.
+
+- Linux rootless mode preserves GUI instance selection, reports SOCKS failures
+  and adapts TCP traffic to smaller mesh paths. Network changes leave host DNS
+  untouched, and private instances do not expose peer metrics.
 
 - Direct connections keep retrying after approval if joining the network fails
   temporarily.
