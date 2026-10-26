@@ -19,6 +19,9 @@ const MAX_PEERS: usize = 64;
 const MAX_PATHS_PER_PEER: usize = 8;
 const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// A path saved more recently than this is not written again. Reconnects and
+/// repeated path events would otherwise fsync settings for an unchanged path.
+const PERSIST_AFTER: Duration = Duration::from_secs(30 * 60);
 
 /// One identity-authenticated path and the last time it was usable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,14 +131,38 @@ impl WarmLookup {
         Ok(())
     }
 
-    pub(crate) fn remember(&self, peer: EndpointId, addr: TransportAddr) -> Result<()> {
+    /// Save all of a peer's paths in one write, or none when each was saved recently.
+    pub(crate) fn remember(&self, peer: EndpointId, mut addrs: Vec<TransportAddr>) -> Result<()> {
+        addrs.retain(|addr| matches!(addr, TransportAddr::Ip(_) | TransportAddr::Relay(_)));
+        if self.saved_recently(peer, &addrs, now()?) {
+            return Ok(());
+        }
         self.update(|hints, now| {
-            hints.retain(|hint| hint.peer != peer || hint.addr != addr);
-            hints.push(EndpointHint {
+            hints.retain(|hint| hint.peer != peer || !addrs.contains(&hint.addr));
+            hints.extend(addrs.into_iter().map(|addr| EndpointHint {
                 peer,
                 addr,
                 last_success: now,
-            });
+            }));
+        })
+    }
+
+    fn saved_recently(
+        &self,
+        peer: EndpointId,
+        addrs: &[TransportAddr],
+        now: UnixTimestampSecs,
+    ) -> bool {
+        let hints = self.hints.read().unwrap_or_else(|e| e.into_inner());
+        addrs.iter().all(|addr| {
+            hints.iter().any(|hint| {
+                hint.peer == peer
+                    && hint.addr == *addr
+                    && now
+                        .as_secs()
+                        .checked_sub(hint.last_success.as_secs())
+                        .is_some_and(|age| age < PERSIST_AFTER.as_secs())
+            })
         })
     }
 
@@ -328,7 +355,7 @@ mod tests {
 
         for port in 1001..1020 {
             lookup
-                .remember(peer(65), hint(peer(65), port, 1).addr)
+                .remember(peer(65), vec![hint(peer(65), port, 1).addr])
                 .unwrap();
         }
         assert_eq!(
@@ -361,10 +388,35 @@ mod tests {
         std::fs::write(config.directory.path().join("settings.toml"), "invalid = [").unwrap();
         assert!(
             lookup
-                .remember(peer(2), hint(peer(2), 1001, 1).addr)
+                .remember(peer(2), vec![hint(peer(2), 1001, 1).addr])
                 .is_err()
         );
         assert_eq!(lookup.snapshot(now().unwrap()), vec![fresh]);
+    }
+
+    #[test]
+    fn recently_saved_paths_are_not_written_again() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let config = TestConfig::new();
+        let lookup = WarmLookup::default();
+        let paths = vec![hint(peer(1), 1000, 0).addr, hint(peer(1), 1001, 0).addr];
+        lookup.remember(peer(1), paths.clone()).unwrap();
+        assert_eq!(config::load().unwrap().endpoint_hints.len(), 2);
+
+        // Any further write would now fail to parse the settings file.
+        let settings = config.directory.path().join("settings.toml");
+        std::fs::write(&settings, "invalid = [").unwrap();
+        lookup.remember(peer(1), paths).unwrap();
+        lookup
+            .remember(peer(1), vec![hint(peer(1), 1000, 0).addr])
+            .unwrap();
+        assert!(
+            lookup
+                .remember(peer(1), vec![hint(peer(1), 1002, 0).addr])
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

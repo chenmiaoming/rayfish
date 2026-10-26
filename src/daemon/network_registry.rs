@@ -574,15 +574,13 @@ impl NetworkRegistry {
         }
     }
 
-    /// Record an authenticated path without blocking an async worker on fsync.
-    async fn remember_endpoint_hint(&self, peer: EndpointId, addr: TransportAddr) {
-        if peer == self.transport.identity.local_identity()
-            || !matches!(addr, TransportAddr::Ip(_) | TransportAddr::Relay(_))
-        {
+    /// Record authenticated paths without blocking an async worker on fsync.
+    async fn remember_endpoint_hints(&self, peer: EndpointId, addrs: Vec<TransportAddr>) {
+        if peer == self.transport.identity.local_identity() || addrs.is_empty() {
             return;
         }
         let lookup = self.transport.warm_lookup.clone();
-        let result = tokio::task::spawn_blocking(move || lookup.remember(peer, addr)).await;
+        let result = tokio::task::spawn_blocking(move || lookup.remember(peer, addrs)).await;
         match result {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -610,9 +608,10 @@ impl NetworkRegistry {
         tokio::spawn(async move {
             use futures::StreamExt;
             let peer = conn.remote_id();
-            for addr in paths {
-                this.remember_endpoint_hint(peer, addr).await;
+            if this.shutdown_token.is_cancelled() {
+                return;
             }
+            this.remember_endpoint_hints(peer, paths).await;
             let period = crate::endpoint_hints::REFRESH_INTERVAL;
             let mut refresh = interval_at(TokioInstant::now() + period, period);
             refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -621,13 +620,16 @@ impl NetworkRegistry {
                     _ = this.shutdown_token.cancelled() => break,
                     _ = conn.closed() => break,
                     _ = refresh.tick() => {
-                        for path in conn.paths().iter() {
-                            this.remember_endpoint_hint(peer, path.remote_addr().clone()).await;
-                        }
+                        let paths = conn
+                            .paths()
+                            .iter()
+                            .map(|path| path.remote_addr().clone())
+                            .collect();
+                        this.remember_endpoint_hints(peer, paths).await;
                     }
                     event = events.next() => match event {
                         Some(PathEvent::Opened { remote_addr, .. }) => {
-                            this.remember_endpoint_hint(peer, remote_addr).await;
+                            this.remember_endpoint_hints(peer, vec![remote_addr]).await;
                         }
                         Some(_) => {}
                         None => break,
