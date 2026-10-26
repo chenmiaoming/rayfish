@@ -20,6 +20,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::net::{UnixListener, UnixStream};
@@ -30,36 +31,72 @@ use super::session_env::drop_privs;
 /// Pending connections a reverse-forwarded socket queues, as sshd's.
 const LISTEN_BACKLOG: libc::c_int = 128;
 
+/// How long the daemon waits for a helper before killing it. A lookup on a
+/// path the account controls can block forever (a FUSE mount that never
+/// answers), and the waiting thread belongs to tokio's shared blocking pool.
+const HELPER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The filesystem identity of a socket file a helper bound, so cleanup removes
+/// that file and not a newer socket bound at the same path since.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct SocketFile {
+    dev: u64,
+    ino: u64,
+}
+
+/// A listening socket and the file it is bound to.
+pub(super) struct Bound {
+    pub(super) listener: UnixListener,
+    pub(super) file: SocketFile,
+}
+
 #[derive(Clone, Copy)]
 enum Op {
     Connect,
     Listen,
-    RemoveSocket,
+    RemoveSocket(SocketFile),
     CreateDir,
     RemoveDir,
+    /// Never answers, standing in for a lookup that blocks forever.
+    #[cfg(test)]
+    Hang,
 }
+
+/// What the helper sends back: an errno (0 for success), the bound file's
+/// identity for `Listen`, and the socket over SCM_RIGHTS when there is one.
+const REPORT_LEN: usize = size_of::<libc::c_int>() + 2 * size_of::<u64>();
 
 /// Dial the unix socket at `path` as `info`'s account.
 pub(super) async fn connect(info: Arc<LoginInfo>, path: PathBuf) -> Result<UnixStream> {
     let fd = run_blocking(info, path, Op::Connect)
         .await?
+        .fd
         .context("the helper returned no socket")?;
     Ok(UnixStream::from_std(StdUnixStream::from(fd))?)
 }
 
 /// Bind and listen on `path` as `info`'s account. A stale socket the account
 /// owns at that path is replaced; anything else there is an error.
-pub(super) async fn listen(info: Arc<LoginInfo>, path: PathBuf) -> Result<UnixListener> {
-    let fd = run_blocking(info, path, Op::Listen)
-        .await?
-        .context("the helper returned no socket")?;
-    Ok(UnixListener::from_std(StdUnixListener::from(fd))?)
+pub(super) async fn listen(info: Arc<LoginInfo>, path: PathBuf) -> Result<Bound> {
+    let answer = run_blocking(info, path, Op::Listen).await?;
+    let fd = answer.fd.context("the helper returned no socket")?;
+    Ok(Bound {
+        listener: UnixListener::from_std(StdUnixListener::from(fd))?,
+        file: answer.file,
+    })
 }
 
-/// Remove the socket at `path` as `info`'s account. Not a socket, or already
-/// gone, is left alone.
-pub(super) async fn remove_socket(info: Arc<LoginInfo>, path: PathBuf) -> Result<()> {
-    run_blocking(info, path, Op::RemoveSocket).await.map(drop)
+/// Remove the socket file `file` at `path` as `info`'s account. Anything else
+/// at the path (another socket bound since, not a socket, or nothing) is left
+/// alone.
+pub(super) async fn remove_socket(
+    info: Arc<LoginInfo>,
+    path: PathBuf,
+    file: SocketFile,
+) -> Result<()> {
+    run_blocking(info, path, Op::RemoveSocket(file))
+        .await
+        .map(drop)
 }
 
 /// Create a mode 0700 directory at `path` as `info`'s account. Fails if
@@ -73,21 +110,22 @@ pub(super) async fn remove_dir(info: Arc<LoginInfo>, path: PathBuf) -> Result<()
     run_blocking(info, path, Op::RemoveDir).await.map(drop)
 }
 
-async fn run_blocking(info: Arc<LoginInfo>, path: PathBuf, op: Op) -> Result<Option<OwnedFd>> {
+async fn run_blocking(info: Arc<LoginInfo>, path: PathBuf, op: Op) -> Result<Answer> {
     let shown = path.display().to_string();
-    tokio::task::spawn_blocking(move || run(&info, &path, op))
+    tokio::task::spawn_blocking(move || run(&info, &path, op, HELPER_DEADLINE))
         .await
         .context("socket helper task failed")?
         .with_context(|| format!("{shown} as the login account"))
 }
 
-/// Fork, become the account, do `op`, and collect its result.
-fn run(info: &LoginInfo, path: &Path, op: Op) -> Result<Option<OwnedFd>> {
+/// Fork, become the account, do `op`, and collect its result, killing the
+/// helper if it has not answered within `deadline`.
+fn run(info: &LoginInfo, path: &Path, op: Op, deadline: Duration) -> Result<Answer> {
     let mut become_user = drop_privs(info.uid, info.gid, &info.name)?;
     let c_path = CString::new(path.as_os_str().as_bytes()).context("path contains NUL")?;
     let addr = match op {
         Op::Connect | Op::Listen => Some(SocketAddr::new(&c_path)?),
-        Op::RemoveSocket | Op::CreateDir | Op::RemoveDir => None,
+        _ => None,
     };
     let (parent_end, child_end) =
         StdUnixStream::pair().context("creating the helper socketpair")?;
@@ -107,13 +145,44 @@ fn run(info: &LoginInfo, path: &Path, op: Op) -> Result<Option<OwnedFd>> {
         child(errno, op, &c_path, addr.as_ref(), child_end.as_raw_fd());
     }
     drop(child_end);
-    let answer = receive(parent_end.as_raw_fd());
+    let answer = match wait_readable(parent_end.as_raw_fd(), deadline) {
+        Ok(()) => receive(parent_end.as_raw_fd()),
+        Err(e) => {
+            // SAFETY: signals our own child, which has not been reaped yet.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            Err(e)
+        }
+    };
     reap(pid);
-    let Answer { errno, fd } = answer?;
-    if errno != 0 {
-        return Err(Error::from_raw_os_error(errno).into());
+    let answer = answer?;
+    if answer.errno != 0 {
+        return Err(Error::from_raw_os_error(answer.errno).into());
     }
-    Ok(fd)
+    Ok(answer)
+}
+
+/// Wait until the helper's answer (or its exit) is readable on `fd`.
+fn wait_readable(fd: RawFd, deadline: Duration) -> Result<()> {
+    let until = Instant::now() + deadline;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(Error::from(ErrorKind::TimedOut)).context("the socket helper is stuck");
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = libc::c_int::try_from(left.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+        // SAFETY: polls one valid pollfd that lives on this frame.
+        match unsafe { libc::poll(&mut pfd, 1, ms) } {
+            n if n > 0 => return Ok(()),
+            0 => continue,
+            _ if errno_now() == libc::EINTR => continue,
+            _ => return Err(Error::last_os_error()).context("waiting for the socket helper"),
+        }
+    }
 }
 
 /// The forked child. Never returns.
@@ -125,11 +194,12 @@ fn child(
     report: RawFd,
 ) -> ! {
     if errno != 0 {
-        send(report, errno, None);
+        send(report, errno, None, None);
     }
     // SAFETY: plain syscalls on `path` and `addr`, both valid for the call.
     unsafe {
         let p = path.as_ptr();
+        let mut file = None;
         let result: Result<Option<RawFd>, libc::c_int> = match (op, addr) {
             (Op::Connect, Some(addr)) => open_socket().and_then(|fd| {
                 let rc = libc::connect(fd, addr.as_ptr(), addr.len);
@@ -149,19 +219,23 @@ fn child(
                 }
                 libc::umask(0o177);
                 open_socket().and_then(|fd| {
+                    let mut st: libc::stat = zeroed();
                     if libc::bind(fd, addr.as_ptr(), addr.len) == 0
                         && libc::listen(fd, LISTEN_BACKLOG) == 0
+                        && libc::lstat(p, &mut st) == 0
                     {
+                        file = Some(SocketFile::of(&st));
                         Ok(Some(fd))
                     } else {
                         Err(errno_now())
                     }
                 })
             }
-            (Op::RemoveSocket, _) => {
+            (Op::RemoveSocket(file), _) => {
                 let mut st: libc::stat = zeroed();
                 if libc::lstat(p, &mut st) == 0
                     && st.st_mode & libc::S_IFMT == libc::S_IFSOCK
+                    && SocketFile::of(&st) == file
                     && libc::unlink(p) != 0
                 {
                     Err(errno_now())
@@ -184,16 +258,21 @@ fn child(
                     Err(errno_now())
                 }
             }
+            #[cfg(test)]
+            (Op::Hang, _) => loop {
+                libc::pause();
+            },
             (Op::Connect | Op::Listen, None) => Err(libc::EINVAL),
         };
         match result {
-            Ok(fd) => send(report, 0, fd),
-            Err(errno) => send(report, errno, None),
+            Ok(fd) => send(report, 0, fd, file),
+            Err(errno) => send(report, errno, None, None),
         }
     }
 }
 
-/// A nonblocking, close-on-exec unix stream socket, ready for tokio.
+/// A nonblocking unix stream socket, ready for tokio. Close-on-exec is set
+/// by the receiver: it is a descriptor flag and does not travel with the fd.
 ///
 /// # Safety
 /// Only raw syscalls; safe to call in the forked child.
@@ -204,9 +283,7 @@ unsafe fn open_socket() -> Result<RawFd, libc::c_int> {
         if fd < 0 {
             return Err(errno_now());
         }
-        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) != 0
-            || libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) != 0
-        {
+        if libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) != 0 {
             return Err(errno_now());
         }
         Ok(fd)
@@ -218,11 +295,17 @@ fn errno_now() -> libc::c_int {
 }
 
 /// Send the result to the daemon and exit. Uses stack memory only.
-fn send(report: RawFd, errno: libc::c_int, fd: Option<RawFd>) -> ! {
+fn send(report: RawFd, errno: libc::c_int, fd: Option<RawFd>, file: Option<SocketFile>) -> ! {
+    let file = file.unwrap_or(SocketFile { dev: 0, ino: 0 });
+    let mut payload = [0u8; REPORT_LEN];
+    let (head, rest) = payload.split_at_mut(size_of::<libc::c_int>());
+    let (dev, ino) = rest.split_at_mut(size_of::<u64>());
+    head.copy_from_slice(&errno.to_ne_bytes());
+    dev.copy_from_slice(&file.dev.to_ne_bytes());
+    ino.copy_from_slice(&file.ino.to_ne_bytes());
     // SAFETY: the message, iovec and control buffer all live on this stack
     // frame for the duration of `sendmsg`; `_exit` skips every destructor.
     unsafe {
-        let mut payload = errno.to_ne_bytes();
         let mut iov = libc::iovec {
             iov_base: payload.as_mut_ptr().cast(),
             iov_len: payload.len(),
@@ -252,11 +335,19 @@ fn send(report: RawFd, errno: libc::c_int, fd: Option<RawFd>) -> ! {
 struct Answer {
     errno: libc::c_int,
     fd: Option<OwnedFd>,
+    file: SocketFile,
 }
 
-/// Read the child's answer: an errno, and the socket when there is one.
+/// Read the child's answer: an errno, the bound file, and the socket when
+/// there is one. The socket arrives close-on-exec, so it never leaks into a
+/// session process the daemon spawns later.
 fn receive(report: RawFd) -> Result<Answer> {
-    let mut payload = [0u8; size_of::<libc::c_int>()];
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const FLAGS: libc::c_int = 0;
+
+    let mut payload = [0u8; REPORT_LEN];
     let mut control = [0u64; 4];
     // SAFETY: the buffers outlive `recvmsg`, and a received fd is owned by
     // this process from then on, so wrapping it in `OwnedFd` is sound.
@@ -271,7 +362,7 @@ fn receive(report: RawFd) -> Result<Answer> {
         msg.msg_control = control.as_mut_ptr().cast();
         msg.msg_controllen = size_of::<[u64; 4]>() as _;
         let n = loop {
-            let n = libc::recvmsg(report, &mut msg, 0);
+            let n = libc::recvmsg(report, &mut msg, FLAGS);
             if n >= 0 || errno_now() != libc::EINTR {
                 break n;
             }
@@ -286,7 +377,18 @@ fn receive(report: RawFd) -> Result<Answer> {
             && (*cmsg).cmsg_type == libc::SCM_RIGHTS
         {
             let raw = libc::CMSG_DATA(cmsg).cast::<RawFd>().read_unaligned();
-            fd = Some(OwnedFd::from_raw_fd(raw));
+            let owned = OwnedFd::from_raw_fd(raw);
+            // Without MSG_CMSG_CLOEXEC (macOS), a session spawned on another
+            // thread between `recvmsg` and this call can still inherit it.
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            if libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+                return Err(Error::last_os_error()).context("marking a received socket");
+            }
+            fd = Some(owned);
+        }
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            return Err(Error::from(ErrorKind::InvalidData))
+                .context("the socket helper's answer was truncated");
         }
         if n as usize != payload.len() {
             return Err(Error::new(
@@ -295,9 +397,16 @@ fn receive(report: RawFd) -> Result<Answer> {
             ))
             .context("reading the socket helper's answer");
         }
+        let (head, rest) = payload.split_at(size_of::<libc::c_int>());
+        let (dev, ino) = rest.split_at(size_of::<u64>());
+        let bytes = |b: &[u8]| -> [u8; 8] { b.try_into().unwrap_or_default() };
         Ok(Answer {
-            errno: libc::c_int::from_ne_bytes(payload),
+            errno: libc::c_int::from_ne_bytes(head.try_into().unwrap_or_default()),
             fd,
+            file: SocketFile {
+                dev: u64::from_ne_bytes(bytes(dev)),
+                ino: u64::from_ne_bytes(bytes(ino)),
+            },
         })
     }
 }
@@ -306,6 +415,17 @@ fn reap(pid: libc::pid_t) {
     let mut status = 0;
     // SAFETY: waits on our own child; EINTR is retried.
     while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 && errno_now() == libc::EINTR {}
+}
+
+impl SocketFile {
+    fn of(st: &libc::stat) -> Self {
+        // `dev_t` and `ino_t` widths differ by platform; both fit in u64.
+        #[allow(clippy::unnecessary_cast)]
+        Self {
+            dev: st.st_dev as u64,
+            ino: st.st_ino as u64,
+        }
+    }
 }
 
 /// A `sockaddr_un` built before the fork.
@@ -338,6 +458,8 @@ impl SocketAddr {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
 
     fn me() -> Arc<LoginInfo> {
@@ -351,18 +473,68 @@ mod tests {
         let sub = dir.path().join("private");
         create_dir(me(), sub.clone()).await.expect("create dir");
         let path = sub.join("s.sock");
-        let listener = listen(me(), path.clone()).await.expect("listen");
+        let bound = listen(me(), path.clone()).await.expect("listen");
         let _client = connect(me(), path.clone()).await.expect("connect");
-        let (accepted, _) = listener.accept().await.expect("accept");
+        let (accepted, _) = bound.listener.accept().await.expect("accept");
         let cred = accepted.peer_cred().expect("peer credentials");
         assert_ne!(cred.pid(), Some(std::process::id() as i32));
 
-        remove_socket(me(), path.clone())
+        remove_socket(me(), path.clone(), bound.file)
             .await
             .expect("remove socket");
         assert!(!path.exists());
         remove_dir(me(), sub.clone()).await.expect("remove dir");
         assert!(!sub.exists());
+    }
+
+    fn close_on_exec(fd: RawFd) -> bool {
+        // SAFETY: F_GETFD on an fd the caller holds open.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD failed");
+        flags & libc::FD_CLOEXEC != 0
+    }
+
+    #[tokio::test]
+    async fn returned_sockets_are_not_inherited_by_spawned_sessions() {
+        // A forward's socket must not leak into the next shell the daemon
+        // spawns, which may belong to another account. Close-on-exec is a
+        // descriptor flag and does not travel over SCM_RIGHTS.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("s.sock");
+        let bound = listen(me(), path.clone()).await.expect("listen");
+        let client = connect(me(), path).await.expect("connect");
+        assert!(close_on_exec(bound.listener.as_raw_fd()), "listener leaks");
+        assert!(close_on_exec(client.as_raw_fd()), "stream leaks");
+    }
+
+    #[test]
+    fn a_stuck_helper_is_killed_at_the_deadline() {
+        // A login account can make a path lookup block forever (a FUSE mount
+        // that never answers). The daemon thread must get its answer anyway.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let err = run(&me(), dir.path(), Op::Hang, Duration::from_millis(200))
+            .err()
+            .expect("the helper never answers");
+        let io = err.downcast_ref::<Error>().expect("an io error");
+        assert_eq!(io.kind(), ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn cleanup_spares_a_socket_bound_again_at_the_same_path() {
+        // A replaced `-R` forward: the new one rebinds the path, then the old
+        // one's cleanup runs. It must not take the new socket with it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("s.sock");
+        let old = listen(me(), path.clone()).await.expect("first listen");
+        let new = listen(me(), path.clone()).await.expect("second listen");
+        remove_socket(me(), path.clone(), old.file)
+            .await
+            .expect("old cleanup");
+        assert!(path.exists(), "the new socket's file was removed");
+        remove_socket(me(), path.clone(), new.file)
+            .await
+            .expect("new cleanup");
+        assert!(!path.exists());
     }
 
     #[tokio::test]
@@ -380,10 +552,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("plain");
         std::fs::write(&path, b"keep").expect("write file");
-        listen(me(), path.clone())
-            .await
-            .expect_err("a file is in the way");
-        remove_socket(me(), path.clone())
+        assert!(
+            listen(me(), path.clone()).await.is_err(),
+            "a file is in the way"
+        );
+        let meta = std::fs::metadata(&path).expect("metadata");
+        let file = SocketFile {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        };
+        remove_socket(me(), path.clone(), file)
             .await
             .expect("not a socket is fine");
         assert_eq!(std::fs::read(&path).expect("read"), b"keep");

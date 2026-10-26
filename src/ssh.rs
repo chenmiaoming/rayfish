@@ -62,6 +62,7 @@ mod local;
 mod login;
 mod session;
 mod session_env;
+mod slots;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -85,9 +86,9 @@ use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 #[cfg(test)]
-use tokio::net::UnixStream;
-use tokio::net::{TcpListener, TcpStream, UnixListener};
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -134,6 +135,10 @@ const MAX_FORWARDED_CHANNELS: usize = 256;
 /// SSH connections the server holds at once, across every peer and listener.
 /// Past this, new connections are closed on accept.
 const MAX_CONNECTIONS: usize = 256;
+
+/// SSH connections one source address may hold at once, so a single peer
+/// cannot fill [`MAX_CONNECTIONS`] for everyone else.
+const MAX_CONNECTIONS_PER_SOURCE: usize = 16;
 
 /// How long a `ssh -L` / `-D` forwarded connection may take to reach its target
 /// before the channel is dropped. Short enough that a black-holed address fails
@@ -201,7 +206,10 @@ impl SshServer {
                 }
             };
             let config = Arc::new(server_config(key));
-            let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+            let slots = Arc::new(slots::ConnectionSlots::new(
+                MAX_CONNECTIONS,
+                MAX_CONNECTIONS_PER_SOURCE,
+            ));
             for addr in addrs {
                 let listener = match crate::listener::bind_listener(addr, SSH_LISTEN_PORT) {
                     Ok(l) => l,
@@ -237,8 +245,8 @@ impl SshServer {
                                     Ok(p) => p,
                                     Err(e) => { debug!(error = %e, "mesh SSH accept failed"); continue; }
                                 };
-                                let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
-                                    warn!(%peer, limit = MAX_CONNECTIONS, "mesh SSH: refusing a connection past the limit");
+                                let Some(slot) = slots.try_acquire(peer.ip()) else {
+                                    warn!(%peer, "mesh SSH: refusing a connection past the connection limit");
                                     continue;
                                 };
                                 disable_nagle(&stream);
@@ -486,6 +494,7 @@ struct AgentSocket {
     dir: PathBuf,
     token: CancellationToken,
     login: Arc<LoginInfo>,
+    file: as_user::SocketFile,
 }
 
 impl Drop for AgentSocket {
@@ -494,7 +503,11 @@ impl Drop for AgentSocket {
         // The directory belongs to the login account, which can swap what is
         // inside it, so it is cleared as that account rather than as root.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(remove_agent_dir(Arc::clone(&self.login), self.dir.clone()));
+            runtime.spawn(remove_agent_dir(
+                Arc::clone(&self.login),
+                self.dir.clone(),
+                Some(self.file),
+            ));
         }
     }
 }
@@ -1012,8 +1025,13 @@ impl Handler for SshHandler {
         // account could have created it and belongs to it from the start. A
         // stale socket of the account's own at the path is replaced.
         let path = PathBuf::from(socket_path);
-        let listener = match as_user::listen(Arc::clone(&info), path.clone()).await {
-            Ok(l) => l,
+        let as_user::Bound { listener, file } = match as_user::listen(
+            Arc::clone(&info),
+            path.clone(),
+        )
+        .await
+        {
+            Ok(b) => b,
             Err(e) => {
                 warn!(peer = %self.user.fmt_short(), socket = socket_path, error = %format!("{e:#}"),
                     "mesh SSH: cannot bind a reverse socket forward");
@@ -1058,7 +1076,7 @@ impl Handler for SshHandler {
             // The listener holds the only reference to this path; take the
             // socket file with it so the next session can bind again.
             drop(listener);
-            if let Err(e) = as_user::remove_socket(info, path.clone()).await {
+            if let Err(e) = as_user::remove_socket(info, path.clone(), file).await {
                 debug!(socket = %path.display(), error = %format!("{e:#}"),
                     "mesh SSH: cannot remove a reverse-forwarded socket");
             }
@@ -1096,14 +1114,15 @@ impl Handler for SshHandler {
             return Ok(false);
         }
         let peer = self.user;
-        let (agent_dir, listener) = match open_agent_socket(Arc::clone(&info)).await {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(peer = %peer.fmt_short(), error = %e,
+        let (agent_dir, as_user::Bound { listener, file }) =
+            match open_agent_socket(Arc::clone(&info)).await {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(peer = %peer.fmt_short(), error = %e,
                     "mesh SSH: cannot set up agent forwarding");
-                return Ok(false);
-            }
-        };
+                    return Ok(false);
+                }
+            };
         let path = agent_dir.join(AGENT_SOCKET);
         let token = self.token.child_token();
         let accept_token = token.clone();
@@ -1143,6 +1162,7 @@ impl Handler for SshHandler {
                 dir: agent_dir,
                 token,
                 login: info,
+                file,
             });
         }
         Ok(true)
@@ -1379,24 +1399,29 @@ const AGENT_SOCKET: &str = "agent.sock";
 /// Both are created by the login account itself, so root never chowns or
 /// follows a path that account can change. The directory name is random and
 /// created exclusively, so nothing can be waiting at the path.
-async fn open_agent_socket(info: Arc<LoginInfo>) -> Result<(PathBuf, UnixListener)> {
+async fn open_agent_socket(info: Arc<LoginInfo>) -> Result<(PathBuf, as_user::Bound)> {
     let dir =
         std::env::temp_dir().join(format!("rayfish-ssh-agent.{:016x}", rand::random::<u64>()));
     as_user::create_dir(Arc::clone(&info), dir.clone())
         .await
         .context("creating the agent socket directory")?;
     match as_user::listen(Arc::clone(&info), dir.join(AGENT_SOCKET)).await {
-        Ok(listener) => Ok((dir, listener)),
+        Ok(bound) => Ok((dir, bound)),
         Err(e) => {
-            remove_agent_dir(info, dir).await;
+            remove_agent_dir(info, dir, None).await;
             Err(e).context("binding the agent socket")
         }
     }
 }
 
-/// Remove an agent socket directory and the socket in it, as the login account.
-async fn remove_agent_dir(info: Arc<LoginInfo>, dir: PathBuf) {
-    let removed = match as_user::remove_socket(Arc::clone(&info), dir.join(AGENT_SOCKET)).await {
+/// Remove an agent socket directory and the socket `file` in it, as the login
+/// account.
+async fn remove_agent_dir(info: Arc<LoginInfo>, dir: PathBuf, file: Option<as_user::SocketFile>) {
+    let removed = match file {
+        Some(file) => as_user::remove_socket(Arc::clone(&info), dir.join(AGENT_SOCKET), file).await,
+        None => Ok(()),
+    };
+    let removed = match removed {
         Ok(()) => as_user::remove_dir(info, dir.clone()).await,
         Err(e) => Err(e),
     };
