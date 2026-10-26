@@ -8,6 +8,7 @@ use std::iter;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{Context, Result};
+#[cfg(test)]
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
@@ -20,6 +21,7 @@ use iroh::{
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 
 use crate::config::{AppConfig, QuicEngine, ServerOverride};
+use crate::endpoint_hints::WarmLookup;
 use crate::exit_node::{LoopPrevention, is_transitable};
 
 mod congestion;
@@ -201,7 +203,7 @@ pub async fn create_endpoint_with_alpns(
     alpns: Vec<Vec<u8>>,
     tor: bool,
     settings: &AppConfig,
-) -> Result<(Endpoint, MemoryLookup)> {
+) -> Result<(Endpoint, WarmLookup)> {
     // Bind the fixed port so the daemon is reachable on a known, forwardable UDP
     // port across restarts. The builder is consumed by `.bind()`, so we rebuild
     // it for the ephemeral fallback. Falling back to port 0 keeps the guarantee
@@ -218,7 +220,7 @@ pub async fn create_endpoint_with_alpns(
     // This lookup is intentionally additive to pkarr/mDNS, never a replacement.
     // Hints came from paths that previously completed an identity-authenticated
     // QUIC handshake; if an address has gone stale, iroh tries discovery as usual.
-    let warm_lookup = MemoryLookup::from_endpoint_info(settings.endpoint_hints.clone());
+    let warm_lookup = WarmLookup::from_hints(settings.endpoint_hints.clone())?;
     let bind = BindConfig {
         secret_key: &secret_key,
         alpns: &alpns,
@@ -259,7 +261,7 @@ struct BindConfig<'a> {
     relay: &'a ServerOverride,
     discovery: &'a ServerOverride,
     nameservers: &'a [Ipv4Addr],
-    warm_lookup: &'a MemoryLookup,
+    warm_lookup: &'a WarmLookup,
     quic_engine: QuicEngine,
 }
 

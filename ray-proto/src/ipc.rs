@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
-use iroh::{EndpointAddr, EndpointId};
+use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use iroh_tickets::{ParseError as TicketParseError, Ticket};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 #[cfg(windows)]
@@ -495,6 +495,12 @@ pub enum IpcMessage {
     /// `ray netcheck`: local endpoint diagnostics (bound port, home relay,
     /// reachability). Open read.
     Netcheck,
+    /// Inspect cached transport paths for one peer, or forget them. Inspection
+    /// is an open read; reset requires root or the configured operator.
+    EndpointHints {
+        peer: String,
+        reset: bool,
+    },
     /// Set one settings key (`config::settings`), whatever store backs it: the
     /// daemon dispatches on the key's scope, so this one variant serves
     /// `ray config set`, `ray mdns`, `ray auto-update`, `ray firewall
@@ -543,6 +549,10 @@ pub enum IpcMessage {
     },
 
     // Responses
+    EndpointHintsList {
+        peer: EndpointId,
+        hints: Vec<EndpointHintInfo>,
+    },
     Ok {
         message: String,
     },
@@ -999,6 +1009,14 @@ pub enum ManagedMachineState {
     Unauthorized,
     /// The machine was not probed.
     Unknown,
+}
+
+/// A cached, previously authenticated transport path and its age.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointHintInfo {
+    pub address: TransportAddr,
+    pub last_success: UnixTimestampSecs,
+    pub age_secs: u64,
 }
 
 /// Whole seconds since the Unix epoch.

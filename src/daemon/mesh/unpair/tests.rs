@@ -10,6 +10,7 @@ use iroh::endpoint::presets;
 
 use super::super::destruction::tests::Relay;
 use super::*;
+use crate::endpoint_hints::{self, EndpointHint};
 
 /// A daemon with a config tree of its own. Anything that reads config runs
 /// through [`Node::run`], on the node's runtime.
@@ -412,7 +413,15 @@ async fn a_restart_during_cleanup_finishes_the_unpair() {
                     cert: saved,
                     phase: UnpairPhase::Cleanup,
                 });
-                cfg.endpoint_hints = vec![hint];
+                cfg.endpoint_hints = hint
+                    .addrs
+                    .into_iter()
+                    .map(|addr| EndpointHint {
+                        peer: hint.id,
+                        addr,
+                        last_success: endpoint_hints::now().unwrap(),
+                    })
+                    .collect();
                 Ok(())
             })
             .unwrap();

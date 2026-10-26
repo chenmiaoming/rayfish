@@ -23,6 +23,7 @@ use ray_proto::ipc::{MachineHostname, UnixTimestampSecs};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::DeviceCert;
+use crate::endpoint_hints::{self, EndpointHint};
 use crate::management::EnrollmentReceipt;
 use crate::membership::GroupMode;
 
@@ -681,8 +682,12 @@ pub struct AppConfig {
     /// back to its normal discovery services when a hint is stale.  Keeping
     /// them lets a restart try a known LAN/direct path or relay immediately,
     /// before a pkarr lookup completes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub endpoint_hints: Vec<iroh::EndpointAddr>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "endpoint_hints::deserialize"
+    )]
+    pub endpoint_hints: Vec<EndpointHint>,
     /// Global toggle for the embedded mesh SSH server (`ray firewall ssh on`).
     /// When on, the daemon listens on each mesh IP's configured SSH port and admits peers
     /// authorized in a network's local or managed SSH allow list. Off by default.
@@ -962,8 +967,12 @@ struct Settings {
         deserialize_with = "deserialize_quic_engine"
     )]
     quic_engine: QuicEngine,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    endpoint_hints: Vec<iroh::EndpointAddr>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "endpoint_hints::deserialize"
+    )]
+    endpoint_hints: Vec<EndpointHint>,
     #[serde(default)]
     ssh_enabled: bool,
     #[serde(default = "default_ssh_port")]
@@ -2386,7 +2395,7 @@ mod tests {
     }
     use std::net::Ipv6Addr;
 
-    use iroh::EndpointId;
+    use iroh::{EndpointAddr, EndpointId, TransportAddr};
 
     /// `ray-mobile` used to publish its config directory by writing
     /// `RAYFISH_CONFIG_DIR`, which mutates the process environment and so is
@@ -3235,8 +3244,11 @@ name = "test"
     fn settings_endpoint_hints_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let hint =
-            iroh::EndpointAddr::new(test_id(7)).with_ip_addr("203.0.113.7:41383".parse().unwrap());
+        let hint = EndpointHint {
+            peer: test_id(7),
+            addr: TransportAddr::Ip("203.0.113.7:1234".parse().unwrap()),
+            last_success: UnixTimestampSecs::from_secs(100),
+        };
         let cfg = AppConfig {
             endpoint_hints: vec![hint.clone()],
             ..Default::default()
@@ -3245,6 +3257,46 @@ name = "test"
 
         let loaded = load_in(dir).unwrap();
         assert_eq!(loaded.endpoint_hints, vec![hint]);
+    }
+
+    #[test]
+    fn legacy_endpoint_hints_are_removed_when_startup_prunes() {
+        #[derive(Serialize)]
+        struct LegacySettings {
+            endpoint_hints: Vec<EndpointAddr>,
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = LegacySettings {
+            endpoint_hints: vec![
+                EndpointAddr::new(test_id(7))
+                    .with_ip_addr("192.0.2.1:1234".parse().unwrap())
+                    .with_relay_url("https://relay.example.com".parse().unwrap()),
+            ],
+        };
+        std::fs::write(
+            tmp.path().join(SETTINGS_FILE),
+            toml::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_in(tmp.path()).unwrap();
+        assert_eq!(loaded.endpoint_hints.len(), 2);
+        assert!(
+            loaded
+                .endpoint_hints
+                .iter()
+                .all(|hint| hint.last_success.as_secs() == 0)
+        );
+        update_settings_in(tmp.path(), |cfg| {
+            endpoint_hints::prune(&mut cfg.endpoint_hints, UnixTimestampSecs::from_secs(100));
+            Ok(())
+        })
+        .unwrap();
+        assert!(load_in(tmp.path()).unwrap().endpoint_hints.is_empty());
+        assert!(
+            !std::fs::read_to_string(tmp.path().join(SETTINGS_FILE))
+                .unwrap()
+                .contains("endpoint_hints")
+        );
     }
 
     /// The IPv6-only cutover deleted the `ipv6-only` setting, and the release

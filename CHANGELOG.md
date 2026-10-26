@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray hints <peer>` shows cached transport paths and their ages;
+  `ray hints <peer> --reset` forgets that peer's paths without restarting.
+
 - Linux: `ray rootless` runs without administrator privileges, with private state,
   authenticated SOCKS5 and HTTP proxies (including HTTPS through CONNECT),
   TCP forwarding and explicit service exposure.
@@ -27,6 +30,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   highlights the error when it fails.
 
 ### Fixed
+
+- Cached peer addresses expire after seven days, with up to eight paths per
+  peer and 64 peers in both saved hints and the running lookup. Connected paths
+  refresh hourly. Old hints without timestamps are discarded on upgrade.
 
 - Denied network join requests stop retrying, including after restart, and show
   the coordinator denial in status. Invalid credentials and unavailable networks

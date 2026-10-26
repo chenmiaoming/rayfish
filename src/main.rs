@@ -171,6 +171,7 @@ fn json_requested(command: &Command) -> bool {
         | Command::Connections { json, .. }
         | Command::Ping { json, .. }
         | Command::Netcheck { json }
+        | Command::Hints { json, .. }
         | Command::Admin { json, .. }
         | Command::Firewall { json, .. }
         | Command::Ssh { json, .. }
@@ -546,6 +547,18 @@ pub(crate) enum Command {
         #[arg(short, long, default_value_t = 1000)]
         interval: u64,
         /// Emit machine-readable JSON instead of styled text
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Inspect or forget cached transport paths for a peer
+    Hints {
+        /// Peer hostname, mesh IP, short id, or full identity
+        #[arg(add = complete::peers())]
+        peer: String,
+        /// Forget this peer's saved paths and running lookup hints
+        #[arg(long, conflicts_with = "json")]
+        reset: bool,
+        /// Emit machine-readable JSON instead of text
         #[arg(long, global = true)]
         json: bool,
     },
@@ -2003,6 +2016,11 @@ async fn run() -> Result<()> {
             json: _,
         } => ipc_ping(&peer, count, interval).await,
         Command::Netcheck { json: _ } => ipc_netcheck().await,
+        Command::Hints {
+            peer,
+            reset,
+            json: _,
+        } => ipc_endpoint_hints(&peer, reset).await,
         Command::Admin {
             network,
             action,
@@ -2273,6 +2291,19 @@ mod tests {
     use rayfish::update::{
         nightly_asset_name, normalize_version, release_asset_name, version_is_newer,
     };
+
+    #[test]
+    fn hints_accepts_peer_inspection_and_reset() {
+        let cli = Cli::try_parse_from(["ray", "hints", "build-box", "--json"]).unwrap();
+        assert!(json_requested(&cli.command));
+        assert!(
+            matches!(cli.command, Command::Hints { peer, reset: false, json: true } if peer == "build-box")
+        );
+        let cli = Cli::try_parse_from(["ray", "hints", "build-box", "--reset"]).unwrap();
+        assert!(matches!(cli.command, Command::Hints { reset: true, .. }));
+        assert!(Cli::try_parse_from(["ray", "hints"]).is_err());
+        assert!(Cli::try_parse_from(["ray", "hints", "build-box", "--reset", "--json"]).is_err());
+    }
 
     #[test]
     fn identityof_accepts_global_and_scoped_lookups() {

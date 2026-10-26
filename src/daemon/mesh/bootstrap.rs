@@ -317,7 +317,14 @@ async fn build_daemon_inner(
     forward::init_ssh_nat(my_ip, crate::forward::SSH_LISTEN_PORT);
 
     // --- iroh endpoint (one ALPN per saved network + the blobs ALPN) ---
-    let app_config = config::load()?;
+    let app_config = tokio::task::spawn_blocking(|| {
+        config::update_settings(|cfg| {
+            crate::endpoint_hints::prune(&mut cfg.endpoint_hints, crate::endpoint_hints::now()?);
+            Ok(())
+        })
+    })
+    .await
+    .context("endpoint hint cleanup task failed")??;
     // On-demand mode: the platform (mobile embedder) may force it; otherwise honor
     // config (on by default). Computed here so it can thread into the registry.
     let on_demand = overrides.on_demand.unwrap_or(app_config.on_demand);
