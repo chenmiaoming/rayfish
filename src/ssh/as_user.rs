@@ -199,7 +199,7 @@ async fn run_gated(
 /// Fork, become the account, do `op`, and collect its result, killing the
 /// helper if it has not answered within `deadline`.
 fn run(info: &LoginInfo, path: &Path, op: Op, deadline: Duration) -> Result<Answer> {
-    let mut become_user = drop_privs(info.uid, info.gid, &info.name)?;
+    let mut become_user = drop_privs(info)?;
     let c_path = CString::new(path.as_os_str().as_bytes()).context("path contains NUL")?;
     let addr = match op {
         Op::Connect | Op::Listen => Some(SocketAddr::new(&c_path)?),
