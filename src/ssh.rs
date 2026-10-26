@@ -128,8 +128,9 @@ const MAX_SESSIONS: usize = 10;
 /// may hold at once.
 const MAX_REVERSE_FORWARDS: usize = 32;
 
-/// Forwarded connections (`ssh -L`, `-D`, `ProxyJump`) one connection may
-/// carry at once. A browser behind `-D` opens dozens, not hundreds.
+/// Forwarded connections (`ssh -L`, `-D`, `ProxyJump`, and connections
+/// accepted on `-R` and agent sockets) one connection may carry at once. A
+/// browser behind `-D` opens dozens, not hundreds.
 const MAX_FORWARDED_CHANNELS: usize = 256;
 
 /// SSH connections the server holds at once, across every peer and listener.
@@ -268,6 +269,18 @@ impl SshServer {
             }
         });
     }
+}
+
+/// A slot under a connection's [`MAX_FORWARDED_CHANNELS`], shared by `-L` and
+/// by connections accepted on its `-R` and agent sockets, or `None` at the
+/// limit.
+fn forwarded_slot(slots: &Arc<Semaphore>, peer: EndpointId) -> Option<OwnedSemaphorePermit> {
+    let slot = Arc::clone(slots).try_acquire_owned().ok();
+    if slot.is_none() {
+        warn!(peer = %peer.fmt_short(), limit = MAX_FORWARDED_CHANNELS,
+            "mesh SSH: refusing a forwarded connection past the limit");
+    }
+    slot
 }
 
 /// Turn off Nagle on an SSH-carrying socket.
@@ -648,17 +661,14 @@ impl SshHandler {
 
     /// A slot for one more forwarded connection, or `None` at the limit.
     fn forwarded_slot(&self) -> Option<OwnedSemaphorePermit> {
-        let slot = Arc::clone(&self.forwarded).try_acquire_owned().ok();
-        if slot.is_none() {
-            warn!(peer = %self.user.fmt_short(), limit = MAX_FORWARDED_CHANNELS,
-                "mesh SSH: refusing a forwarded connection past the limit");
-        }
-        slot
+        forwarded_slot(&self.forwarded, self.user)
     }
 
-    /// Whether this connection may open one more reverse forward.
-    fn reverse_forward_room(&self) -> bool {
-        let room = self.forwards.len() + self.socket_forwards.len() < MAX_REVERSE_FORWARDS;
+    /// Whether this connection may open one more reverse forward. Replacing
+    /// one it already holds (`replacing`) always fits.
+    fn reverse_forward_room(&self, replacing: bool) -> bool {
+        let room =
+            replacing || self.forwards.len() + self.socket_forwards.len() < MAX_REVERSE_FORWARDS;
         if !room {
             warn!(peer = %self.user.fmt_short(), limit = MAX_REVERSE_FORWARDS,
                 "mesh SSH: refusing a reverse forward past the limit");
@@ -935,7 +945,7 @@ impl Handler for SshHandler {
         let Some(info) = self.authorized_login() else {
             return Ok(false);
         };
-        if !self.reverse_forward_room() {
+        if !self.reverse_forward_room(self.forwards.contains_key(&(address.to_string(), *port))) {
             return Ok(false);
         }
         let Ok(requested) = u16::try_from(*port) else {
@@ -976,6 +986,7 @@ impl Handler for SshHandler {
         // address it asked to have bound, so echo that back rather than the
         // address we narrowed it to.
         let advertised = address.to_string();
+        let slots = Arc::clone(&self.forwarded);
         tokio::spawn(async move {
             loop {
                 let (sock, origin) = tokio::select! {
@@ -988,10 +999,14 @@ impl Handler for SshHandler {
                         }
                     },
                 };
+                let Some(slot) = forwarded_slot(&slots, peer) else {
+                    continue;
+                };
                 disable_nagle(&sock);
                 let handle = handle.clone();
                 let advertised = advertised.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     let opened = handle
                         .channel_open_forwarded_tcpip(
                             advertised,
@@ -1039,7 +1054,7 @@ impl Handler for SshHandler {
         let Some(info) = self.authorized_login() else {
             return Ok(false);
         };
-        if !self.reverse_forward_room() {
+        if !self.reverse_forward_room(self.socket_forwards.contains_key(socket_path)) {
             return Ok(false);
         }
         // Bound by the login account itself, so it lands only where that
@@ -1072,6 +1087,7 @@ impl Handler for SshHandler {
         let handle = session.handle();
         let peer = self.user;
         let advertised = socket_path.to_string();
+        let slots = Arc::clone(&self.forwarded);
         tokio::spawn(async move {
             loop {
                 let (sock, _) = tokio::select! {
@@ -1084,9 +1100,13 @@ impl Handler for SshHandler {
                         }
                     },
                 };
+                let Some(slot) = forwarded_slot(&slots, peer) else {
+                    continue;
+                };
                 let handle = handle.clone();
                 let advertised = advertised.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     match handle.channel_open_forwarded_streamlocal(advertised).await {
                         Ok(channel) => splice(channel, handle, sock).await,
                         Err(e) => debug!(peer = %peer.fmt_short(), error = %e,
@@ -1149,6 +1169,7 @@ impl Handler for SshHandler {
         let accept_token = token.clone();
         let socket = path.clone();
         let handle = session.handle();
+        let slots = Arc::clone(&self.forwarded);
         tokio::spawn(async move {
             loop {
                 let (sock, _) = tokio::select! {
@@ -1161,8 +1182,12 @@ impl Handler for SshHandler {
                         }
                     },
                 };
+                let Some(slot) = forwarded_slot(&slots, peer) else {
+                    continue;
+                };
                 let handle = handle.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     match handle.channel_open_agent().await {
                         Ok(channel) => splice(channel, handle, sock).await,
                         Err(e) => debug!(peer = %peer.fmt_short(), error = %e,
@@ -2342,6 +2367,63 @@ mod tests {
             handle.tcpip_forward("localhost", 0).await.is_err(),
             "a reverse forward past the limit must be refused"
         );
+    }
+
+    #[tokio::test]
+    async fn a_held_socket_forward_can_be_replaced_at_the_limit() {
+        // Re-requesting a forward the connection already holds replaces it;
+        // it does not count as one more.
+        let handle = connect_to_test_server().await;
+        for _ in 1..MAX_REVERSE_FORWARDS {
+            handle
+                .tcpip_forward("localhost", 0)
+                .await
+                .expect("a reverse forward within the limit");
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("r.sock").display().to_string();
+        handle
+            .streamlocal_forward(path.clone())
+            .await
+            .expect("the last forward within the limit");
+        handle
+            .streamlocal_forward(path)
+            .await
+            .expect("replacing a held forward at the limit");
+    }
+
+    #[tokio::test]
+    async fn a_reverse_forward_cannot_carry_unbounded_connections() {
+        // Anyone on this host can connect to a `-R` port; each connection
+        // becomes a channel to the client, under the same cap as `-L`.
+        let (handle, mut opened) = connect_and_watch_openings().await;
+        let port = handle
+            .tcpip_forward("localhost", 0)
+            .await
+            .expect("reverse forward request");
+        let mut held = Vec::new();
+        let mut channels = Vec::new();
+        for _ in 0..MAX_FORWARDED_CHANNELS {
+            held.push(
+                TcpStream::connect((Ipv4Addr::LOCALHOST, port as u16))
+                    .await
+                    .expect("connect"),
+            );
+            channels.push(
+                timeout(Duration::from_secs(20), opened.recv())
+                    .await
+                    .expect("no forwarded channel")
+                    .expect("connection dropped"),
+            );
+        }
+        let mut extra = TcpStream::connect((Ipv4Addr::LOCALHOST, port as u16))
+            .await
+            .expect("connect");
+        let mut byte = [0u8; 1];
+        let read = timeout(Duration::from_secs(20), extra.read(&mut byte))
+            .await
+            .expect("a connection past the limit must be closed");
+        assert!(matches!(read, Ok(0) | Err(_)));
     }
 
     #[tokio::test]
