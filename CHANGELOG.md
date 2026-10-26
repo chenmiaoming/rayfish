@@ -8,9 +8,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `ray hints <peer>` shows cached transport paths and their ages;
-  `ray hints <peer> --reset` forgets that peer's paths without restarting.
-
 - Linux: `ray rootless` runs without administrator privileges, with private state,
   authenticated SOCKS5 and HTTP proxies (including HTTPS through CONNECT),
   TCP forwarding and explicit service exposure.

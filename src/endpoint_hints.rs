@@ -1,5 +1,6 @@
 //! Successful transport paths, bounded by age, peer count and paths per peer.
 //! Untimestamped legacy hints are discarded during startup.
+//! The daemon maintains this cache automatically to keep the CLI minimal.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -109,16 +110,13 @@ impl WarmLookup {
         })
     }
 
-    pub(crate) fn snapshot(&self, now: UnixTimestampSecs) -> Vec<EndpointHint> {
+    fn snapshot(&self, now: UnixTimestampSecs) -> Vec<EndpointHint> {
         let mut hints = self.hints.read().unwrap_or_else(|e| e.into_inner()).clone();
         prune(&mut hints, now);
         hints
     }
 
-    pub(crate) fn update(
-        &self,
-        update: impl FnOnce(&mut Vec<EndpointHint>, UnixTimestampSecs),
-    ) -> Result<()> {
+    fn update(&self, update: impl FnOnce(&mut Vec<EndpointHint>, UnixTimestampSecs)) -> Result<()> {
         let _guard = self.updates.lock().unwrap_or_else(|e| e.into_inner());
         let now = now()?;
         let saved = config::update_settings(|cfg| {
@@ -139,10 +137,6 @@ impl WarmLookup {
                 last_success: now,
             });
         })
-    }
-
-    pub(crate) fn forget(&self, peer: EndpointId) -> Result<()> {
-        self.update(|hints, _| hints.retain(|hint| hint.peer != peer))
     }
 
     #[cfg(test)]
@@ -314,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_and_live_lookup_share_limits_and_peer_scoped_reset() {
+    fn persistence_and_live_lookup_share_limits_across_restart() {
         let _lock = config::CONFIG_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -350,11 +344,9 @@ mod tests {
             config::load().unwrap().endpoint_hints
         );
 
-        lookup.forget(peer(65)).unwrap();
-        assert!(lookup.resolve(peer(65)).is_none());
-        assert!(lookup.resolve(peer(64)).is_some());
         let reloaded = WarmLookup::from_hints(config::load().unwrap().endpoint_hints).unwrap();
-        assert!(reloaded.resolve(peer(65)).is_none());
+        assert!(reloaded.resolve(peer(1)).is_none());
+        assert!(reloaded.resolve(peer(65)).is_some());
         assert!(reloaded.resolve(peer(64)).is_some());
     }
 
@@ -367,28 +359,32 @@ mod tests {
         let fresh = hint(peer(1), 1000, now().unwrap().as_secs());
         let lookup = WarmLookup::from_hints(vec![fresh.clone()]).unwrap();
         std::fs::write(config.directory.path().join("settings.toml"), "invalid = [").unwrap();
-        assert!(lookup.forget(peer(1)).is_err());
+        assert!(
+            lookup
+                .remember(peer(2), hint(peer(2), 1001, 1).addr)
+                .is_err()
+        );
         assert_eq!(lookup.snapshot(now().unwrap()), vec![fresh]);
     }
 
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn daemon_inspection_and_reset_survive_restart() {
-        use crate::daemon::{PeerIdentity, build_headless};
-        use crate::ipc::IpcMessage;
+    async fn daemon_startup_prunes_expired_paths_across_restart() {
+        use crate::daemon::build_headless;
 
         let _lock = config::CONFIG_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let _config = TestConfig::new();
         let timestamp = now().unwrap().as_secs();
+        let expired = hint(peer(1), 1000, timestamp - MAX_AGE.as_secs());
         let fresh = hint(peer(1), 1001, timestamp);
         config::update_settings(|cfg| {
             cfg.mdns_enabled = false;
             cfg.dns_mode = config::DnsMode::Off;
             cfg.endpoint_hints = vec![
-                hint(peer(1), 1000, timestamp - MAX_AGE.as_secs()),
+                expired.clone(),
                 fresh.clone(),
                 hint(peer(2), 1002, timestamp),
             ];
@@ -396,40 +392,14 @@ mod tests {
         })
         .unwrap();
         let daemon = build_headless(true).await.unwrap();
-        assert_eq!(config::load().unwrap().endpoint_hints.len(), 2);
-        let request = |reset| IpcMessage::EndpointHints {
-            peer: peer(1).to_string(),
-            reset,
-        };
-        let response = daemon.handle_request(request(false), None, vec![]).await;
-        let IpcMessage::EndpointHintsList { peer: id, hints } = response else {
-            panic!("expected cached endpoint hints");
-        };
-        assert_eq!(id, peer(1));
-        assert_eq!(hints.len(), 1);
-        assert_eq!(hints[0].address, fresh.addr);
-        assert_eq!(hints[0].last_success, fresh.last_success);
-        assert!(matches!(
-            daemon.handle_request(request(true), None, vec![]).await,
-            IpcMessage::Error { .. }
-        ));
-        let root = Some(PeerIdentity::Unix { uid: 0, gid: 0 });
-        assert!(matches!(
-            daemon.handle_request(request(true), root, vec![]).await,
-            IpcMessage::Ok { .. }
-        ));
-        let response = daemon.handle_request(request(false), None, vec![]).await;
-        assert!(
-            matches!(response, IpcMessage::EndpointHintsList { hints, .. } if hints.is_empty())
-        );
-        assert_eq!(config::load().unwrap().endpoint_hints.len(), 1);
+        let saved = config::load().unwrap().endpoint_hints;
+        assert_eq!(saved.len(), 2);
+        assert!(saved.contains(&fresh));
+        assert!(!saved.contains(&expired));
         daemon.shutdown_and_close().await;
 
         let daemon = build_headless(true).await.unwrap();
-        let response = daemon.handle_request(request(false), None, vec![]).await;
-        assert!(
-            matches!(response, IpcMessage::EndpointHintsList { hints, .. } if hints.is_empty())
-        );
+        assert_eq!(config::load().unwrap().endpoint_hints, saved);
         daemon.shutdown_and_close().await;
     }
 }

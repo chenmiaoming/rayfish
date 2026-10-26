@@ -8,43 +8,6 @@ use iroh::EndpointId;
 
 use crate::*;
 
-#[derive(serde::Serialize)]
-struct HintsOutput {
-    peer: EndpointId,
-    hints: Vec<ipc::EndpointHintInfo>,
-}
-
-impl DisplayOut for HintsOutput {
-    fn print_human(&self) {
-        if self.hints.is_empty() {
-            println!("No cached paths for {}", self.peer);
-        }
-        for hint in &self.hints {
-            println!("{}  last worked {}s ago", hint.address, hint.age_secs);
-        }
-    }
-}
-
-pub(crate) async fn ipc_endpoint_hints(peer: &str, reset: bool) -> Result<()> {
-    let request = ipc::IpcMessage::EndpointHints {
-        peer: peer.to_owned(),
-        reset,
-    };
-    if reset {
-        return ipc_mutate(request).await;
-    }
-    let mut stream = ipc::connect().await.context("daemon is not running")?;
-    ipc::send(&mut stream, request).await?;
-    match ipc::recv(&mut stream).await? {
-        ipc::IpcMessage::EndpointHintsList { peer, hints } => {
-            printout(&HintsOutput { peer, hints })?;
-        }
-        ipc::IpcMessage::Error { message } => fail_with("error", &message),
-        other => fail_unexpected(&other),
-    }
-    Ok(())
-}
-
 struct ManagedMachineStateOutput(ipc::ManagedMachineState);
 
 impl fmt::Display for ManagedMachineStateOutput {

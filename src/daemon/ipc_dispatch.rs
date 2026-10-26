@@ -3,46 +3,6 @@
 use super::*;
 
 impl Daemon {
-    async fn endpoint_hints(&self, name: &str, reset: bool) -> IpcMessage {
-        let peer = match name.parse::<EndpointId>() {
-            Ok(peer) => peer,
-            Err(_) => match self.registry.resolve_peer_flexible(name).await {
-                Some(peer) => peer,
-                None => return ipc_err(format!("unknown peer '{name}'")),
-            },
-        };
-        let lookup = self.transport.warm_lookup.clone();
-        if reset {
-            match tokio::task::spawn_blocking(move || lookup.forget(peer)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    return ipc_err(format!("failed to forget endpoint hints: {error}"));
-                }
-                Err(error) => return ipc_err(format!("endpoint hint reset task failed: {error}")),
-            }
-            return IpcMessage::Ok {
-                message: format!("forgot endpoint hints for {peer}"),
-            };
-        }
-        let now = match crate::endpoint_hints::now() {
-            Ok(now) => now,
-            Err(error) => return ipc_err(error.to_string()),
-        };
-        let hints = lookup
-            .snapshot(now)
-            .into_iter()
-            .rev()
-            .filter(|hint| hint.peer == peer)
-            .map(|hint| ipc::EndpointHintInfo {
-                address: hint.addr,
-                last_success: hint.last_success,
-                // snapshot excludes future timestamps.
-                age_secs: now.as_secs() - hint.last_success.as_secs(),
-            })
-            .collect();
-        IpcMessage::EndpointHintsList { peer, hints }
-    }
-
     pub(crate) fn is_open_read(req: &IpcMessage) -> bool {
         matches!(
             req,
@@ -61,7 +21,6 @@ impl Daemon {
                 | IpcMessage::Requests { .. }
                 | IpcMessage::Ping { .. }
                 | IpcMessage::Netcheck
-                | IpcMessage::EndpointHints { reset: false, .. }
                 | IpcMessage::AliasList { .. }
                 | IpcMessage::ListPairedDevices
                 | IpcMessage::MachineEnrollmentList
@@ -745,7 +704,6 @@ impl Daemon {
             }
             IpcMessage::SetOperator { uid } => self.set_operator(uid),
             IpcMessage::ListLanPeers => self.list_lan_peers(),
-            IpcMessage::EndpointHints { peer, reset } => self.endpoint_hints(&peer, reset).await,
             IpcMessage::ConfigSet {
                 key,
                 value,
@@ -856,27 +814,6 @@ fn rootless_request_supported(req: &IpcMessage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn endpoint_hint_inspection_is_open_but_reset_needs_authorization() {
-        let read = IpcMessage::EndpointHints {
-            peer: "build-box".into(),
-            reset: false,
-        };
-        let reset = IpcMessage::EndpointHints {
-            peer: "build-box".into(),
-            reset: true,
-        };
-        assert!(Daemon::is_open_read(&read));
-        assert!(Daemon::check_authorized(&read, None).is_none());
-        assert!(!Daemon::is_open_read(&reset));
-        assert!(Daemon::check_authorized(&reset, None).is_some());
-        #[cfg(unix)]
-        assert!(
-            Daemon::check_authorized(&reset, Some(&PeerIdentity::Unix { uid: 0, gid: 0 }))
-                .is_none()
-        );
-    }
 
     #[test]
     fn rootless_rejects_host_network_mutations() {
