@@ -72,6 +72,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer allowed to log in as an ordinary account could reach root-only sockets
   and gain root on the host. Non-root accounts can no longer reverse-forward
   privileged ports, and sessions, forwards and connections are capped.
+- Mesh SSH: a forward into this host's own SSH port (`ssh -J`, or `ssh -L`
+  to it) is no longer taken for a local login by root. Before, any peer
+  allowed an ordinary login could reach a root shell that way.
 
 ## [0.5.10] - 2026-10-19
 

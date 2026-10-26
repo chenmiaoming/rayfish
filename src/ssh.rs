@@ -1696,9 +1696,11 @@ mod tests {
             .to_string()
     }
 
+    /// Run a self-SSH server on loopback that admits each connection the way
+    /// the daemon does: as the local uid owning the client socket, or not at
+    /// all. Returns the address clients dial.
     #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn self_ssh_authenticates_the_socket_owner_and_executes() -> Result<()> {
+    fn spawn_self_ssh_server() -> Result<SocketAddr> {
         let mesh = local::bind(Ipv6Addr::LOCALHOST, 0)?;
         let local = local::bind(Ipv6Addr::LOCALHOST, 0)?;
         let address = local.local_addr()?;
@@ -1706,20 +1708,15 @@ mod tests {
             &mut rand::rng(),
             Algorithm::Ed25519,
         )?));
-        let attempts = if uzers::get_effective_uid() == 0 {
-            1
-        } else {
-            2
-        };
         tokio::spawn(async move {
-            for _ in 0..attempts {
-                let (stream, client) = local::accept(&mesh, Some(&local))
-                    .await
-                    .expect("accept self-SSH");
+            loop {
+                let Ok((stream, client)) = local::accept(&mesh, Some(&local)).await else {
+                    return;
+                };
                 let server = stream.local_addr().expect("server address");
-                let uid = local::uid(client, server)
-                    .await
-                    .expect("live local socket owner");
+                let Some(uid) = local::uid(client, server).await else {
+                    continue;
+                };
                 let handler = SshHandler::new(
                     UserPolicy::local(uid),
                     id(1),
@@ -1729,27 +1726,80 @@ mod tests {
                 tokio::spawn(serve(Arc::clone(&config), stream, handler, LOGIN_GRACE));
             }
         });
-        if attempts == 2 {
-            let mut denied = client::connect(
-                Arc::new(client::Config::default()),
-                address,
-                AcceptAnyHost { opened: None },
-            )
-            .await?;
-            assert!(!denied.authenticate_none("root").await?.success());
-        }
-        let mut handle = client::connect(
+        Ok(address)
+    }
+
+    /// An SSH client to `address` whose TCP socket belongs to an `nc` child,
+    /// as a real self-SSH client's does. `None` without `nc`.
+    #[cfg(target_os = "linux")]
+    async fn self_ssh_client(
+        address: SocketAddr,
+    ) -> Result<Option<(tokio::process::Child, client::Handle<AcceptAnyHost>)>> {
+        let Some(mut nc) = local::tests::nc_client(address) else {
+            return Ok(None);
+        };
+        let stdout = nc.stdout.take().expect("piped stdout");
+        let stdin = nc.stdin.take().expect("piped stdin");
+        let handle = client::connect_stream(
             Arc::new(client::Config::default()),
-            address,
+            tokio::io::join(stdout, stdin),
             AcceptAnyHost { opened: None },
         )
         .await?;
+        Ok(Some((nc, handle)))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn self_ssh_authenticates_the_socket_owner_and_executes() -> Result<()> {
+        let address = spawn_self_ssh_server()?;
+        if uzers::get_effective_uid() != 0 {
+            let Some((_nc, mut denied)) = self_ssh_client(address).await? else {
+                return Ok(());
+            };
+            assert!(!denied.authenticate_none("root").await?.success());
+        }
+        let Some((_nc, mut handle)) = self_ssh_client(address).await? else {
+            return Ok(());
+        };
         assert!(handle.authenticate_none(test_account()).await?.success());
         let mut channel = handle.channel_open_session().await?;
         channel.exec(true, "printf self-ssh-ok").await?;
         let (output, code) = drain(&mut channel).await;
         assert_eq!(output, "self-ssh-ok");
         assert_eq!(code, Some(0));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_forward_into_self_ssh_is_not_a_login_as_the_daemon() -> Result<()> {
+        // `ssh -J host host` or `-L` to this host's own SSH port: the daemon
+        // dials it as root, and must not be taken for a local root client.
+        let address = spawn_self_ssh_server()?;
+        let peer = connect_to_test_server().await;
+        let tunnel = peer
+            .channel_open_direct_tcpip(
+                address.ip().to_string(),
+                address.port().into(),
+                "127.0.0.1",
+                1,
+            )
+            .await?;
+        let attempt = client::connect_stream(
+            Arc::new(client::Config::default()),
+            tunnel.into_stream(),
+            AcceptAnyHost { opened: None },
+        )
+        .await;
+        let admitted = match attempt {
+            Ok(mut handle) => matches!(
+                handle.authenticate_none(test_account()).await,
+                Ok(result) if result.success()
+            ),
+            Err(_) => false,
+        };
+        assert!(!admitted, "a daemon-dialed connection logged in");
         Ok(())
     }
 
