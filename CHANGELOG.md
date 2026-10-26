@@ -65,6 +65,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   be tried again. A primary on an older release gets the earlier one-shot
   request.
 
+### Security
+
+- Mesh SSH: unix-socket forwarding (`ssh -L` and `-R` to a socket path) and
+  agent forwarding now act as the login account instead of as root. Before, a
+  peer allowed to log in as an ordinary account could reach root-only sockets
+  and gain root on the host. Non-root accounts can no longer reverse-forward
+  privileged ports, and sessions, forwards and connections are capped.
+
 ## [0.5.10] - 2026-10-19
 
 ### Added
