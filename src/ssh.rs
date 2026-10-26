@@ -136,8 +136,8 @@ const MAX_FORWARDED_CHANNELS: usize = 256;
 /// Past this, new connections are closed on accept.
 const MAX_CONNECTIONS: usize = 256;
 
-/// SSH connections one source address may hold at once, so a single peer
-/// cannot fill [`MAX_CONNECTIONS`] for everyone else.
+/// SSH connections one mesh peer, or one local account, may hold at once, so
+/// a single source cannot fill [`MAX_CONNECTIONS`] for everyone else.
 const MAX_CONNECTIONS_PER_SOURCE: usize = 16;
 
 /// How long a `ssh -L` / `-D` forwarded connection may take to reach its target
@@ -245,17 +245,20 @@ impl SshServer {
                                     Ok(p) => p,
                                     Err(e) => { debug!(error = %e, "mesh SSH accept failed"); continue; }
                                 };
-                                let Some(slot) = slots.try_acquire(peer.ip()) else {
+                                let Some(slot) = slots.admit() else {
                                     warn!(%peer, "mesh SSH: refusing a connection past the connection limit");
                                     continue;
                                 };
                                 disable_nagle(&stream);
-                                let config = Arc::clone(&config);
-                                let registry = Arc::clone(&registry);
-                                let authz = Arc::clone(&authz);
+                                let conn = ConnContext {
+                                    config: Arc::clone(&config),
+                                    registry: Arc::clone(&registry),
+                                    authz: Arc::clone(&authz),
+                                    slots: Arc::clone(&slots),
+                                };
                                 tokio::spawn(async move {
                                     let _slot = slot;
-                                    handle_conn(stream, peer, config, registry, authz).await;
+                                    handle_conn(stream, peer, conn).await;
                                 });
                             }
                         }
@@ -293,25 +296,36 @@ struct SshAuthorization {
     banner: Option<String>,
 }
 
-/// Resolve the connecting peer, decide authorization, and run the SSH session.
-async fn handle_conn(
-    stream: TcpStream,
-    peer: SocketAddr,
+/// What every accepted connection needs from the server.
+struct ConnContext {
     config: Arc<Config>,
     registry: Arc<NetworkRegistry>,
     authz: SshAuthz,
-) {
+    slots: Arc<slots::ConnectionSlots>,
+}
+
+/// Resolve the connecting peer, decide authorization, and run the SSH session.
+async fn handle_conn(stream: TcpStream, peer: SocketAddr, conn: ConnContext) {
+    let ConnContext {
+        config,
+        registry,
+        authz,
+        slots,
+    } = conn;
     // The mesh listener only ever binds our own overlay address, so a session
     // arrives over IPv6 or it is not a mesh session at all.
     let IpAddr::V6(src) = peer.ip() else {
         debug!(peer = %peer.ip(), "mesh SSH: non-IPv6 source on the mesh listener, dropping");
         return;
     };
-    let SshAuthorization {
-        user_identity,
-        policy,
-        banner,
-    } = if src == registry.transport.identity.local_ipv6() {
+    let (
+        source,
+        SshAuthorization {
+            user_identity,
+            policy,
+            banner,
+        },
+    ) = if src == registry.transport.identity.local_ipv6() {
         let Ok(server) = stream.local_addr() else {
             return;
         };
@@ -319,11 +333,12 @@ async fn handle_conn(
             debug!(%src, "mesh SSH: cannot identify local socket owner, dropping");
             return;
         };
-        SshAuthorization {
+        let authorization = SshAuthorization {
             user_identity: registry.transport.identity.local_identity(),
             policy: UserPolicy::local(uid),
             banner: None,
-        }
+        };
+        (slots::Source::LocalUid(uid), authorization)
     } else {
         let Some(peer_id) = registry.peers.identity_for_ip(&src) else {
             debug!(%src, "mesh SSH: connection from unknown mesh IP, dropping");
@@ -339,11 +354,17 @@ async fn handle_conn(
         let policy =
             resolve_user_policy_with_hostnames(&authz, &user_identity, &networks, &resolve);
         let banner = auth_banner(&policy, &user_identity, &networks);
-        SshAuthorization {
+        let authorization = SshAuthorization {
             user_identity,
             policy,
             banner,
-        }
+        };
+        (slots::Source::Peer(peer_id), authorization)
+    };
+    let Some(_source_slot) = slots.claim(source) else {
+        warn!(%src, peer = %user_identity.fmt_short(), limit = MAX_CONNECTIONS_PER_SOURCE,
+            "mesh SSH: refusing a connection past the per-source limit");
+        return;
     };
     // Logged before the handshake, and with the source port, so a session that
     // stalls before it authenticates (and so logs nothing else) is still
@@ -1400,8 +1421,10 @@ const AGENT_SOCKET: &str = "agent.sock";
 /// follows a path that account can change. The directory name is random and
 /// created exclusively, so nothing can be waiting at the path.
 async fn open_agent_socket(info: Arc<LoginInfo>) -> Result<(PathBuf, as_user::Bound)> {
+    // `/tmp`, as sshd uses, not `temp_dir()`: on macOS that is the daemon's
+    // own per-user directory, which the login account cannot enter.
     let dir =
-        std::env::temp_dir().join(format!("rayfish-ssh-agent.{:016x}", rand::random::<u64>()));
+        PathBuf::from("/tmp").join(format!("rayfish-ssh-agent.{:016x}", rand::random::<u64>()));
     as_user::create_dir(Arc::clone(&info), dir.clone())
         .await
         .context("creating the agent socket directory")?;
@@ -2481,7 +2504,7 @@ mod tests {
         }
         let path = path.trim().to_string();
         assert!(
-            path.contains("rayfish-ssh-agent"),
+            path.starts_with("/tmp/rayfish-ssh-agent."),
             "the session's SSH_AUTH_SOCK: {path:?}"
         );
 

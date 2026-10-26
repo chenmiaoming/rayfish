@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
 
 use super::login::LoginInfo;
 use super::session_env::drop_privs;
@@ -35,6 +36,14 @@ const LISTEN_BACKLOG: libc::c_int = 128;
 /// path the account controls can block forever (a FUSE mount that never
 /// answers), and the waiting thread belongs to tokio's shared blocking pool.
 const HELPER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Helpers running at once across every connection. Each holds a thread of
+/// tokio's shared blocking pool for up to [`HELPER_DEADLINE`], and the login
+/// account can stall its own helpers, so without a cap a few thousand
+/// forwards would starve everything else in the daemon that uses that pool.
+const MAX_HELPERS: usize = 32;
+
+static HELPERS: Semaphore = Semaphore::const_new(MAX_HELPERS);
 
 /// The filesystem identity of a socket file a helper bound, so cleanup removes
 /// that file and not a newer socket bound at the same path since.
@@ -111,11 +120,30 @@ pub(super) async fn remove_dir(info: Arc<LoginInfo>, path: PathBuf) -> Result<()
 }
 
 async fn run_blocking(info: Arc<LoginInfo>, path: PathBuf, op: Op) -> Result<Answer> {
+    run_gated(&HELPERS, info, path, op).await
+}
+
+/// Wait for a place under `limit`, then run `op` in a helper. A caller that
+/// gives up while queued frees its turn; a running helper keeps its place
+/// until it has been reaped.
+async fn run_gated(
+    limit: &'static Semaphore,
+    info: Arc<LoginInfo>,
+    path: PathBuf,
+    op: Op,
+) -> Result<Answer> {
     let shown = path.display().to_string();
-    tokio::task::spawn_blocking(move || run(&info, &path, op, HELPER_DEADLINE))
+    let place = limit
+        .acquire()
         .await
-        .context("socket helper task failed")?
-        .with_context(|| format!("{shown} as the login account"))
+        .context("socket helper limit closed")?;
+    tokio::task::spawn_blocking(move || {
+        let _place = place;
+        run(&info, &path, op, HELPER_DEADLINE)
+    })
+    .await
+    .context("socket helper task failed")?
+    .with_context(|| format!("{shown} as the login account"))
 }
 
 /// Fork, become the account, do `op`, and collect its result, killing the
@@ -517,6 +545,28 @@ mod tests {
             .expect("the helper never answers");
         let io = err.downcast_ref::<Error>().expect("an io error");
         assert_eq!(io.kind(), ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn helpers_wait_for_a_free_place() {
+        // Helpers occupy blocking-pool threads, so how many run at once is
+        // capped across every connection; the rest queue.
+        static ONE: Semaphore = Semaphore::const_new(1);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("missing.sock");
+        let held = ONE.acquire().await.expect("the only place");
+        let waiting = run_gated(&ONE, me(), missing, Op::Connect);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut waiting)
+                .await
+                .is_err(),
+            "a helper ran without a free place"
+        );
+        drop(held);
+        let err = waiting.await.err().expect("nothing listens there");
+        let io = err.downcast_ref::<Error>().expect("an io error");
+        assert_eq!(io.kind(), ErrorKind::NotFound);
     }
 
     #[tokio::test]

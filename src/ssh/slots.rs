@@ -1,18 +1,26 @@
 //! Limits on concurrent mesh SSH connections.
 //!
-//! A slot is taken on accept, before authentication, so the limits have to
-//! hold against peers that will never log in. A global cap alone lets one
-//! source hold every slot through the login grace and reconnect, so each
-//! source address also has its own, smaller cap. Mesh addresses are bound to
-//! peer identities by the forwarding path's anti-spoof check.
+//! A connection is admitted against the total on accept, before anything is
+//! known about it, so that cap has to hold against peers that will never log
+//! in. A total alone lets one source hold every place through the login grace
+//! and reconnect, so once the connection is identified it also claims a place
+//! under its source: the mesh peer it came from, or for self-SSH the local uid
+//! that owns the client socket (every local account shares one address).
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
+use iroh::EndpointId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-type Counts = Arc<Mutex<HashMap<IpAddr, usize>>>;
+/// Who a connection counts against.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Source {
+    Peer(EndpointId),
+    LocalUid(u32),
+}
+
+type Counts = Arc<Mutex<HashMap<Source, usize>>>;
 
 pub(super) struct ConnectionSlots {
     total: Arc<Semaphore>,
@@ -20,10 +28,9 @@ pub(super) struct ConnectionSlots {
     counts: Counts,
 }
 
-/// One accepted connection's place; dropping it frees the place.
-pub(super) struct ConnectionSlot {
-    _total: OwnedSemaphorePermit,
-    source: IpAddr,
+/// A connection's place under its source; dropping it frees the place.
+pub(super) struct SourceSlot {
+    source: Source,
     counts: Counts,
 }
 
@@ -36,25 +43,27 @@ impl ConnectionSlots {
         }
     }
 
-    /// A slot for a connection from `source`, or `None` when either that
-    /// source or the server as a whole is at its limit.
-    pub(super) fn try_acquire(&self, source: IpAddr) -> Option<ConnectionSlot> {
+    /// A place among all connections, or `None` when the server is full.
+    pub(super) fn admit(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.total).try_acquire_owned().ok()
+    }
+
+    /// A place under `source`, or `None` when that source is at its limit.
+    pub(super) fn claim(&self, source: Source) -> Option<SourceSlot> {
         let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
-        let count = counts.entry(source).or_default();
-        if *count >= self.per_source {
+        let count = counts.get(&source).copied().unwrap_or(0);
+        if count >= self.per_source {
             return None;
         }
-        let total = Arc::clone(&self.total).try_acquire_owned().ok()?;
-        *count += 1;
-        Some(ConnectionSlot {
-            _total: total,
+        counts.insert(source, count + 1);
+        Some(SourceSlot {
             source,
             counts: Arc::clone(&self.counts),
         })
     }
 }
 
-impl Drop for ConnectionSlot {
+impl Drop for SourceSlot {
     fn drop(&mut self) {
         let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(count) = counts.get_mut(&self.source) {
@@ -68,41 +77,52 @@ impl Drop for ConnectionSlot {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv6Addr;
-
     use super::*;
 
-    fn ip(last: u16) -> IpAddr {
-        IpAddr::V6(Ipv6Addr::new(0x200, 0, 0, 0, 0, 0, 0, last))
+    fn peer(seed: u8) -> Source {
+        let mut b = [0u8; 32];
+        b[0] = seed;
+        Source::Peer(iroh::SecretKey::from(b).public())
     }
 
     #[test]
-    fn one_source_cannot_take_every_slot() {
+    fn one_source_cannot_take_every_place() {
         let slots = ConnectionSlots::new(8, 2);
-        let held: Vec<_> = (0..2).map(|_| slots.try_acquire(ip(1))).collect();
+        let held: Vec<_> = (0..2).map(|_| slots.claim(peer(1))).collect();
         assert!(held.iter().all(Option::is_some));
-        assert!(slots.try_acquire(ip(1)).is_none(), "past the source cap");
+        assert!(slots.claim(peer(1)).is_none(), "past the source cap");
+        assert!(slots.claim(peer(2)).is_some(), "another peer still fits");
+    }
+
+    #[test]
+    fn local_accounts_are_separate_sources() {
+        let slots = ConnectionSlots::new(8, 1);
+        let _user = slots.claim(Source::LocalUid(1000)).expect("first user");
+        assert!(slots.claim(Source::LocalUid(1000)).is_none());
         assert!(
-            slots.try_acquire(ip(2)).is_some(),
-            "another source still fits"
+            slots.claim(Source::LocalUid(0)).is_some(),
+            "one local user must not lock out another"
         );
     }
 
     #[test]
     fn the_total_cap_holds_across_sources() {
         let slots = ConnectionSlots::new(2, 2);
-        let _a = slots.try_acquire(ip(1)).expect("first");
-        let _b = slots.try_acquire(ip(2)).expect("second");
-        assert!(slots.try_acquire(ip(3)).is_none(), "past the total cap");
+        let _a = slots.admit().expect("first");
+        let _b = slots.admit().expect("second");
+        assert!(slots.admit().is_none(), "past the total cap");
     }
 
     #[test]
-    fn a_closed_connection_frees_its_slot() {
+    fn closed_and_refused_connections_leave_nothing_behind() {
         let slots = ConnectionSlots::new(8, 1);
-        let held = slots.try_acquire(ip(1)).expect("first");
-        assert!(slots.try_acquire(ip(1)).is_none());
+        let held = slots.claim(peer(1)).expect("first");
+        assert!(slots.claim(peer(1)).is_none());
         drop(held);
-        assert!(slots.try_acquire(ip(1)).is_some(), "slot not returned");
-        assert!(slots.counts.lock().expect("lock").len() <= 1);
+        assert!(slots.claim(peer(1)).is_some(), "place not returned");
+        assert!(
+            slots.counts.lock().expect("lock").is_empty(),
+            "an entry outlived its connections"
+        );
     }
 }
