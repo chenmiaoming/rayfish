@@ -374,6 +374,8 @@ async fn run_listener(
     )
     .await??;
     let mut sessions = JoinSet::new();
+    // The total is `MAX_SESSIONS` on accept; this is the per-source share.
+    let slots = super::slots::ConnectionSlots::new(MAX_SESSIONS, super::MAX_CONNECTIONS_PER_SOURCE);
     loop {
         let mut unexpected = [0];
         let (stream, client) = tokio::select! {
@@ -395,6 +397,14 @@ async fn run_listener(
         })
         .await??;
         let Some(grant) = grant else { continue };
+        let source = match local_uid {
+            Some(uid) => super::slots::Source::LocalUid(uid),
+            None => super::slots::Source::Peer(grant.user),
+        };
+        let Some(source_slot) = slots.claim(source) else {
+            tracing::warn!(%client, "mesh SSH: refusing a connection past the per-source limit");
+            continue;
+        };
         disable_nagle(&stream);
         let server = SocketAddr::new(stream.local_addr()?.ip(), grant.mesh_port);
         let hangup = Hangup(StdTcpStream::from(stream.as_fd().try_clone_to_owned()?));
@@ -407,6 +417,7 @@ async fn run_listener(
         let config = Arc::clone(&config);
         sessions.spawn(async move {
             let _hangup = hangup;
+            let _source_slot = source_slot;
             serve(config, stream, handler, LOGIN_GRACE).await;
         });
     }
@@ -669,6 +680,42 @@ mod tests {
         drop(provider);
         assert!(timeout(CONTROL_TIMEOUT, task).await??.is_err());
         assert!(TcpListener::bind(address).await.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn one_peer_cannot_fill_every_session() -> Result<()> {
+        let tcp = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await?;
+        let address = tcp.local_addr()?;
+        let (control, mut provider) = UnixStream::pair()?;
+        let _task = tokio::spawn(run_listener(control, tcp, None, test_config()?));
+        let _: Ready = receive(&mut provider).await?;
+        let peer = iroh::SecretKey::generate().public();
+        let mut clients = Vec::new();
+        for n in 0..=super::super::MAX_CONNECTIONS_PER_SOURCE {
+            let mut client = TcpStream::connect(address).await?;
+            let _: Authorize = receive(&mut provider).await?;
+            let mut policy = UserPolicy::default();
+            policy.add(&[]);
+            let grant = Grant {
+                user: peer,
+                policy,
+                banner: None,
+                mesh_port: 22,
+            };
+            send(&mut provider, &Some(grant)).await?;
+            let mut banner = [0; 128];
+            let read = timeout(CONTROL_TIMEOUT, client.read(&mut banner)).await??;
+            if n < super::super::MAX_CONNECTIONS_PER_SOURCE {
+                assert!(
+                    banner[..read].starts_with(b"SSH-2.0-"),
+                    "session {n} refused"
+                );
+            } else {
+                assert_eq!(read, 0, "a session past the per-source limit was served");
+            }
+            clients.push(client);
+        }
         Ok(())
     }
 
