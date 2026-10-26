@@ -69,6 +69,9 @@ enum Op {
     /// Never answers, standing in for a lookup that blocks forever.
     #[cfg(test)]
     Hang,
+    /// Answers EEXIST if the daemon's descriptor `fd` is open in the helper.
+    #[cfg(test)]
+    Inherited(RawFd),
 }
 
 /// What the helper sends back: an errno (0 for success), the bound file's
@@ -157,6 +160,7 @@ fn run(info: &LoginInfo, path: &Path, op: Op, deadline: Duration) -> Result<Answ
     };
     let (parent_end, child_end) =
         StdUnixStream::pair().context("creating the helper socketpair")?;
+    let inherited = open_descriptors();
 
     // SAFETY: the child runs only `child`, which makes async-signal-safe
     // syscalls on memory set up above and ends in `_exit`, never returning
@@ -166,6 +170,7 @@ fn run(info: &LoginInfo, path: &Path, op: Op, deadline: Duration) -> Result<Answ
         return Err(Error::last_os_error()).context("forking the socket helper");
     }
     if pid == 0 {
+        close_inherited(child_end.as_raw_fd(), &inherited);
         let errno = match become_user() {
             Ok(()) => 0,
             Err(e) => e.raw_os_error().unwrap_or(libc::EPERM),
@@ -187,6 +192,68 @@ fn run(info: &LoginInfo, path: &Path, op: Op, deadline: Duration) -> Result<Answ
         return Err(Error::from_raw_os_error(answer.errno).into());
     }
     Ok(answer)
+}
+
+/// The descriptors open in this process, listed before a fork for platforms
+/// where the child cannot close a range in one call. Empty where it can.
+fn open_descriptors() -> Vec<RawFd> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        static CLOSE_RANGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // SAFETY: an empty range at the top of the fd space closes nothing;
+        // it only asks whether the kernel has close_range.
+        let works = *CLOSE_RANGE.get_or_init(|| unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                libc::c_uint::MAX,
+                libc::c_uint::MAX,
+                0,
+            ) == 0
+        });
+        if works {
+            return Vec::new();
+        }
+    }
+    let dir = if cfg!(any(target_os = "linux", target_os = "android")) {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// In the forked child: close every descriptor above stdio except `keep`, so
+/// a helper the account stalls holds none of the daemon's sockets, pipes or
+/// devices open after the daemon has let go of them.
+fn close_inherited(keep: RawFd, listed: &[RawFd]) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let Ok(keep_u) = libc::c_uint::try_from(keep) else {
+            return;
+        };
+        // SAFETY: close_range only closes descriptors of this (child) process.
+        let closed = unsafe {
+            (keep_u <= 3 || libc::syscall(libc::SYS_close_range, 3, keep_u - 1, 0) == 0)
+                && libc::syscall(libc::SYS_close_range, keep_u + 1, libc::c_uint::MAX, 0) == 0
+        };
+        if closed {
+            return;
+        }
+    }
+    // A kernel without close_range, or not Linux: the list taken before the
+    // fork. A descriptor another thread opened after it can still slip by.
+    for &fd in listed {
+        if fd > 2 && fd != keep {
+            // SAFETY: closes a descriptor of this (child) process.
+            unsafe { libc::close(fd) };
+        }
+    }
 }
 
 /// Wait until the helper's answer (or its exit) is readable on `fd`.
@@ -290,6 +357,14 @@ fn child(
             (Op::Hang, _) => loop {
                 libc::pause();
             },
+            #[cfg(test)]
+            (Op::Inherited(fd), _) => {
+                if libc::fcntl(fd, libc::F_GETFD) == -1 {
+                    Ok(None)
+                } else {
+                    Err(libc::EEXIST)
+                }
+            }
             (Op::Connect | Op::Listen, None) => Err(libc::EINVAL),
         };
         match result {
@@ -545,6 +620,23 @@ mod tests {
             .expect("the helper never answers");
         let io = err.downcast_ref::<Error>().expect("an io error");
         assert_eq!(io.kind(), ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn a_helper_holds_none_of_the_daemons_descriptors() {
+        // A helper the account stalls lives for up to the deadline. Holding
+        // the daemon's listeners and connections that long keeps ports bound
+        // and connections from closing after the daemon let go of them.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let dir = tempfile::tempdir().expect("temp dir");
+        run(
+            &me(),
+            dir.path(),
+            Op::Inherited(listener.as_raw_fd()),
+            HELPER_DEADLINE,
+        )
+        .map(drop)
+        .expect("the helper inherited a daemon socket");
     }
 
     #[tokio::test]
