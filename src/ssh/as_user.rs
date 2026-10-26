@@ -12,6 +12,7 @@
 //! only makes raw syscalls on memory prepared before the fork, the same rule
 //! as the session `pre_exec` hook in [`super::session_env`].
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::{Error, ErrorKind};
 use std::mem::{size_of, zeroed};
@@ -19,12 +20,13 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{AcquireError, Semaphore};
+use tokio::time::timeout;
 
 use super::login::LoginInfo;
 use super::session_env::drop_privs;
@@ -43,7 +45,46 @@ const HELPER_DEADLINE: Duration = Duration::from_secs(10);
 /// forwards would starve everything else in the daemon that uses that pool.
 const MAX_HELPERS: usize = 32;
 
-static HELPERS: Semaphore = Semaphore::const_new(MAX_HELPERS);
+/// Helpers one account may run at once, so an account stalling its own fills
+/// its own places and not the shared ones.
+const MAX_HELPERS_PER_ACCOUNT: usize = 4;
+
+/// How long a request waits for a helper place before failing. `-R` and agent
+/// setup wait inside the connection's session task, which must not stall.
+const QUEUE_WAIT: Duration = Duration::from_secs(2);
+
+static HELPERS: LazyLock<HelperLimits> =
+    LazyLock::new(|| HelperLimits::new(MAX_HELPERS, MAX_HELPERS_PER_ACCOUNT, QUEUE_WAIT));
+
+/// The places helpers run under: one per account, then one of the shared.
+struct HelperLimits {
+    total: Arc<Semaphore>,
+    per_account: usize,
+    accounts: Mutex<HashMap<u32, Arc<Semaphore>>>,
+    queue_wait: Duration,
+}
+
+impl HelperLimits {
+    fn new(total: usize, per_account: usize, queue_wait: Duration) -> Self {
+        Self {
+            total: Arc::new(Semaphore::new(total)),
+            per_account,
+            accounts: Mutex::default(),
+            queue_wait,
+        }
+    }
+
+    /// `uid`'s own places. One entry per account that ever forwarded a
+    /// socket, which the host's account list bounds.
+    fn account(&self, uid: u32) -> Arc<Semaphore> {
+        let mut accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            accounts
+                .entry(uid)
+                .or_insert_with(|| Arc::new(Semaphore::new(self.per_account))),
+        )
+    }
+}
 
 /// The filesystem identity of a socket file a helper bound, so cleanup removes
 /// that file and not a newer socket bound at the same path since.
@@ -126,22 +167,28 @@ async fn run_blocking(info: Arc<LoginInfo>, path: PathBuf, op: Op) -> Result<Ans
     run_gated(&HELPERS, info, path, op).await
 }
 
-/// Wait for a place under `limit`, then run `op` in a helper. A caller that
-/// gives up while queued frees its turn; a running helper keeps its place
-/// until it has been reaped.
+/// Wait for a place under `limits` (the account's own first, then a shared
+/// one), then run `op` in a helper. Waiting longer than the queue allows is a
+/// `TimedOut` error; a caller that gives up while queued frees its turn; a
+/// running helper keeps its places until it has been reaped.
 async fn run_gated(
-    limit: &'static Semaphore,
+    limits: &'static HelperLimits,
     info: Arc<LoginInfo>,
     path: PathBuf,
     op: Op,
 ) -> Result<Answer> {
     let shown = path.display().to_string();
-    let place = limit
-        .acquire()
-        .await
-        .context("socket helper limit closed")?;
+    let places = timeout(limits.queue_wait, async {
+        let own = limits.account(info.uid).acquire_owned().await?;
+        let shared = Arc::clone(&limits.total).acquire_owned().await?;
+        Ok::<_, AcquireError>((own, shared))
+    })
+    .await
+    .map_err(|_| Error::from(ErrorKind::TimedOut))
+    .context("socket helpers are busy")?
+    .context("socket helper limit closed")?;
     tokio::task::spawn_blocking(move || {
-        let _place = place;
+        let _places = places;
         run(&info, &path, op, HELPER_DEADLINE)
     })
     .await
@@ -639,15 +686,23 @@ mod tests {
         .expect("the helper inherited a daemon socket");
     }
 
+    fn leaked_limits(
+        total: usize,
+        per_account: usize,
+        queue_wait: Duration,
+    ) -> &'static HelperLimits {
+        Box::leak(Box::new(HelperLimits::new(total, per_account, queue_wait)))
+    }
+
     #[tokio::test]
     async fn helpers_wait_for_a_free_place() {
         // Helpers occupy blocking-pool threads, so how many run at once is
         // capped across every connection; the rest queue.
-        static ONE: Semaphore = Semaphore::const_new(1);
+        let limits = leaked_limits(1, 1, Duration::from_secs(20));
         let dir = tempfile::tempdir().expect("temp dir");
         let missing = dir.path().join("missing.sock");
-        let held = ONE.acquire().await.expect("the only place");
-        let waiting = run_gated(&ONE, me(), missing, Op::Connect);
+        let held = limits.total.acquire().await.expect("the only place");
+        let waiting = run_gated(limits, me(), missing, Op::Connect);
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(Duration::from_millis(300), &mut waiting)
@@ -659,6 +714,53 @@ mod tests {
         let err = waiting.await.err().expect("nothing listens there");
         let io = err.downcast_ref::<Error>().expect("an io error");
         assert_eq!(io.kind(), ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_fails_instead_of_stalling_the_session() {
+        // `-R` and agent setup wait inside the connection's session task, so
+        // a wait for a helper must end in an error, not hang that session.
+        let limits = leaked_limits(1, 1, Duration::from_millis(200));
+        let dir = tempfile::tempdir().expect("temp dir");
+        let _held = limits.total.acquire().await.expect("the only place");
+        let err = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_gated(limits, me(), dir.path().join("s.sock"), Op::Connect),
+        )
+        .await
+        .expect("the queue wait is bounded")
+        .err()
+        .expect("no helper place");
+        let io = err.downcast_ref::<Error>().expect("an io error");
+        assert_eq!(io.kind(), ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn an_account_at_its_limit_waits_alone() {
+        // One account stalling its own helpers fills only its own places.
+        let limits = leaked_limits(8, 1, Duration::from_millis(200));
+        let info = me();
+        let _held = limits
+            .account(info.uid)
+            .acquire_owned()
+            .await
+            .expect("place");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let err = run_gated(limits, info, dir.path().join("s.sock"), Op::Connect)
+            .await
+            .err()
+            .expect("the account is at its limit");
+        let io = err.downcast_ref::<Error>().expect("an io error");
+        assert_eq!(io.kind(), ErrorKind::TimedOut);
+        assert_eq!(
+            limits.total.available_permits(),
+            8,
+            "it took a shared place"
+        );
+        assert!(
+            limits.account(u32::MAX).try_acquire_owned().is_ok(),
+            "another account is blocked"
+        );
     }
 
     #[tokio::test]
