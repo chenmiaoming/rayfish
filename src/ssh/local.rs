@@ -233,6 +233,7 @@ pub(super) mod tests {
 
     /// A TCP client to `address` owned by a separate `nc` process, the way a
     /// real self-SSH client is. `None` (and the test skips) without `nc`.
+    #[cfg(target_os = "linux")]
     pub(in crate::ssh) fn nc_client(address: SocketAddr) -> Option<tokio::process::Child> {
         tokio::process::Command::new("nc")
             .arg(address.ip().to_string())
@@ -283,10 +284,8 @@ pub(super) mod tests {
         let server = "[::1]:2222".parse().expect("server address");
         let row = "0: 00000000000000000000000001000000:9C40 00000000000000000000000001000000:08AE 01 0:0 0:0 0 1000 0 123";
         let table = format!("header\n{row}\n");
-        assert_eq!(
-            proc_owner(&table, client, server).map(|o| o.uid),
-            Some(1000)
-        );
+        let owner = proc_owner(&table, client, server).expect("the live row");
+        assert_eq!((owner.uid, owner.inode), (1000, 123));
         assert!(proc_owner(&table, server, client).is_none());
         assert!(proc_owner(&table.replace(" 01 ", " 06 "), client, server).is_none());
         assert!(proc_owner(&table.replace(" 123", " 0"), client, server).is_none());
