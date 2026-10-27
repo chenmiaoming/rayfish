@@ -28,6 +28,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Linux: IPv6-only hosts keep configured and system DNS servers for relay
+  and discovery lookups, with IPv6 public fallbacks when needed.
 - Denied network join requests stop retrying, including after restart, and show
   the coordinator denial in status. Invalid credentials and unavailable networks
   receive explicit replies.
