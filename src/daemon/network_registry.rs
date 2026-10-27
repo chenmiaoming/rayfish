@@ -618,6 +618,19 @@ impl NetworkRegistry {
         }
     }
 
+    /// Forget `peer`'s direct-address hints, in memory and on disk, after a dial
+    /// reached a different endpoint at one of them. Its relay hint stays. See
+    /// [`transport::is_wrong_peer`].
+    pub(crate) fn forget_direct_hints(&self, peer: EndpointId) {
+        transport::forget_direct_hints(&self.transport.warm_lookup, peer);
+        if let Err(e) = config::update_settings(|cfg| {
+            drop_direct_hints(&mut cfg.endpoint_hints, peer);
+            Ok(())
+        }) {
+            tracing::warn!(peer = %peer.fmt_short(), error = %e, "failed to forget stale endpoint hints");
+        }
+    }
+
     /// Capture the paths available now and keep listening for a relay-to-direct
     /// upgrade.  This runs once per established mesh connection and exits with
     /// that connection's path-event stream.
@@ -2004,9 +2017,50 @@ fn record_is_published(network: &str) -> bool {
         .is_ok_and(|net| net.is_none_or(|net| net.last_group_hash_published))
 }
 
+/// Drop `peer`'s direct addresses from the persisted hints, keeping its relay,
+/// and the whole entry when nothing is left.
+fn drop_direct_hints(hints: &mut Vec<iroh::EndpointAddr>, peer: EndpointId) {
+    for hint in hints.iter_mut().filter(|h| h.id == peer) {
+        hint.addrs.retain(iroh::TransportAddr::is_relay);
+    }
+    hints.retain(|h| !h.addrs.is_empty());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+
+    /// A stale direct address must go from the persisted hints, or the next
+    /// daemon start loads it back into the warm lookup. The relay stays, as do
+    /// other peers' hints.
+    #[test]
+    fn dropping_direct_hints_keeps_the_relay_and_other_peers() {
+        let peer = SecretKey::generate().public();
+        let other = SecretKey::generate().public();
+        let relay: iroh::RelayUrl = "https://relay.example".parse().unwrap();
+        let stale: SocketAddr = "192.0.2.7:1026".parse().unwrap();
+        let mut hints = vec![
+            iroh::EndpointAddr::new(peer)
+                .with_ip_addr(stale)
+                .with_relay_url(relay.clone()),
+            iroh::EndpointAddr::new(other).with_ip_addr(stale),
+        ];
+
+        drop_direct_hints(&mut hints, peer);
+
+        assert_eq!(
+            hints,
+            vec![
+                iroh::EndpointAddr::new(peer).with_relay_url(relay),
+                iroh::EndpointAddr::new(other).with_ip_addr(stale),
+            ]
+        );
+
+        // A peer with no relay hint loses its entry outright.
+        drop_direct_hints(&mut hints, other);
+        assert_eq!(hints.len(), 1);
+    }
 
     #[test]
     fn network_selector_accepts_public_key_and_invite_code() {

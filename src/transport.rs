@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use anyhow::{Context, Result};
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr,
     address_lookup::{PkarrPublisher, PkarrResolver},
     dns::{DnsResolver, NameserverConfig},
     endpoint::Connection,
@@ -652,6 +652,36 @@ pub(crate) fn is_alpn_mismatch(err: &str) -> bool {
     e.contains("known protocol") || e.contains("application protocol")
 }
 
+/// Heuristic: did a connect fail because whoever answered is not the endpoint
+/// we dialed? iroh surfaces this as rustls' "invalid peer certificate"
+/// (`UnknownIssuer`), since TLS pins the endpoint id. Matched on the message for
+/// the same reason as [`is_alpn_mismatch`].
+///
+/// It means a direct address we hold for the peer now reaches someone else,
+/// typically a NAT mapping that moved to another device. iroh sends the first
+/// handshake packet to every known path at once, so that one stale address
+/// fails the whole dial even when the relay path would have worked.
+pub(crate) fn is_wrong_peer(err: &str) -> bool {
+    err.to_lowercase().contains("invalid peer certificate")
+}
+
+/// Drop `peer`'s direct addresses from the warm lookup, keeping its relay. See
+/// [`is_wrong_peer`]: without the stale address, the next dial reaches the peer
+/// through the relay and holepunching finds its current direct path.
+pub(crate) fn forget_direct_hints(lookup: &MemoryLookup, peer: EndpointId) {
+    let Some(info) = lookup.remove_endpoint_info(peer) else {
+        return;
+    };
+    let relays: Vec<TransportAddr> = EndpointAddr::from(info)
+        .addrs
+        .into_iter()
+        .filter(TransportAddr::is_relay)
+        .collect();
+    if !relays.is_empty() {
+        lookup.add_endpoint_info(EndpointAddr::from_parts(peer, relays));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,6 +986,65 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A direct hint that now reaches a different endpoint fails the dial
+    /// outright, and the error must be recognised as that case so the hint is
+    /// dropped. Afterwards only the relay hint is left for the peer.
+    #[tokio::test]
+    async fn a_hint_reaching_another_endpoint_is_recognised_and_forgotten() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let warm = MemoryLookup::new();
+        let bind = |lookup: Option<MemoryLookup>| async move {
+            let mut builder = Endpoint::builder(presets::N0)
+                .alpns(mesh_alpns())
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup();
+            if let Some(lookup) = lookup {
+                builder = builder.address_lookup(lookup);
+            }
+            builder.bind().await.unwrap()
+        };
+        let dialer = bind(Some(warm.clone())).await;
+        let peer = bind(None).await;
+        let impostor = bind(None).await;
+        let accept = impostor.clone();
+        let acceptor = tokio::spawn(async move {
+            while let Some(incoming) = accept.accept().await {
+                let _ = incoming.await;
+            }
+        });
+        let stale = impostor
+            .addr()
+            .addrs
+            .into_iter()
+            .filter(TransportAddr::is_ip);
+        warm.add_endpoint_info(EndpointAddr::from_parts(peer.id(), stale));
+
+        let alpn = mesh_alpn();
+        let err = timeout(
+            Duration::from_secs(5),
+            connect_to_peer_with_alpn(&dialer, peer.id(), &alpn),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(is_wrong_peer(&err), "{err}");
+        assert!(!is_alpn_mismatch(&err), "{err}");
+
+        let relay: RelayUrl = "https://relay.example".parse().unwrap();
+        warm.add_endpoint_info(EndpointAddr::new(peer.id()).with_relay_url(relay.clone()));
+        forget_direct_hints(&warm, peer.id());
+        let left = EndpointAddr::from(warm.get_endpoint_info(peer.id()).unwrap());
+        assert_eq!(left, EndpointAddr::new(peer.id()).with_relay_url(relay));
+
+        acceptor.abort();
+        dialer.close().await;
+        peer.close().await;
+        impostor.close().await;
     }
 
     #[test]

@@ -468,12 +468,24 @@ impl NetworkRegistry {
                 // shows it instead of plain offline; a different failure can't be
                 // attributed to the version, so clear any prior flag. Success clears
                 // it in `PeerTable::add`.
-                if transport::is_alpn_mismatch(&format!("{e:#}")) {
+                let error = format!("{e:#}");
+                if transport::is_alpn_mismatch(&error) {
                     self.peers.mark_incompatible(peer_id);
                 } else {
                     self.peers.clear_incompatible(&peer_id);
                 }
-                tracing::debug!(peer = %peer_id.fmt_short(), error = %format!("{e:#}"), "dial attempt failed");
+                // Another endpoint answered at an address we hold for this
+                // peer. Forget it so the next dial can reach the peer by relay;
+                // until iroh drops its own copy of the path (within a minute of
+                // the last dial) the dials keep failing the same way. Logged at
+                // warn because it is not the peer being offline, which is the
+                // ordinary failure and stays at debug.
+                if transport::is_wrong_peer(&error) {
+                    self.forget_direct_hints(peer_id);
+                    tracing::warn!(peer = %peer_id.fmt_short(), %error, "dial reached a different endpoint; forgot the peer's direct addresses");
+                } else {
+                    tracing::debug!(peer = %peer_id.fmt_short(), %error, "dial attempt failed");
+                }
                 self.reachability.note_fail(peer_id);
                 return false;
             }

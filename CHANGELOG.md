@@ -28,6 +28,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A peer whose old public address now reaches a different device (a home NAT
+  that reassigned its port) no longer stays unreachable, even across restarts.
+  The stale address is forgotten when the dial reaches the wrong device, and the
+  peer is reached through the relay again within about a minute.
 - Linux: IPv6-only hosts keep configured and system DNS servers for relay
   and discovery lookups, with IPv6 public fallbacks when needed.
 - Denied network join requests stop retrying, including after restart, and show
