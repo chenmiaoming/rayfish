@@ -627,6 +627,11 @@ mod tests {
         let _client = connect(me(), path.clone()).await.expect("connect");
         let (accepted, _) = bound.listener.accept().await.expect("accept");
         let cred = accepted.peer_cred().expect("peer credentials");
+        assert_eq!(cred.uid(), me().uid);
+        // Linux records the pid that connected. macOS reports the last process
+        // to use the peer socket, which is this one once the helper hands it
+        // back; the uid is still the one fixed at connect time.
+        #[cfg(target_os = "linux")]
         assert_ne!(cred.pid(), Some(std::process::id() as i32));
 
         remove_socket(me(), path.clone(), bound.file)
