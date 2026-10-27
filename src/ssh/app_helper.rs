@@ -467,7 +467,7 @@ fn activated_listener() -> Result<UnixListener> {
 mod tests {
     use super::*;
     use russh::client;
-    use russh::keys::{Algorithm, PublicKey};
+    use russh::keys::{Algorithm, PublicKeyOrCertificate};
     use tokio::net::TcpStream;
     use tokio::sync::mpsc::unbounded_channel;
     use tokio::time::Instant;
@@ -477,7 +477,10 @@ mod tests {
     impl client::Handler for AcceptTestKey {
         type Error = russh::Error;
 
-        async fn check_server_key(&mut self, _: &PublicKey) -> Result<bool, Self::Error> {
+        async fn check_server_key(
+            &mut self,
+            _: &PublicKeyOrCertificate,
+        ) -> Result<bool, Self::Error> {
             Ok(true)
         }
     }

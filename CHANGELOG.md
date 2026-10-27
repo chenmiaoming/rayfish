@@ -38,6 +38,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transfer stopped. File transfers require peers using file protocol version 3.
 
 - SSH connections denied by the mesh firewall fail immediately instead of hanging.
+- Mesh SSH: `ssh -A` exits when its command finishes, instead of hanging once
+  the remote side has used the forwarded agent. A `-L` forward to a target that
+  refuses the connection now reports "connect failed".
 - TCP replies remain allowed after closing the write half of a connection.
   Tracking expires after both sides close, while resets remove it immediately.
 
