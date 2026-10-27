@@ -38,6 +38,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transfer stopped. File transfers require peers using file protocol version 3.
 
 - SSH connections denied by the mesh firewall fail immediately instead of hanging.
+- Mesh SSH: `ssh -A` exits when its command finishes, instead of hanging once
+  the remote side has used the forwarded agent. A `-L` forward to a target that
+  refuses the connection now reports "connect failed".
 - TCP replies remain allowed after closing the write half of a connection.
   Tracking expires after both sides close, while resets remove it immediately.
 
@@ -64,6 +67,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seconds, or one of those networks is not running, the pairing fails and can
   be tried again. A primary on an older release gets the earlier one-shot
   request.
+
+### Security
+
+- Mesh SSH: unix-socket forwarding (`ssh -L` and `-R` to a socket path) and
+  agent forwarding now act as the login account instead of as root. Before, a
+  peer allowed to log in as an ordinary account could reach root-only sockets
+  and gain root on the host. Non-root accounts can no longer reverse-forward
+  privileged ports, and sessions, forwards and connections are capped.
+- Mesh SSH: a forward into this host's own SSH port (`ssh -J`, or `ssh -L`
+  to it) is no longer taken for a local login by root. Before, any peer
+  allowed an ordinary login could reach a root shell that way.
 
 ## [0.5.10] - 2026-10-19
 
