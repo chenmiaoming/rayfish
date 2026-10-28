@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use futures::{FutureExt, StreamExt};
 use iroh::TransportAddr;
-use iroh::endpoint::{Connection, PathEvent};
+use iroh::endpoint::{Connection, PathEvent, WeakConnectionHandle};
 use tokio::sync::oneshot;
 
 use crate::control::{self, ControlMsg};
@@ -156,6 +156,16 @@ pub(super) struct PingRun {
     pub details: Vec<PingProbeDetails>,
 }
 
+/// Compare against the previous live connection without keeping it alive.
+/// A stale `stable_id()` alone is insufficient: allocators can reuse the
+/// address after the previous connection has been dropped.
+fn connection_replaced(previous: Option<&WeakConnectionHandle>, current: &Connection) -> bool {
+    previous.is_some_and(|weak| match weak.upgrade() {
+        Some(old) => old.stable_id() != current.stable_id(),
+        None => true,
+    })
+}
+
 pub(super) async fn run_probes(
     count: u32,
     interval_ms: u64,
@@ -167,9 +177,9 @@ pub(super) async fn run_probes(
         probes: Vec::with_capacity(count as usize),
         details: Vec::with_capacity(count as usize),
     };
-    // Keep only an ID between probes so observation does not prolong a
-    // retired connection's lifetime after the live route drops its handle.
-    let mut last_connection_id = None;
+    // Track the previous handle weakly, so a retired connection can be freed.
+    // Keep this across missing routes to detect the next replacement.
+    let mut previous_connection: Option<WeakConnectionHandle> = None;
     for seq in 0..count {
         if seq > 0 {
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
@@ -188,8 +198,8 @@ pub(super) async fn run_probes(
             });
             continue;
         };
-        let connection_changed = last_connection_id.is_some_and(|old| old != conn.stable_id());
-        last_connection_id = Some(conn.stable_id());
+        let connection_changed = connection_replaced(previous_connection.as_ref(), &conn);
+        previous_connection = Some(conn.weak_handle());
         let (rtt, mut detail) = probe_connection(&conn, pending).await;
         detail.connection_changed = connection_changed;
         run.probes.push(rtt);
@@ -284,6 +294,33 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        tokio::join!(
+            client_a.close(),
+            server_a.close(),
+            client_b.close(),
+            server_b.close()
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_connection_tracking_detects_expired_and_live_replacements() {
+        let (client_a, server_a, old, _remote_a) = connection_pair(false).await;
+        let (client_b, server_b, replacement, _remote_b) = connection_pair(false).await;
+        let previous = old.weak_handle();
+
+        // The first probe is not a reconnect; clones are the same connection.
+        assert!(!connection_replaced(None, &old));
+        assert!(!connection_replaced(Some(&previous), &old));
+        assert!(!connection_replaced(Some(&previous), &old.clone()));
+        // Different simultaneously live connections must be distinguished.
+        assert!(connection_replaced(Some(&previous), &replacement));
+
+        drop(old);
+        assert!(previous.upgrade().is_none());
+        // Even if an allocator reuses the old stable_id, the expired weak
+        // handle proves the current connection is a replacement.
+        assert!(connection_replaced(Some(&previous), &replacement));
+
         tokio::join!(
             client_a.close(),
             server_a.close(),
