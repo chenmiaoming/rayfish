@@ -645,15 +645,27 @@ pub async fn ensure_ipv6_addr(tun_name: &str, v6: Ipv6Addr) -> Result<()> {
 /// out the host's default IPv6 route. `200::/7` is the whole range, magic DNS
 /// (`dns::MAGIC_DNS_V6`) included, so nothing else needs a host route.
 /// Idempotent, safe to call on every `up` cycle.
+///
+/// The route carries `RTAX_MTU` and `RTAX_ADVMSS` taken from the TUN's live
+/// MTU, so TCP over the overlay is sized for the device rather than for
+/// whatever the kernel would otherwise assume. A TUN has no ICMP layer: a packet
+/// too large for it is dropped without an ICMPv6 Packet Too Big, so a mismatch
+/// shows up as a connection that carries headers and then stalls.
 #[cfg(target_os = "linux")]
 pub async fn route_peer_range(tun_name: &str) -> Result<()> {
     use rtnetlink::RouteMessageBuilder;
+    use rtnetlink::packet_route::route::{RouteAttribute, RouteMetric};
 
     with_tun_link(tun_name, async |handle, index| {
-        let route = RouteMessageBuilder::<Ipv6Addr>::new()
+        let mtu = tun_link_mtu(&handle, index).await;
+        let mut route = RouteMessageBuilder::<Ipv6Addr>::new()
             .destination_prefix(OVERLAY, OVERLAY_LEN)
             .output_interface(index)
             .build();
+        route.attributes.push(RouteAttribute::Metrics(vec![
+            RouteMetric::Mtu(u32::from(mtu)),
+            RouteMetric::Advmss(u32::from(mss_for_mtu(mtu))),
+        ]));
         handle
             .route()
             .add(route)
@@ -663,6 +675,53 @@ pub async fn route_peer_range(tun_name: &str) -> Result<()> {
             .context("add 200::/7 route via netlink")
     })
     .await
+}
+
+/// The largest TCP MSS in an `mtu`-byte IPv6 packet: the MTU less the 40-byte
+/// IPv6 header and the 20-byte TCP header.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const fn mss_for_mtu(mtu: u16) -> u16 {
+    mtu.saturating_sub(40 + 20)
+}
+
+/// The MTU configured on link `index`, read back rather than assumed:
+/// `configure_mtu` can fall back, and an operator can change it later.
+///
+/// Clamped to the range the mesh carries. When it cannot be read, falls back to
+/// [`MIN_TUN_MTU`], which fits any TUN we create; guessing high would bring the
+/// stall back.
+#[cfg(target_os = "linux")]
+async fn tun_link_mtu(handle: &rtnetlink::Handle, index: u32) -> u16 {
+    use futures::TryStreamExt;
+    use rtnetlink::packet_route::link::LinkAttribute;
+
+    let link = handle
+        .link()
+        .get()
+        .match_index(index)
+        .execute()
+        .try_next()
+        .await;
+    let mtu = link.ok().flatten().and_then(|link| {
+        link.attributes
+            .into_iter()
+            .find_map(|attribute| match attribute {
+                LinkAttribute::Mtu(mtu) => Some(mtu),
+                _ => None,
+            })
+    });
+    match mtu {
+        Some(mtu) => u16::try_from(mtu)
+            .unwrap_or(TUN_MTU)
+            .clamp(MIN_TUN_MTU, TUN_MTU),
+        None => {
+            tracing::warn!(
+                mtu = MIN_TUN_MTU,
+                "could not read the TUN MTU; sizing the overlay route for the minimum"
+            );
+            MIN_TUN_MTU
+        }
+    }
 }
 
 #[cfg(target_os = "illumos")]
@@ -1216,6 +1275,13 @@ mod tests {
         .unwrap();
         assert_eq!(mtu, 1500);
         assert_eq!(attempts, [1500]);
+    }
+
+    #[test]
+    fn mss_follows_the_tun_mtu() {
+        assert_eq!(super::mss_for_mtu(super::MIN_TUN_MTU), 1220);
+        assert_eq!(super::mss_for_mtu(super::TUN_MTU), 1440);
+        assert_eq!(super::mss_for_mtu(0), 0);
     }
 
     /// A narrowing tunnel must delete the family it stopped carrying.

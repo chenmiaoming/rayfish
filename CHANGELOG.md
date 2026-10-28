@@ -9,12 +9,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Mesh SSH no longer limits the number of session channels on one connection.
+- Magic DNS defaults to `partial`: only `.ray` names resolve, and the host's
+  search domains are left alone. Run `ray config set dns on` to restore short
+  names.
 
 ### Fixed
 
 - Completed SSH commands release their session state and forwarded agent sockets
   on reused connections.
 - Status no longer counts denied join requests as waiting for approval.
+- Linux: TCP connections over the mesh no longer stall after the response
+  headers when the TUN MTU is smaller than the host's other links.
+- Windows: `.ray` names resolve in `partial` DNS mode.
+- Packets dropped for exceeding the TUN MTU are now counted and logged as warnings.
 
 ## [0.5.11] - 2026-10-27
 

@@ -31,14 +31,20 @@ use crate::membership::GroupMode;
 pub use ray_proto::TransportMode;
 
 /// How Rayfish integrates its resolver with the host.
+///
+/// - [`On`](Self::On): `.ray` routes to us and the `<network>.ray` and `ray`
+///   search domains are installed, so bare `host` and `host.<network>` resolve.
+/// - [`Partial`](Self::Partial), the default: `.ray` routes to us and nothing
+///   else. No search domains, so the host's own search path is left alone.
+/// - [`Off`](Self::Off): the host's resolver is not touched.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, strum::AsRefStr, strum::EnumString,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum DnsMode {
-    #[default]
     On,
+    #[default]
     Partial,
     Off,
 }
@@ -47,6 +53,9 @@ impl DnsMode {
     pub fn enabled(self) -> bool {
         self != Self::Off
     }
+
+    /// Whether names outside `.ray` are answered. Only [`On`](Self::On)
+    /// installs the search domains that make them meaningful.
     pub fn short_names(self) -> bool {
         self == Self::On
     }
@@ -821,7 +830,7 @@ impl Default for AppConfig {
             relay: ServerOverride::default(),
             discovery_dns: ServerOverride::default(),
             dns_upstreams: ServerOverride::default(),
-            dns_mode: DnsMode::On,
+            dns_mode: DnsMode::default(),
             quic_engine: QuicEngine::default(),
             endpoint_hints: Vec::new(),
             ssh_enabled: false,
@@ -1742,11 +1751,12 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         let s = std::fs::read_to_string(&settings_path).context("reading settings.toml")?;
         toml::from_str(&s).context("parsing settings.toml")?
     } else {
-        // Fresh install: discovery, Magic DNS, on-demand and the pf passthrough
-        // are on, and mesh SSH uses port 22, matching the serde field defaults.
+        // Fresh install: discovery, `.ray`-only Magic DNS, on-demand and the pf
+        // passthrough are on, and mesh SSH uses port 22, matching the serde
+        // field defaults.
         Settings {
             mdns_enabled: true,
-            dns_mode: DnsMode::On,
+            dns_mode: DnsMode::default(),
             ssh_port: default_ssh_port(),
             v4_bridge: true,
             pf_passthrough: true,
@@ -3296,10 +3306,19 @@ name = "test"
     }
 
     #[test]
-    fn fresh_install_enables_dns() {
+    fn fresh_install_defaults_to_partial_dns() {
         let tmp = tempfile::tempdir().unwrap();
         let loaded = load_in(tmp.path()).unwrap();
-        assert_eq!(loaded.dns_mode, DnsMode::On);
+        assert_eq!(loaded.dns_mode, DnsMode::Partial);
+        assert!(loaded.dns_mode.enabled());
+        assert!(!loaded.dns_mode.short_names());
+    }
+
+    #[test]
+    fn a_settings_file_without_a_dns_key_uses_partial() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(SETTINGS_FILE), "mdns_enabled = true\n").unwrap();
+        assert_eq!(load_in(tmp.path()).unwrap().dns_mode, DnsMode::Partial);
     }
 
     #[test]
