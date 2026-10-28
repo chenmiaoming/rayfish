@@ -239,7 +239,7 @@ pub(super) async fn run_pty_session(
         cmd = unsafe { cmd.pre_exec(crate::rlimit::restore_nofile_limit) };
     }
     if drop_in_child {
-        let drop = drop_privs(info.uid, info.gid, &info.name)?;
+        let drop = drop_privs(&info)?;
         // SAFETY: drops supplementary groups, group, and user before exec.
         cmd = unsafe { cmd.pre_exec(drop) };
     }
@@ -311,7 +311,7 @@ pub(super) async fn run_pipe_session(
         cmd.pre_exec(crate::rlimit::restore_nofile_limit);
     }
     if launch.drop_in_child {
-        let drop = drop_privs(info.uid, info.gid, &info.name)?;
+        let drop = drop_privs(&info)?;
         // SAFETY: drops supplementary groups, group, and user before exec.
         unsafe {
             cmd.pre_exec(drop);

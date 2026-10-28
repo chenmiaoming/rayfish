@@ -592,6 +592,22 @@ impl NetworkRegistry {
         }
     }
 
+    /// Forget `peer`'s direct-address hints, in memory and on disk, after a dial
+    /// reached a different endpoint at one of them. Its relay hint stays. See
+    /// [`transport::is_wrong_peer`].
+    pub(crate) async fn forget_direct_hints(&self, peer: EndpointId) {
+        let lookup = self.transport.warm_lookup.clone();
+        match tokio::task::spawn_blocking(move || lookup.forget_direct_hints(peer)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(peer = %peer.fmt_short(), %error, "failed to forget stale endpoint hints");
+            }
+            Err(error) => {
+                tracing::warn!(peer = %peer.fmt_short(), %error, "endpoint hint task failed");
+            }
+        }
+    }
+
     /// Refresh paths while this authenticated connection remains alive. The
     /// worker handles its errors and exits on connection close or daemon shutdown.
     pub(crate) fn remember_connection_hints(self: &Arc<Self>, conn: &Connection) {

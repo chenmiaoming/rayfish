@@ -1,6 +1,6 @@
 //! Process setup shared by PTY and pipe SSH sessions.
 
-use std::ffi::{CStr, CString, OsString};
+use std::ffi::{CStr, OsString};
 use std::io::{Error, ErrorKind};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use super::login::LoginInfo;
 #[cfg(target_os = "linux")]
@@ -225,17 +225,15 @@ fn is_executable(path: &Path) -> bool {
 /// as `initgroups` can deadlock on a lock another thread held at fork time, so
 /// the child only makes the raw set*id calls and checks they took effect.
 pub(super) fn drop_privs(
-    uid: u32,
-    gid: u32,
-    name: &str,
+    info: &LoginInfo,
 ) -> Result<impl FnMut() -> std::io::Result<()> + Send + Sync + 'static> {
+    let (uid, gid) = (info.uid, info.gid);
     let already_dropped =
         uid != 0 && unsafe { libc::geteuid() } == uid && unsafe { libc::getegid() } == gid;
     let groups = if already_dropped {
         Vec::new()
     } else {
-        let name = CString::new(name).context("user name contains NUL")?;
-        group_list(&name, gid)?
+        info.groups.clone()
     };
     Ok(move || {
         if already_dropped {
@@ -266,7 +264,7 @@ pub(super) fn drop_privs(
 }
 
 /// The user's group list (primary group included), as `initgroups` would set.
-fn group_list(name: &CStr, gid: u32) -> Result<Vec<libc::gid_t>> {
+pub(super) fn group_list(name: &CStr, gid: u32) -> Result<Vec<libc::gid_t>> {
     // The kernel's NGROUPS_MAX on Linux; far beyond any real account.
     const MAX_GROUPS: usize = 65_536;
     let mut capacity = 64usize;
@@ -332,6 +330,8 @@ pub(super) fn login_env<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+
     use super::*;
 
     #[test]
@@ -346,6 +346,7 @@ mod tests {
             home: "/home/user".into(),
             shell: "/bin/bash".into(),
             name: "user".into(),
+            groups: vec![1001],
         };
         let launch = scoped_launch(&tools, &info, vec!["-c".into(), "echo hi".into()]);
         assert_eq!(launch.program, Path::new("/usr/bin/systemd-run"));

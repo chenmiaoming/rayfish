@@ -166,6 +166,25 @@ impl WarmLookup {
         })
     }
 
+    /// Drop a peer's direct paths from memory and disk, keeping its relay hints.
+    /// Failed persistence must not prevent recovery in the running daemon.
+    pub(crate) fn forget_direct_hints(&self, peer: EndpointId) -> Result<()> {
+        let _guard = self.updates.lock().unwrap_or_else(|e| e.into_inner());
+        let keep = |hint: &EndpointHint| hint.peer != peer || hint.addr.is_relay();
+        self.hints
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(keep);
+        let now = now()?;
+        let saved = config::update_settings(|cfg| {
+            cfg.endpoint_hints.retain(keep);
+            prune(&mut cfg.endpoint_hints, now);
+            Ok(())
+        })?;
+        *self.hints.write().unwrap_or_else(|e| e.into_inner()) = saved.endpoint_hints;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn add_endpoint_info(&self, addr: EndpointAddr) {
         let now = now().unwrap();
@@ -392,6 +411,56 @@ mod tests {
                 .is_err()
         );
         assert_eq!(lookup.snapshot(now().unwrap()), vec![fresh]);
+    }
+
+    #[test]
+    fn forgetting_direct_hints_keeps_relays_and_other_peers_across_restart() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = TestConfig::new();
+        let lookup = WarmLookup::default();
+        let relay = TransportAddr::Relay("https://relay.example.com".parse().unwrap());
+        lookup
+            .remember(peer(1), vec![hint(peer(1), 1000, 0).addr, relay.clone()])
+            .unwrap();
+        lookup
+            .remember(peer(2), vec![hint(peer(2), 1001, 0).addr])
+            .unwrap();
+        let mut expected = config::load().unwrap().endpoint_hints;
+        expected.retain(|hint| hint.peer != peer(1) || hint.addr == relay);
+
+        lookup.forget_direct_hints(peer(1)).unwrap();
+        assert_eq!(lookup.snapshot(now().unwrap()), expected);
+        assert_eq!(config::load().unwrap().endpoint_hints, expected);
+        let reloaded = WarmLookup::from_hints(config::load().unwrap().endpoint_hints).unwrap();
+        assert_eq!(reloaded.snapshot(now().unwrap()), expected);
+
+        // A peer without relay hints loses its entry entirely.
+        lookup.forget_direct_hints(peer(2)).unwrap();
+        assert!(lookup.resolve(peer(2)).is_none());
+        assert_eq!(config::load().unwrap().endpoint_hints.len(), 1);
+        assert!(lookup.resolve(peer(1)).is_some());
+    }
+
+    #[test]
+    fn failed_persistence_still_forgets_live_direct_hints() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let config = TestConfig::new();
+        let timestamp = now().unwrap().as_secs();
+        let direct = hint(peer(1), 1000, timestamp);
+        let mut relay = direct.clone();
+        relay.addr = TransportAddr::Relay("https://relay.example.com".parse().unwrap());
+        let other = hint(peer(2), 1001, timestamp);
+        let lookup = WarmLookup::from_hints(vec![direct, relay.clone(), other.clone()]).unwrap();
+        std::fs::write(config.directory.path().join("settings.toml"), "invalid = [").unwrap();
+
+        assert!(lookup.forget_direct_hints(peer(1)).is_err());
+        assert_eq!(lookup.snapshot(now().unwrap()), vec![relay, other]);
+        assert!(lookup.forget_direct_hints(peer(2)).is_err());
+        assert!(lookup.resolve(peer(2)).is_none());
     }
 
     #[test]
