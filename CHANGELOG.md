@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `ray ping` records selected-path observations for each probe, reports path
+  changes and reconnects, and stops labeling all replies with the final path.
+  The display distinguishes observations from packet routes and reports unknown
+  paths rather than guessing. Local failures and unanswered probes are no longer
+  described as packet loss. Probes use the current connection and bound the
+  send/reply exchange to one second.
+
 ## [0.5.11] - 2026-10-27
 
 ### Added
