@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Mesh SSH no longer limits the number of session channels on one connection.
+
+### Fixed
+
+- Completed SSH commands release their session state and forwarded agent sockets
+  on reused connections.
+- Status no longer counts denied join requests as waiting for approval.
+
 ## [0.5.11] - 2026-10-27
 
 ### Added

@@ -573,7 +573,7 @@ impl Daemon {
                 roster,
                 count,
                 s.pending_suggestions.len(),
-                s.pending.len(),
+                s.pending.values().filter(|request| !request.denied).count(),
                 s.network_secret_key.as_ref().map(|_| s.mode),
             )
         };
