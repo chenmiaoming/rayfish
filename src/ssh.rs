@@ -41,7 +41,7 @@
 //! connect, bind and cleanup (`-L`, `-R` and agent sockets) runs in a forked
 //! child that has become the login account ([`as_user`]): there the
 //! filesystem *is* the access control, and a listening service reads the
-//! caller's uid from `SO_PEERCRED`. Sessions, forwards and connections are
+//! caller's uid from `SO_PEERCRED`. Forwards and connections are
 //! capped so one peer cannot exhaust the daemon.
 //!
 //! Authorization is evaluated once, when the connection is accepted, so
@@ -93,7 +93,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, info, warn};
 
 use crate::daemon::NetworkRegistry;
@@ -121,10 +121,6 @@ use session_env::{prepare_pts, tty_name};
 pub(crate) use crate::forward::SSH_LISTEN_PORT;
 #[cfg(test)]
 use crate::forward::SSH_PORT;
-
-/// Session channels (shells, `exec`, sftp) one connection may hold open at
-/// once, OpenSSH's `MaxSessions` default.
-const MAX_SESSIONS: usize = 10;
 
 /// Reverse forwards (`ssh -R`, TCP and unix socket together) one connection
 /// may hold at once.
@@ -517,35 +513,12 @@ struct ChannelState {
     env: Vec<(String, String)>,
     /// Live agent-forwarding socket, if the client asked for one (`ssh -A`).
     /// Dropped with the channel, which removes the socket and its directory.
-    agent: Option<AgentSocket>,
+    agent: Option<DropGuard>,
     /// The running child, for `signal` requests. Empty until the session starts.
     child: Option<ChildProc>,
-}
-
-/// The agent-forwarding socket serving one channel: the private directory
-/// holding the socket the session's `SSH_AUTH_SOCK` points at, and the token
-/// that stops its accept loop. Dropping it (when the channel closes, or with
-/// the whole connection) cancels the loop and takes the directory with it.
-struct AgentSocket {
-    dir: PathBuf,
-    token: CancellationToken,
-    login: Arc<LoginInfo>,
-    file: as_user::SocketFile,
-}
-
-impl Drop for AgentSocket {
-    fn drop(&mut self) {
-        self.token.cancel();
-        // The directory belongs to the login account, which can swap what is
-        // inside it, so it is cleared as that account rather than as root.
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(remove_agent_dir(
-                Arc::clone(&self.login),
-                self.dir.clone(),
-                Some(self.file),
-            ));
-        }
-    }
+    /// Cancelled before sending our close, since russh does not call
+    /// `channel_close` for an acknowledgement of a server-initiated close.
+    finished: CancellationToken,
 }
 
 /// A handle for signalling the process behind a session channel. The pid is
@@ -722,6 +695,7 @@ impl SshHandler {
         state.resize_tx = Some(resize_tx);
         let child = ChildProc::new(pty.is_some());
         state.child = Some(child.clone());
+        let finished = state.finished.clone();
 
         tokio::spawn(async move {
             // A PTY was requested -> interactive terminal. Otherwise (`ssh host
@@ -745,6 +719,7 @@ impl SshHandler {
                     Exit::Code(1)
                 }
             };
+            finished.cancel();
             // A process killed by a signal is reported as one, the way a stock
             // sshd does, so the client prints "killed by SIGKILL" instead of a
             // made-up status.
@@ -826,12 +801,8 @@ impl Handler for SshHandler {
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.channels.len() >= MAX_SESSIONS {
-            warn!(peer = %self.user.fmt_short(), limit = MAX_SESSIONS,
-                "mesh SSH: refusing a session past the limit");
-            reply.reject(ChannelOpenFailure::ResourceShortage).await;
-            return Ok(());
-        }
+        self.channels
+            .retain(|_, state| !state.finished.is_cancelled());
         self.channels.insert(
             channel.id(),
             ChannelState {
@@ -1159,9 +1130,10 @@ impl Handler for SshHandler {
         let Some(info) = self.authorized_login() else {
             return Ok(false);
         };
-        if !self.channels.contains_key(&channel) {
+        let Some(state) = self.channels.get(&channel) else {
             return Ok(false);
-        }
+        };
+        let token = state.finished.child_token();
         let peer = self.user;
         let (agent_dir, as_user::Bound { listener, file }) =
             match open_agent_socket(Arc::clone(&info)).await {
@@ -1173,7 +1145,6 @@ impl Handler for SshHandler {
                 }
             };
         let path = agent_dir.join(AGENT_SOCKET);
-        let token = self.token.child_token();
         let accept_token = token.clone();
         let socket = path.clone();
         let handle = session.handle();
@@ -1203,6 +1174,8 @@ impl Handler for SshHandler {
                     }
                 });
             }
+            drop(listener);
+            remove_agent_dir(info, agent_dir, Some(file)).await;
             debug!(socket = %socket.display(), "mesh SSH: agent forwarding closed");
         });
 
@@ -1212,12 +1185,7 @@ impl Handler for SshHandler {
             state
                 .env
                 .push(("SSH_AUTH_SOCK".to_string(), path.display().to_string()));
-            state.agent = Some(AgentSocket {
-                dir: agent_dir,
-                token,
-                login: info,
-                file,
-            });
+            state.agent = Some(token.drop_guard());
         }
         Ok(true)
     }
@@ -1287,11 +1255,8 @@ impl Handler for SshHandler {
         channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Either the client closed the channel or it is answering the close the
-        // session task sent when the process exited. Either way this channel's
-        // state is dead; the rest of the connection's channels carry on.
-        // Anything still running under it loses its client here, so hang it up
-        // (a process that already exited has no pid left to signal).
+        // The client closed the channel. Hang up anything still running under
+        // it; the rest of the connection's channels carry on.
         if let Some(state) = self.channels.remove(&channel)
             && let Some(child) = &state.child
         {
@@ -2094,10 +2059,9 @@ mod tests {
     async fn every_channel_on_one_connection_runs_its_command() {
         // The `ssh -M` / ControlMaster case, and what Zed remote development
         // does: several commands in a row, each its own session channel on one
-        // connection. Per-connection state used to be consumed by the first
-        // channel, so every later one silently ran nothing and hung.
+        // connection. Run beyond the former limit, including finished commands.
         let handle = connect_to_test_server().await;
-        for n in 1..=3 {
+        for n in 1..=12 {
             let mut channel = handle
                 .channel_open_session()
                 .await
@@ -2340,21 +2304,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_connection_cannot_open_unbounded_session_channels() {
+    async fn a_connection_can_open_more_than_ten_session_channels() {
         let handle = connect_to_test_server().await;
         let mut open = Vec::new();
-        for _ in 0..MAX_SESSIONS {
+        for _ in 0..12 {
             open.push(
                 handle
                     .channel_open_session()
                     .await
-                    .expect("open a session within the limit"),
+                    .expect("open a concurrent session"),
             );
         }
-        assert!(
-            handle.channel_open_session().await.is_err(),
-            "a session past the limit must be refused"
-        );
     }
 
     #[tokio::test]
@@ -2605,6 +2565,38 @@ mod tests {
             Some("TERM"),
             "the session must end reported as killed by SIGTERM"
         );
+    }
+
+    #[tokio::test]
+    async fn a_completed_command_removes_its_agent_socket_on_a_reused_connection() {
+        let handle = connect_to_test_server().await;
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .expect("open session channel");
+        channel.agent_forward(true).await.expect("request an agent");
+        channel
+            .exec(true, "printf '%s' \"$SSH_AUTH_SOCK\"")
+            .await
+            .expect("exec");
+        let (path, code) = drain(&mut channel).await;
+        assert_eq!(code, Some(0));
+        assert!(!path.is_empty(), "the command must receive an agent socket");
+        timeout(Duration::from_secs(20), async {
+            while tokio::fs::try_exists(&path)
+                .await
+                .expect("check agent socket")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the agent socket outlived its command");
+
+        handle
+            .channel_open_session()
+            .await
+            .expect("the connection must remain reusable");
     }
 
     #[tokio::test]

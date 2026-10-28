@@ -4599,6 +4599,62 @@ pub(crate) mod accept_handler_tests {
     }
 
     #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_counts_only_join_requests_waiting_for_approval() {
+        let _env = TestConfigDir::new();
+        let daemon = build_headless(false).await.unwrap();
+        let state = make_network_state();
+        let network_key = state.read().unwrap().network_public_key;
+        for seed in [2, 3] {
+            state.write().unwrap().pending.insert(
+                SecretKey::from_bytes(&[seed; 32]).public(),
+                PendingJoin {
+                    denied: false,
+                    hostname: Some(format!("joining-peer-{seed}")),
+                    device_cert: None,
+                    requested_at: Instant::now(),
+                },
+            );
+        }
+        daemon.registry.networks.insert(
+            "test-net".into(),
+            NetworkHandle {
+                name: "test-net".into(),
+                network_key,
+                role: NetworkRole::Coordinator,
+                state,
+                dht_notify: None,
+                cancel: CancellationToken::new(),
+                tasks: Vec::new(),
+                invite_lock: Arc::new(AsyncMutex::new(())),
+                incompatible: None,
+            },
+        );
+        for expected in [2, 1, 0] {
+            let IpcMessage::PendingRequests { requests } =
+                daemon.registry.list_requests("test-net")
+            else {
+                panic!("expected pending requests");
+            };
+            assert_eq!(requests.len(), expected);
+            let IpcMessage::StatusResponse { networks, .. } = daemon.status() else {
+                panic!("expected status");
+            };
+            let network = networks.iter().find(|net| net.name == "test-net").unwrap();
+            assert_eq!(network.pending_requests, expected);
+            if expected > 0 {
+                assert!(matches!(
+                    daemon
+                        .registry
+                        .deny_request("test-net", &requests[0].short_id),
+                    IpcMessage::Ok { .. }
+                ));
+            }
+        }
+        daemon.shutdown_and_close().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn denied_request_is_delivered_on_retry_instead_of_being_queued_again() {
         use iroh::address_lookup::memory::MemoryLookup;

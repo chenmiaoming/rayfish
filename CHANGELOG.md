@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Mesh SSH no longer limits the number of session channels on one connection.
+
 ### Fixed
 
 - `ray ping` records selected-path observations for each probe, reports path
@@ -14,6 +18,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   paths rather than guessing. Local failures and unanswered probes are no longer
   described as packet loss. Probes use the current connection and bound the
   send/reply exchange to one second.
+- Completed SSH commands release their session state and forwarded agent sockets
+  on reused connections.
+- Status no longer counts denied join requests as waiting for approval.
 
 ## [0.5.11] - 2026-10-27
 
