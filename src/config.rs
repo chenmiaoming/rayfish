@@ -38,7 +38,16 @@ pub use ray_proto::TransportMode;
 ///   else. No search domains, so the host's own search path is left alone.
 /// - [`Off`](Self::Off): the host's resolver is not touched.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, strum::AsRefStr, strum::EnumString,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    strum::AsRefStr,
+    strum::EnumString,
+    strum::IntoStaticStr,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]

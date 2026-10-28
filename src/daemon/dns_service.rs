@@ -475,6 +475,10 @@ impl DnsService {
         let configurator = self.configurator.lock().unwrap().clone();
         let result = match configurator.as_ref() {
             Some(c) => c.set_search_domains(&domains, tun_name).await,
+            // Windows routes `.ray` on every set, and with no backend held
+            // nothing serves it, so lookups would time out. `configure`
+            // installs the cached list when it adopts one.
+            None if cfg!(windows) => return,
             None => dns_config::set_manager_search_domains(&domains, tun_name).await,
         };
         match result {

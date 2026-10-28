@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use iroh::EndpointId;
 use rayfish::config;
-use rayfish::config::QuicEngine;
 use rayfish::config::settings::GlobalKey;
+use rayfish::config::{DnsMode, QuicEngine};
 #[cfg(target_os = "macos")]
 use rayfish::daemon::start_embedded_ipc;
 use rayfish::daemon::{DaemonState, build_headless};
@@ -587,12 +587,7 @@ impl Node {
                 .block_on(state.set_mdns_enabled(enabled))
                 .map_err(AppleError::network);
         }
-        let value = match (key, enabled) {
-            (GlobalSetting::QuicFqCodel, true) => QuicEngine::FqCodel.as_ref(),
-            (GlobalSetting::QuicFqCodel, false) => QuicEngine::Standalone.as_ref(),
-            (_, true) => "on",
-            (_, false) => "off",
-        };
+        let value = toggle_value(key, enabled);
         config::update_settings(|settings| config::config_set(settings, key.into(), value, false))
             .map(|_| ())
             .map_err(AppleError::network)
@@ -1087,11 +1082,30 @@ fn expect_ok(response: IpcMessage, operation: &str) -> Result<(), AppleError> {
     }
 }
 
+/// The `ray config` value a toggle writes for `key`.
+fn toggle_value(key: GlobalSetting, enabled: bool) -> &'static str {
+    match (key, enabled) {
+        (GlobalSetting::QuicFqCodel, true) => QuicEngine::FqCodel.as_ref(),
+        (GlobalSetting::QuicFqCodel, false) => QuicEngine::Standalone.as_ref(),
+        // Enabling restores the default mode, not `on`, which would also turn
+        // on short names the user never asked for.
+        (GlobalSetting::Dns, true) => DnsMode::default().into(),
+        (_, true) => "on",
+        (_, false) => "off",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn dns_toggle_turns_on_the_default_mode() {
+        assert_eq!(toggle_value(GlobalSetting::Dns, true), "partial");
+        assert_eq!(toggle_value(GlobalSetting::Dns, false), "off");
+    }
 
     #[test]
     fn unreadable_invitations_leave_the_status_usable() {
