@@ -23,6 +23,7 @@ use ray_proto::ipc::{MachineHostname, UnixTimestampSecs};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control::DeviceCert;
+use crate::endpoint_hints::{self, EndpointHint};
 use crate::management::EnrollmentReceipt;
 use crate::membership::GroupMode;
 
@@ -31,14 +32,29 @@ use crate::membership::GroupMode;
 pub use ray_proto::TransportMode;
 
 /// How Rayfish integrates its resolver with the host.
+///
+/// - [`On`](Self::On): `.ray` routes to us and the `<network>.ray` and `ray`
+///   search domains are installed, so bare `host` and `host.<network>` resolve.
+/// - [`Partial`](Self::Partial), the default: `.ray` routes to us and nothing
+///   else. No search domains, so the host's own search path is left alone.
+/// - [`Off`](Self::Off): the host's resolver is not touched.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, strum::AsRefStr, strum::EnumString,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    strum::AsRefStr,
+    strum::EnumString,
+    strum::IntoStaticStr,
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum DnsMode {
-    #[default]
     On,
+    #[default]
     Partial,
     Off,
 }
@@ -47,6 +63,9 @@ impl DnsMode {
     pub fn enabled(self) -> bool {
         self != Self::Off
     }
+
+    /// Whether names outside `.ray` are answered. Only [`On`](Self::On)
+    /// installs the search domains that make them meaningful.
     pub fn short_names(self) -> bool {
         self == Self::On
     }
@@ -681,8 +700,12 @@ pub struct AppConfig {
     /// back to its normal discovery services when a hint is stale.  Keeping
     /// them lets a restart try a known LAN/direct path or relay immediately,
     /// before a pkarr lookup completes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub endpoint_hints: Vec<iroh::EndpointAddr>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "endpoint_hints::deserialize"
+    )]
+    pub endpoint_hints: Vec<EndpointHint>,
     /// Global toggle for the embedded mesh SSH server (`ray firewall ssh on`).
     /// When on, the daemon listens on each mesh IP's configured SSH port and admits peers
     /// authorized in a network's local or managed SSH allow list. Off by default.
@@ -821,7 +844,7 @@ impl Default for AppConfig {
             relay: ServerOverride::default(),
             discovery_dns: ServerOverride::default(),
             dns_upstreams: ServerOverride::default(),
-            dns_mode: DnsMode::On,
+            dns_mode: DnsMode::default(),
             quic_engine: QuicEngine::default(),
             endpoint_hints: Vec::new(),
             ssh_enabled: false,
@@ -962,8 +985,12 @@ struct Settings {
         deserialize_with = "deserialize_quic_engine"
     )]
     quic_engine: QuicEngine,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    endpoint_hints: Vec<iroh::EndpointAddr>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "endpoint_hints::deserialize"
+    )]
+    endpoint_hints: Vec<EndpointHint>,
     #[serde(default)]
     ssh_enabled: bool,
     #[serde(default = "default_ssh_port")]
@@ -1742,11 +1769,12 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         let s = std::fs::read_to_string(&settings_path).context("reading settings.toml")?;
         toml::from_str(&s).context("parsing settings.toml")?
     } else {
-        // Fresh install: discovery, Magic DNS, on-demand and the pf passthrough
-        // are on, and mesh SSH uses port 22, matching the serde field defaults.
+        // Fresh install: discovery, `.ray`-only Magic DNS, on-demand and the pf
+        // passthrough are on, and mesh SSH uses port 22, matching the serde
+        // field defaults.
         Settings {
             mdns_enabled: true,
-            dns_mode: DnsMode::On,
+            dns_mode: DnsMode::default(),
             ssh_port: default_ssh_port(),
             v4_bridge: true,
             pf_passthrough: true,
@@ -2386,7 +2414,7 @@ mod tests {
     }
     use std::net::Ipv6Addr;
 
-    use iroh::EndpointId;
+    use iroh::{EndpointAddr, EndpointId, TransportAddr};
 
     /// `ray-mobile` used to publish its config directory by writing
     /// `RAYFISH_CONFIG_DIR`, which mutates the process environment and so is
@@ -3235,8 +3263,11 @@ name = "test"
     fn settings_endpoint_hints_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        let hint =
-            iroh::EndpointAddr::new(test_id(7)).with_ip_addr("203.0.113.7:41383".parse().unwrap());
+        let hint = EndpointHint {
+            peer: test_id(7),
+            addr: TransportAddr::Ip("203.0.113.7:1234".parse().unwrap()),
+            last_success: UnixTimestampSecs::from_secs(100),
+        };
         let cfg = AppConfig {
             endpoint_hints: vec![hint.clone()],
             ..Default::default()
@@ -3245,6 +3276,46 @@ name = "test"
 
         let loaded = load_in(dir).unwrap();
         assert_eq!(loaded.endpoint_hints, vec![hint]);
+    }
+
+    #[test]
+    fn legacy_endpoint_hints_are_removed_when_startup_prunes() {
+        #[derive(Serialize)]
+        struct LegacySettings {
+            endpoint_hints: Vec<EndpointAddr>,
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = LegacySettings {
+            endpoint_hints: vec![
+                EndpointAddr::new(test_id(7))
+                    .with_ip_addr("192.0.2.1:1234".parse().unwrap())
+                    .with_relay_url("https://relay.example.com".parse().unwrap()),
+            ],
+        };
+        std::fs::write(
+            tmp.path().join(SETTINGS_FILE),
+            toml::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_in(tmp.path()).unwrap();
+        assert_eq!(loaded.endpoint_hints.len(), 2);
+        assert!(
+            loaded
+                .endpoint_hints
+                .iter()
+                .all(|hint| hint.last_success.as_secs() == 0)
+        );
+        update_settings_in(tmp.path(), |cfg| {
+            endpoint_hints::prune(&mut cfg.endpoint_hints, UnixTimestampSecs::from_secs(100));
+            Ok(())
+        })
+        .unwrap();
+        assert!(load_in(tmp.path()).unwrap().endpoint_hints.is_empty());
+        assert!(
+            !std::fs::read_to_string(tmp.path().join(SETTINGS_FILE))
+                .unwrap()
+                .contains("endpoint_hints")
+        );
     }
 
     /// The IPv6-only cutover deleted the `ipv6-only` setting, and the release
@@ -3296,10 +3367,19 @@ name = "test"
     }
 
     #[test]
-    fn fresh_install_enables_dns() {
+    fn fresh_install_defaults_to_partial_dns() {
         let tmp = tempfile::tempdir().unwrap();
         let loaded = load_in(tmp.path()).unwrap();
-        assert_eq!(loaded.dns_mode, DnsMode::On);
+        assert_eq!(loaded.dns_mode, DnsMode::Partial);
+        assert!(loaded.dns_mode.enabled());
+        assert!(!loaded.dns_mode.short_names());
+    }
+
+    #[test]
+    fn a_settings_file_without_a_dns_key_uses_partial() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(SETTINGS_FILE), "mdns_enabled = true\n").unwrap();
+        assert_eq!(load_in(tmp.path()).unwrap().dns_mode, DnsMode::Partial);
     }
 
     #[test]

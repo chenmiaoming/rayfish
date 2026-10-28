@@ -9,9 +9,10 @@ use std::iter;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{Context, Result};
+#[cfg(test)]
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey,
     address_lookup::{PkarrPublisher, PkarrResolver},
     dns::{DnsResolver, NameserverConfig},
     endpoint::Connection,
@@ -21,6 +22,7 @@ use iroh::{
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 
 use crate::config::{AppConfig, QuicEngine, ServerOverride};
+use crate::endpoint_hints::WarmLookup;
 use crate::exit_node::{LoopPrevention, is_transitable};
 
 mod congestion;
@@ -217,7 +219,7 @@ pub async fn create_endpoint_with_alpns(
     alpns: Vec<Vec<u8>>,
     tor: bool,
     settings: &AppConfig,
-) -> Result<(Endpoint, MemoryLookup)> {
+) -> Result<(Endpoint, WarmLookup)> {
     // Bind the fixed port so the daemon is reachable on a known, forwardable UDP
     // port across restarts. The builder is consumed by `.bind()`, so we rebuild
     // it for the ephemeral fallback. Falling back to port 0 keeps the guarantee
@@ -234,7 +236,7 @@ pub async fn create_endpoint_with_alpns(
     // This lookup is intentionally additive to pkarr/mDNS, never a replacement.
     // Hints came from paths that previously completed an identity-authenticated
     // QUIC handshake; if an address has gone stale, iroh tries discovery as usual.
-    let warm_lookup = MemoryLookup::from_endpoint_info(settings.endpoint_hints.clone());
+    let warm_lookup = WarmLookup::from_hints(settings.endpoint_hints.clone())?;
     let bind = BindConfig {
         secret_key: &secret_key,
         alpns: &alpns,
@@ -277,7 +279,7 @@ struct BindConfig<'a> {
     discovery: &'a ServerOverride,
     nameservers: &'a [IpAddr],
     dns_replace: bool,
-    warm_lookup: &'a MemoryLookup,
+    warm_lookup: &'a WarmLookup,
     quic_engine: QuicEngine,
 }
 
@@ -665,26 +667,10 @@ pub(crate) fn is_wrong_peer(err: &str) -> bool {
     err.to_lowercase().contains("invalid peer certificate")
 }
 
-/// Drop `peer`'s direct addresses from the warm lookup, keeping its relay. See
-/// [`is_wrong_peer`]: without the stale address, the next dial reaches the peer
-/// through the relay and holepunching finds its current direct path.
-pub(crate) fn forget_direct_hints(lookup: &MemoryLookup, peer: EndpointId) {
-    let Some(info) = lookup.remove_endpoint_info(peer) else {
-        return;
-    };
-    let relays: Vec<TransportAddr> = EndpointAddr::from(info)
-        .addrs
-        .into_iter()
-        .filter(TransportAddr::is_relay)
-        .collect();
-    if !relays.is_empty() {
-        lookup.add_endpoint_info(EndpointAddr::from_parts(peer, relays));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh::TransportAddr;
 
     /// A family this host cannot route is dropped whole, however ordinary the
     /// address looks. This is the co-resident-VPN case: Mullvad with IPv6 off
@@ -932,7 +918,7 @@ mod tests {
         use tokio::time::timeout;
 
         let key = SecretKey::generate();
-        let lookup = MemoryLookup::new();
+        let lookup = WarmLookup::default();
         let alpns = mesh_alpns();
         let offline = ServerOverride {
             servers: vec!["https://relay.invalid".into()],
@@ -989,15 +975,14 @@ mod tests {
     }
 
     /// A direct hint that now reaches a different endpoint fails the dial
-    /// outright, and the error must be recognised as that case so the hint is
-    /// dropped. Afterwards only the relay hint is left for the peer.
+    /// outright, and the error must be recognised so its direct hints are dropped.
     #[tokio::test]
-    async fn a_hint_reaching_another_endpoint_is_recognised_and_forgotten() {
+    async fn a_hint_reaching_another_endpoint_is_recognised() {
         use std::time::Duration;
         use tokio::time::timeout;
 
-        let warm = MemoryLookup::new();
-        let bind = |lookup: Option<MemoryLookup>| async move {
+        let warm = WarmLookup::default();
+        let bind = |lookup: Option<WarmLookup>| async move {
             let mut builder = Endpoint::builder(presets::N0)
                 .alpns(mesh_alpns())
                 .relay_mode(RelayMode::Disabled)
@@ -1034,12 +1019,6 @@ mod tests {
         let err = format!("{err:#}");
         assert!(is_wrong_peer(&err), "{err}");
         assert!(!is_alpn_mismatch(&err), "{err}");
-
-        let relay: RelayUrl = "https://relay.example".parse().unwrap();
-        warm.add_endpoint_info(EndpointAddr::new(peer.id()).with_relay_url(relay.clone()));
-        forget_direct_hints(&warm, peer.id());
-        let left = EndpointAddr::from(warm.get_endpoint_info(peer.id()).unwrap());
-        assert_eq!(left, EndpointAddr::new(peer.id()).with_relay_url(relay));
 
         acceptor.abort();
         dialer.close().await;

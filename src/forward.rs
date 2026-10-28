@@ -1187,7 +1187,7 @@ fn send_peer_reply(conn: &Connection, handle: u16, reply: &[u8]) {
     }
 }
 
-/// Minimum gap between two TUN write failure warnings.
+/// Minimum gap between two TUN write failure or oversize-drop warnings.
 const WRITE_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Lets one log line through per `interval` and counts the rest, so a failure
@@ -1245,6 +1245,7 @@ pub fn spawn_tun_writer<W: crate::tun::TunWrite>(
             .set(i64::from(tun.udp_gso_enabled()));
         let mut batch = Vec::with_capacity(batch_size);
         let mut write_error_log = LogBudget::new(WRITE_ERROR_LOG_INTERVAL);
+        let mut oversize_log = LogBudget::new(WRITE_ERROR_LOG_INTERVAL);
         while let Some(packet) = tun_rx.recv().await {
             batch.clear();
             for packet in std::iter::once(packet)
@@ -1258,12 +1259,17 @@ pub fn spawn_tun_writer<W: crate::tun::TunWrite>(
                 }
                 // A peer reader may have queued this just before a TUN reattach
                 // lowered the MTU. Never pass an oversized packet to the device.
+                // Nothing answers it with a Packet Too Big, so count and warn.
                 if packet.len() > usize::from(tun.mtu()) {
-                    tracing::debug!(
-                        len = packet.len(),
-                        mtu = tun.mtu(),
-                        "packet exceeds TUN MTU"
-                    );
+                    stats.record_drop(DropReason::PacketTooBig);
+                    if let Some(suppressed) = oversize_log.allow(Instant::now()) {
+                        tracing::warn!(
+                            len = packet.len(),
+                            mtu = tun.mtu(),
+                            suppressed,
+                            "dropped packet larger than the TUN MTU"
+                        );
+                    }
                     continue;
                 }
                 batch.push(packet);
@@ -1838,6 +1844,24 @@ mod tests {
         handle.await.unwrap();
         let got = sink.lock().await;
         assert_eq!(got.as_slice(), &[b"kept".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn tun_writer_counts_packets_larger_than_the_mtu() {
+        use std::sync::atomic::AtomicBool;
+        let writer = FakeTunWriter::default();
+        let sink = Arc::clone(&writer.written);
+        let (tx, rx) = mpsc::channel::<Bytes>(8);
+        let active = std::sync::Arc::new(AtomicBool::new(true));
+        let stats = Arc::new(ForwardMetrics::default());
+        let handle = spawn_tun_writer(writer, rx, active, Arc::clone(&stats));
+        let oversize = vec![0u8; usize::from(crate::tun::TUN_MTU) + 1];
+        tx.send(Bytes::from(oversize)).await.unwrap();
+        tx.send(Bytes::from_static(b"kept")).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+        assert_eq!(sink.lock().await.as_slice(), &[b"kept".to_vec()]);
+        assert_eq!(stats.drop_count(DropReason::PacketTooBig), 1);
     }
 
     #[tokio::test]
