@@ -481,7 +481,7 @@ impl NetworkRegistry {
                 // warn because it is not the peer being offline, which is the
                 // ordinary failure and stays at debug.
                 if transport::is_wrong_peer(&error) {
-                    self.forget_direct_hints(peer_id);
+                    self.forget_direct_hints(peer_id).await;
                     tracing::warn!(peer = %peer_id.fmt_short(), %error, "dial reached a different endpoint; forgot the peer's direct addresses");
                 } else {
                     tracing::debug!(peer = %peer_id.fmt_short(), %error, "dial attempt failed");

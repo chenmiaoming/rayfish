@@ -14,11 +14,14 @@
 use super::*;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use futures::future::BoxFuture;
+use iroh::TransportAddr;
+use iroh::endpoint::PathEvent;
 use iroh_dns::pkarr::SignedPacket;
 use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::Notify;
+use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval_at};
 
 /// Upper bound on a single on-demand dial. The first packets of a flow wait at
 /// most this long for the connection; past it the buffered packets are dropped and
@@ -41,10 +44,6 @@ const RENAME_RESTORE_WAIT: Duration = Duration::from_secs(10);
 /// ([`NetworkRegistry::reauth_device_locked`]). A failed publish is retried
 /// after five seconds, so this leaves room for a second attempt.
 const REAUTHORIZATION_PUBLISH_WAIT: Duration = Duration::from_secs(10);
-
-/// Keep the persisted hint set small and bounded.  A hint is only a speed-up;
-/// the endpoint id in the QUIC certificate remains the authentication boundary.
-const MAX_WARM_ENDPOINT_HINTS: usize = 64;
 
 /// Finish a `ray rename` that a crash interrupted, from the intent it saved
 /// before anything moved ([`config::rename_network`]): move the network's file
@@ -575,78 +574,82 @@ impl NetworkRegistry {
         }
     }
 
-    /// Remember a path that a peer has just completed an authenticated QUIC
-    /// handshake over.  The in-memory lookup makes it available immediately;
-    /// the compact on-disk cache survives the next daemon restart.  Neither is
-    /// authoritative: stale hints fall through to iroh discovery, and TLS pins
-    /// the endpoint id before a connection can be accepted.
-    fn remember_endpoint_hint(&self, peer: EndpointId, addr: iroh::TransportAddr) {
-        if peer == self.transport.identity.local_identity()
-            || !matches!(
-                addr,
-                iroh::TransportAddr::Ip(_) | iroh::TransportAddr::Relay(_)
-            )
-        {
+    /// Record authenticated paths without blocking an async worker on fsync.
+    async fn remember_endpoint_hints(&self, peer: EndpointId, addrs: Vec<TransportAddr>) {
+        if peer == self.transport.identity.local_identity() || addrs.is_empty() {
             return;
         }
-        let hint = iroh::EndpointAddr::from_parts(peer, [addr]);
-        self.transport.warm_lookup.add_endpoint_info(hint.clone());
-        if let Err(e) = config::update_settings(|cfg| {
-            if let Some(index) = cfg.endpoint_hints.iter().position(|h| h.id == peer) {
-                // Move a refreshed entry to the tail so the bounded vector is a
-                // simple LRU.  Retain every prior path for that identity: a
-                // direct candidate and its relay are useful fallbacks for each
-                // other after a network change.
-                let mut existing = cfg.endpoint_hints.remove(index);
-                existing.addrs.extend(hint.addrs);
-                cfg.endpoint_hints.push(existing);
-            } else {
-                cfg.endpoint_hints.push(hint);
+        let lookup = self.transport.warm_lookup.clone();
+        let result = tokio::task::spawn_blocking(move || lookup.remember(peer, addrs)).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(peer = %peer.fmt_short(), %error, "failed to persist endpoint hint");
             }
-            // Every entry is appended or refreshed at the tail, so trimming from
-            // the front evicts the least-recently useful peer hint.
-            let overflow = cfg
-                .endpoint_hints
-                .len()
-                .saturating_sub(MAX_WARM_ENDPOINT_HINTS);
-            if overflow != 0 {
-                cfg.endpoint_hints.drain(..overflow);
+            Err(error) => {
+                tracing::warn!(peer = %peer.fmt_short(), %error, "endpoint hint task failed");
             }
-            Ok(())
-        }) {
-            tracing::debug!(peer = %peer.fmt_short(), error = %e, "failed to persist warm endpoint hint");
         }
     }
 
     /// Forget `peer`'s direct-address hints, in memory and on disk, after a dial
     /// reached a different endpoint at one of them. Its relay hint stays. See
     /// [`transport::is_wrong_peer`].
-    pub(crate) fn forget_direct_hints(&self, peer: EndpointId) {
-        transport::forget_direct_hints(&self.transport.warm_lookup, peer);
-        if let Err(e) = config::update_settings(|cfg| {
-            drop_direct_hints(&mut cfg.endpoint_hints, peer);
-            Ok(())
-        }) {
-            tracing::warn!(peer = %peer.fmt_short(), error = %e, "failed to forget stale endpoint hints");
+    pub(crate) async fn forget_direct_hints(&self, peer: EndpointId) {
+        let lookup = self.transport.warm_lookup.clone();
+        match tokio::task::spawn_blocking(move || lookup.forget_direct_hints(peer)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(peer = %peer.fmt_short(), %error, "failed to forget stale endpoint hints");
+            }
+            Err(error) => {
+                tracing::warn!(peer = %peer.fmt_short(), %error, "endpoint hint task failed");
+            }
         }
     }
 
-    /// Capture the paths available now and keep listening for a relay-to-direct
-    /// upgrade.  This runs once per established mesh connection and exits with
-    /// that connection's path-event stream.
+    /// Refresh paths while this authenticated connection remains alive. The
+    /// worker handles its errors and exits on connection close or daemon shutdown.
     pub(crate) fn remember_connection_hints(self: &Arc<Self>, conn: &Connection) {
-        let peer = conn.remote_id();
-        for path in conn.paths().iter() {
-            self.remember_endpoint_hint(peer, path.remote_addr().clone());
-        }
         let this = Arc::clone(self);
+        let mut events = conn.path_events();
+        // Take the snapshot before spawning: a short connection may close
+        // before its hint worker first runs.
+        let paths: Vec<_> = conn
+            .paths()
+            .iter()
+            .map(|path| path.remote_addr().clone())
+            .collect();
         let conn = conn.clone();
         tokio::spawn(async move {
             use futures::StreamExt;
-            let mut events = conn.path_events();
-            while let Some(event) = events.next().await {
-                if let iroh::endpoint::PathEvent::Opened { remote_addr, .. } = event {
-                    this.remember_endpoint_hint(peer, remote_addr);
+            let peer = conn.remote_id();
+            if this.shutdown_token.is_cancelled() {
+                return;
+            }
+            this.remember_endpoint_hints(peer, paths).await;
+            let period = crate::endpoint_hints::REFRESH_INTERVAL;
+            let mut refresh = interval_at(TokioInstant::now() + period, period);
+            refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = this.shutdown_token.cancelled() => break,
+                    _ = conn.closed() => break,
+                    _ = refresh.tick() => {
+                        let paths = conn
+                            .paths()
+                            .iter()
+                            .map(|path| path.remote_addr().clone())
+                            .collect();
+                        this.remember_endpoint_hints(peer, paths).await;
+                    }
+                    event = events.next() => match event {
+                        Some(PathEvent::Opened { remote_addr, .. }) => {
+                            this.remember_endpoint_hints(peer, vec![remote_addr]).await;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
                 }
             }
         });
@@ -2017,50 +2020,9 @@ fn record_is_published(network: &str) -> bool {
         .is_ok_and(|net| net.is_none_or(|net| net.last_group_hash_published))
 }
 
-/// Drop `peer`'s direct addresses from the persisted hints, keeping its relay,
-/// and the whole entry when nothing is left.
-fn drop_direct_hints(hints: &mut Vec<iroh::EndpointAddr>, peer: EndpointId) {
-    for hint in hints.iter_mut().filter(|h| h.id == peer) {
-        hint.addrs.retain(iroh::TransportAddr::is_relay);
-    }
-    hints.retain(|h| !h.addrs.is_empty());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
-
-    /// A stale direct address must go from the persisted hints, or the next
-    /// daemon start loads it back into the warm lookup. The relay stays, as do
-    /// other peers' hints.
-    #[test]
-    fn dropping_direct_hints_keeps_the_relay_and_other_peers() {
-        let peer = SecretKey::generate().public();
-        let other = SecretKey::generate().public();
-        let relay: iroh::RelayUrl = "https://relay.example".parse().unwrap();
-        let stale: SocketAddr = "192.0.2.7:1026".parse().unwrap();
-        let mut hints = vec![
-            iroh::EndpointAddr::new(peer)
-                .with_ip_addr(stale)
-                .with_relay_url(relay.clone()),
-            iroh::EndpointAddr::new(other).with_ip_addr(stale),
-        ];
-
-        drop_direct_hints(&mut hints, peer);
-
-        assert_eq!(
-            hints,
-            vec![
-                iroh::EndpointAddr::new(peer).with_relay_url(relay),
-                iroh::EndpointAddr::new(other).with_ip_addr(stale),
-            ]
-        );
-
-        // A peer with no relay hint loses its entry outright.
-        drop_direct_hints(&mut hints, other);
-        assert_eq!(hints.len(), 1);
-    }
 
     #[test]
     fn network_selector_accepts_public_key_and_invite_code() {

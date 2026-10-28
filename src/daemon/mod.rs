@@ -2351,6 +2351,8 @@ pub(crate) mod accept_handler_tests {
         identity: IrohIdentityProvider,
         blob_store: FsStore,
     ) -> Arc<NetworkRegistry> {
+        use crate::endpoint_hints::WarmLookup;
+
         let transport = Arc::new(Transport::new(
             endpoint,
             identity,
@@ -2358,7 +2360,7 @@ pub(crate) mod accept_handler_tests {
             Arc::new(ForwardMetrics::default()),
             TransportBootstrap {
                 lan_peers: Arc::new(LanPeers::new()),
-                warm_lookup: iroh::address_lookup::memory::MemoryLookup::new(),
+                warm_lookup: WarmLookup::default(),
                 pkarr_relay_url: dht::pkarr_relay_url(&config::ServerOverride::default()),
             },
         ));
