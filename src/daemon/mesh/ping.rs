@@ -304,8 +304,8 @@ mod tests {
 
     #[tokio::test]
     async fn ping_connection_tracking_detects_expired_and_live_replacements() {
-        let (client_a, server_a, old, _remote_a) = connection_pair(false).await;
-        let (client_b, server_b, replacement, _remote_b) = connection_pair(false).await;
+        let (client_a, server_a, old, remote_a) = connection_pair(false).await;
+        let (client_b, server_b, replacement, remote_b) = connection_pair(false).await;
         let previous = old.weak_handle();
 
         // The first probe is not a reconnect; clones are the same connection.
@@ -315,18 +315,29 @@ mod tests {
         // Different simultaneously live connections must be distinguished.
         assert!(connection_replaced(Some(&previous), &replacement));
 
+        // Dropping one application handle is not sufficient: the QUIC
+        // endpoint may still hold the connection while it is shutting down.
+        old.close(0u32.into(), b"retired");
         drop(old);
-        assert!(previous.upgrade().is_none());
-        // Even if an allocator reuses the old stable_id, the expired weak
-        // handle proves the current connection is a replacement.
+        drop(remote_a);
+        tokio::join!(client_a.close(), server_a.close());
+        drop(client_a);
+        drop(server_a);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while previous.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retired connection should eventually release its strong handles");
+
+        // An expired weak handle proves replacement even if a later
+        // connection eventually reuses the same stable_id allocation.
         assert!(connection_replaced(Some(&previous), &replacement));
 
-        tokio::join!(
-            client_a.close(),
-            server_a.close(),
-            client_b.close(),
-            server_b.close()
-        );
+        drop(replacement);
+        drop(remote_b);
+        tokio::join!(client_b.close(), server_b.close());
     }
 
     #[tokio::test]
