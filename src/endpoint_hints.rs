@@ -13,7 +13,7 @@ use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use ray_proto::ipc::UnixTimestampSecs;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::config;
+use crate::config::{self, AppConfig};
 
 const MAX_PEERS: usize = 64;
 const MAX_PATHS_PER_PEER: usize = 8;
@@ -96,6 +96,23 @@ pub(crate) fn prune(hints: &mut Vec<EndpointHint>, now: UnixTimestampSecs) {
     hints.reverse();
 }
 
+/// Load usable settings even when cache cleanup cannot be saved.
+pub(crate) fn load_for_startup() -> Result<AppConfig> {
+    let mut loaded = config::load()?;
+    let now = now()?;
+    prune(&mut loaded.endpoint_hints, now);
+    match config::update_settings(|cfg| {
+        prune(&mut cfg.endpoint_hints, now);
+        Ok(())
+    }) {
+        Ok(saved) => Ok(saved),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "failed to persist endpoint hint cleanup");
+            Ok(loaded)
+        }
+    }
+}
+
 /// The live lookup filters expiry on every resolution, even on an idle daemon.
 /// Writers serialize disk commits and publication; readers only lock metadata.
 #[derive(Debug, Clone, Default)]
@@ -122,9 +139,12 @@ impl WarmLookup {
     fn update(&self, update: impl FnOnce(&mut Vec<EndpointHint>, UnixTimestampSecs)) -> Result<()> {
         let _guard = self.updates.lock().unwrap_or_else(|e| e.into_inner());
         let now = now()?;
+        // Memory is authoritative: a failed deletion may still be on disk.
+        let mut hints = self.snapshot(now);
+        update(&mut hints, now);
+        prune(&mut hints, now);
         let saved = config::update_settings(|cfg| {
-            update(&mut cfg.endpoint_hints, now);
-            prune(&mut cfg.endpoint_hints, now);
+            cfg.endpoint_hints = hints;
             Ok(())
         })?;
         *self.hints.write().unwrap_or_else(|e| e.into_inner()) = saved.endpoint_hints;
@@ -176,9 +196,9 @@ impl WarmLookup {
             .unwrap_or_else(|e| e.into_inner())
             .retain(keep);
         let now = now()?;
+        let hints = self.snapshot(now);
         let saved = config::update_settings(|cfg| {
-            cfg.endpoint_hints.retain(keep);
-            prune(&mut cfg.endpoint_hints, now);
+            cfg.endpoint_hints = hints;
             Ok(())
         })?;
         *self.hints.write().unwrap_or_else(|e| e.into_inner()) = saved.endpoint_hints;
@@ -461,6 +481,148 @@ mod tests {
         assert_eq!(lookup.snapshot(now().unwrap()), vec![relay, other]);
         assert!(lookup.forget_direct_hints(peer(2)).is_err());
         assert!(lookup.resolve(peer(2)).is_none());
+    }
+
+    #[test]
+    fn failed_deletions_survive_later_updates() {
+        use futures::StreamExt;
+
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let config = TestConfig::new();
+        let lookup = WarmLookup::default();
+        let direct = hint(peer(1), 1000, 0).addr;
+        let relay = TransportAddr::Relay("https://relay.example.com".parse().unwrap());
+        lookup
+            .remember(peer(1), vec![direct.clone(), relay.clone()])
+            .unwrap();
+        lookup
+            .remember(peer(2), vec![hint(peer(2), 1001, 0).addr])
+            .unwrap();
+        let settings = config.directory.path().join("settings.toml");
+        let saved = std::fs::read_to_string(&settings).unwrap();
+        std::fs::write(&settings, "invalid = [").unwrap();
+        assert!(lookup.forget_direct_hints(peer(1)).is_err());
+        assert!(lookup.forget_direct_hints(peer(2)).is_err());
+
+        std::fs::write(&settings, saved).unwrap();
+        lookup
+            .remember(peer(3), vec![hint(peer(3), 1002, 0).addr])
+            .unwrap();
+        let resolved =
+            futures::executor::block_on(lookup.resolve(peer(1)).unwrap().collect::<Vec<_>>());
+        let addrs: Vec<_> = resolved
+            .into_iter()
+            .flat_map(|item| item.unwrap().into_endpoint_addr().addrs)
+            .collect();
+        assert_eq!(addrs, vec![relay]);
+        assert!(lookup.resolve(peer(2)).is_none());
+        let saved = config::load().unwrap().endpoint_hints;
+        assert!(!saved.iter().any(|hint| hint.peer == peer(2)));
+        assert!(!saved.iter().any(|hint| hint.addr == direct));
+
+        // An authenticated connection can make the same address usable again.
+        lookup.remember(peer(1), vec![direct.clone()]).unwrap();
+        assert!(
+            config::load()
+                .unwrap()
+                .endpoint_hints
+                .iter()
+                .any(|hint| hint.addr == direct)
+        );
+    }
+
+    #[test]
+    fn failed_deletion_survives_another_peers_deletion() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let config = TestConfig::new();
+        let lookup = WarmLookup::default();
+        lookup
+            .remember(peer(1), vec![hint(peer(1), 1000, 0).addr])
+            .unwrap();
+        lookup
+            .remember(peer(2), vec![hint(peer(2), 1001, 0).addr])
+            .unwrap();
+        let settings = config.directory.path().join("settings.toml");
+        let saved = std::fs::read_to_string(&settings).unwrap();
+        std::fs::write(&settings, "invalid = [").unwrap();
+        assert!(lookup.forget_direct_hints(peer(1)).is_err());
+
+        std::fs::write(&settings, saved).unwrap();
+        lookup.forget_direct_hints(peer(2)).unwrap();
+        assert!(lookup.resolve(peer(1)).is_none());
+        assert!(config::load().unwrap().endpoint_hints.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_prunes_hints_when_persistence_fails() {
+        use std::process::Command;
+
+        const CHILD_ENV: &str = "RAYFISH_TEST_HINT_WRITE_FAILURE";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "endpoint_hints::tests::startup_prunes_hints_when_persistence_fails",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = TestConfig::new();
+        let timestamp = now().unwrap().as_secs();
+        let expired = hint(peer(1), 1000, timestamp - MAX_AGE.as_secs());
+        let fresh = hint(peer(1), 1001, timestamp);
+        config::update_settings(|cfg| {
+            cfg.mdns_enabled = false;
+            cfg.endpoint_hints = vec![expired.clone(), fresh.clone()];
+            Ok(())
+        })
+        .unwrap();
+
+        // SAFETY: only this test runs in the child. The limit and signal handler
+        // affect no other test process and disappear when the child exits.
+        unsafe {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit), 0);
+            limit.rlim_cur = 0;
+            assert_ne!(libc::signal(libc::SIGXFSZ, libc::SIG_IGN), libc::SIG_ERR);
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+        }
+        let loaded = load_for_startup().unwrap();
+        assert_eq!(loaded.endpoint_hints, vec![fresh]);
+        assert!(!loaded.mdns_enabled);
+        // The failed save left the expired path on disk, but not in use.
+        assert!(config::load().unwrap().endpoint_hints.contains(&expired));
+    }
+
+    #[test]
+    fn startup_still_rejects_invalid_settings() {
+        let _lock = config::CONFIG_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let config = TestConfig::new();
+        std::fs::write(config.directory.path().join("settings.toml"), "invalid = [").unwrap();
+        assert!(load_for_startup().is_err());
     }
 
     #[test]

@@ -19,6 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Cached peer addresses expire after seven days, with up to eight paths per
   peer and 64 peers in both saved hints and the running lookup. Connected paths
   refresh hourly. Old hints without timestamps are discarded on upgrade.
+  Cache write failures do not prevent startup or restore rejected addresses.
 - Completed SSH commands release their session state and forwarded agent sockets
   on reused connections.
 - Status no longer counts denied join requests as waiting for approval.
