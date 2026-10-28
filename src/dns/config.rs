@@ -493,7 +493,15 @@ pub async fn clear_search_domains(tun_name: &str) {
     // resolved never held it.
     #[cfg(target_os = "linux")]
     revert_resolved_link(tun_name).await;
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    // Windows likewise: its set path always routes `.ray` too.
+    #[cfg(windows)]
+    {
+        let _ = tun_name;
+        if let Err(e) = clear_search_domains_windows().await {
+            tracing::warn!(error = %e, "failed to clear search domains");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     if let Err(e) = set_manager_search_domains(&[], tun_name).await {
         tracing::warn!(error = %e, "failed to clear search domains");
     }
@@ -1313,14 +1321,15 @@ mod tests {
             &["corp.ray".to_owned(), "ray".to_owned()],
             &["corp".to_owned(), "other".to_owned()],
         );
-        assert_eq!(nrpt_domains, ["corp.ray", "ray", "corp", "other"]);
+        assert_eq!(nrpt_domains, ["ray", "corp.ray", "corp", "other"]);
+        assert_eq!(windows_nrpt_domains(&[], &[]), ["ray"]);
         let match_domains = windows_dns_reconcile_script(
             &nrpt_domains,
             &["corp.ray".to_owned(), "ray".to_owned()],
             &["corp.ray".to_owned(), "ray".to_owned()],
             "txn-match",
         );
-        assert!(match_domains.contains("$desired=@('corp.ray','ray','corp','other')"));
+        assert!(match_domains.contains("$desired=@('ray','corp.ray','corp','other')"));
         assert!(match_domains.contains("$suffixDesired=@('corp.ray','ray')"));
         assert!(match_domains.contains("$nextManaged=@('corp.ray','ray')"));
         assert!(match_domains.contains("$next=@($foreign + $suffixDesired"));
