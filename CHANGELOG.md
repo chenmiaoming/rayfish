@@ -21,6 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Linux: TCP connections over the mesh no longer stall after the response
   headers when the TUN MTU is smaller than the host's other links.
 - Windows: `.ray` names resolve in `partial` DNS mode.
+- With `dns off`, joining or leaving a network no longer routes `.ray` to
+  Rayfish on Linux and Windows.
 - Packets dropped for exceeding the TUN MTU are now counted and logged as warnings.
 
 ## [0.5.11] - 2026-10-27

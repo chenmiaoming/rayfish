@@ -646,9 +646,11 @@ pub async fn ensure_ipv6_addr(tun_name: &str, v6: Ipv6Addr) -> Result<()> {
 /// (`dns::MAGIC_DNS_V6`) included, so nothing else needs a host route.
 /// Idempotent, safe to call on every `up` cycle.
 ///
-/// The route carries `RTAX_MTU` and `RTAX_ADVMSS` taken from the TUN's live
-/// MTU, so TCP over the overlay is sized for the device rather than for
-/// whatever the kernel would otherwise assume. A TUN has no ICMP layer: a packet
+/// The route carries `RTAX_MTU` taken from the TUN's live MTU, so TCP over the
+/// overlay is sized for the device rather than for whatever the kernel would
+/// otherwise assume. `RTAX_ADVMSS` is left unset: the kernel derives it from
+/// the route MTU, which it also lowers if the device MTU drops later, where a
+/// fixed value would keep advertising the old size. A TUN has no ICMP layer: a packet
 /// too large for it is dropped without an ICMPv6 Packet Too Big, so a mismatch
 /// shows up as a connection that carries headers and then stalls.
 #[cfg(target_os = "linux")]
@@ -662,10 +664,11 @@ pub async fn route_peer_range(tun_name: &str) -> Result<()> {
             .destination_prefix(OVERLAY, OVERLAY_LEN)
             .output_interface(index)
             .build();
-        route.attributes.push(RouteAttribute::Metrics(vec![
-            RouteMetric::Mtu(u32::from(mtu)),
-            RouteMetric::Advmss(u32::from(mss_for_mtu(mtu))),
-        ]));
+        route
+            .attributes
+            .push(RouteAttribute::Metrics(vec![RouteMetric::Mtu(u32::from(
+                mtu,
+            ))]));
         handle
             .route()
             .add(route)
@@ -701,21 +704,25 @@ async fn tun_link_mtu(handle: &rtnetlink::Handle, index: u32) -> u16 {
         .match_index(index)
         .execute()
         .try_next()
-        .await;
-    let mtu = link.ok().flatten().and_then(|link| {
+        .await
+        .context("query the TUN link")
+        .and_then(|link| link.context("TUN link not found"));
+    let mtu = link.and_then(|link| {
         link.attributes
             .into_iter()
             .find_map(|attribute| match attribute {
                 LinkAttribute::Mtu(mtu) => Some(mtu),
                 _ => None,
             })
+            .context("TUN link has no MTU attribute")
     });
     match mtu {
-        Some(mtu) => u16::try_from(mtu)
+        Ok(mtu) => u16::try_from(mtu)
             .unwrap_or(TUN_MTU)
             .clamp(MIN_TUN_MTU, TUN_MTU),
-        None => {
+        Err(e) => {
             tracing::warn!(
+                error = %format!("{e:#}"),
                 mtu = MIN_TUN_MTU,
                 "could not read the TUN MTU; sizing the overlay route for the minimum"
             );
